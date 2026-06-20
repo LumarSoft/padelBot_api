@@ -7,11 +7,179 @@ datasource db {
   provider = "mysql"
 }
 
-model User {
-  id        Int      @id @default(autoincrement())
-  email     String   @unique
-  password  String
-  name      String?
+/// A club (tenant). Every tenant-scoped record relates back to a Club.
+model Club {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  users                User[]
+  courts               Court[]
+  slots                Slot[]
+  bookings             Booking[]
+  recurringBookings    RecurringBooking[]
+  whatsappLines        WhatsAppLine[]
+  conversationSessions ConversationSession[]
+}
+
+enum Role {
+  OWNER
+  STAFF
+}
+
+/// A physical court the club offers slots on.
+model Court {
+  id        String   @id @default(cuid())
+  name      String
+  /// Default price (in cents) applied to slots created on this court.
+  priceCents Int     @default(0)
+  clubId    String
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  slots     Slot[]
+  recurringBookings RecurringBooking[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clubId])
+}
+
+enum SlotStatus {
+  AVAILABLE
+  BOOKED
+  BLOCKED
+}
+
+/// A bookable time slot (turno) on a court. Prices are stored in cents.
+model Slot {
+  id         String     @id @default(cuid())
+  courtId    String
+  court      Court      @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  clubId     String
+  club       Club       @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  startsAt   DateTime
+  endsAt     DateTime
+  priceCents Int
+  status     SlotStatus @default(AVAILABLE)
+  bookings   Booking[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@index([clubId])
+  @@index([courtId])
+  @@index([clubId, startsAt])
+}
+
+model User {
+  id               Int                @id @default(autoincrement())
+  email            String             @unique
+  password         String
+  name             String
+  role             Role               @default(STAFF)
+  clubId           String
+  club             Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  bookings         Booking[]
+  recurringBookings RecurringBooking[]
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@index([clubId])
+}
+
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+}
+
+/// A reservation linking a player to a specific slot.
+model Booking {
+  id                 String            @id @default(cuid())
+  slotId             String
+  slot               Slot              @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  clubId             String
+  club               Club              @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  playerName         String
+  playerPhone        String?
+  status             BookingStatus     @default(CONFIRMED)
+  notes              String?
+  bookedByUserId     Int?
+  bookedByUser       User?             @relation(fields: [bookedByUserId], references: [id])
+  recurringBookingId String?
+  recurringBooking   RecurringBooking? @relation(fields: [recurringBookingId], references: [id], onDelete: SetNull)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  @@index([clubId])
+  @@index([slotId])
+  @@index([recurringBookingId])
+  @@index([clubId, status])
+}
+
+/// Maps a Meta WhatsApp Business phone number ID to a club (tenant).
+/// The bot uses this to resolve which club owns an incoming message.
+model WhatsAppLine {
+  id            String   @id @default(cuid())
+  /// Meta's phone_number_id from the webhook — globally unique across all clubs.
+  phoneNumberId String   @unique
+  /// Human-readable phone number for display (e.g. "+54 9 11 1234-5678").
+  displayPhone  String
+  clubId        String
+  club          Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([clubId])
+}
+
+/// Bot conversation state for a WhatsApp user within a club.
+/// Persists the state machine position and partial booking data between messages.
+model ConversationSession {
+  id        String   @id @default(cuid())
+  /// WhatsApp sender ID (phone in E.164 without '+', e.g. "5491112345678").
+  waId      String
+  clubId    String
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Current state machine node (BotState enum value stored as string).
+  state     String   @default("IDLE")
+  /// Partial booking/cancel data accumulated across turns (JSON blob).
+  context   Json
+  /// Session expires after inactivity; reset to IDLE on next message.
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([waId, clubId])
+  @@index([clubId])
+}
+
+/// A weekly recurring reservation created by an admin.
+/// When created, it is automatically applied to all matching available slots.
+model RecurringBooking {
+  id              String    @id @default(cuid())
+  clubId          String
+  club            Club      @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  courtId         String
+  court           Court     @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  /// 0 = Sunday, 1 = Monday … 6 = Saturday
+  dayOfWeek       Int
+  /// "HH:MM" matching one of the defined slot start times
+  slotStart       String
+  /// "HH:MM" matching one of the defined slot end times
+  slotEnd         String
+  playerName      String
+  playerPhone     String
+  priceCents      Int
+  notes           String?
+  isActive        Boolean   @default(true)
+  createdByUserId Int
+  createdByUser   User      @relation(fields: [createdByUserId], references: [id])
+  bookings        Booking[]
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([clubId])
+  @@index([courtId])
+  @@index([clubId, courtId, dayOfWeek])
 }
