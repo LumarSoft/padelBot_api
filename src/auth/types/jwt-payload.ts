@@ -1,0 +1,22 @@
+/** Role as exposed to clients / encoded in the JWT (lowercase). */
+export type AuthRole = 'owner' | 'staff'
+
+/** Claims stored in the signed JWT. */
+export interface JwtPayload {
+  sub: string
+  email: string
+  name: string
+  clubId: string
+  clubName: string
+  role: AuthRole
+}
+
+/** The authenticated user attached to the request and returned to clients. */
+export interface AuthenticatedUser {
+  id: string
+  email: string
+  name: string
+  clubId: string
+  clubName: string
+  role: AuthRole
+}
