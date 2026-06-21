@@ -7,6 +7,9 @@ const courtSelect = {
   id: true,
   name: true,
   priceCents: true,
+  openTime: true,
+  closeTime: true,
+  courtType: true,
   createdAt: true,
   updatedAt: true,
 } as const
@@ -36,7 +39,14 @@ export class CourtsService {
 
   create(clubId: string, dto: CreateCourtDto) {
     return this.prisma.court.create({
-      data: { name: dto.name, priceCents: dto.priceCents, clubId },
+      data: {
+        name: dto.name,
+        priceCents: dto.priceCents,
+        openTime: dto.openTime,
+        closeTime: dto.closeTime,
+        courtType: dto.courtType,
+        clubId,
+      },
       select: courtSelect,
     })
   }
@@ -45,7 +55,13 @@ export class CourtsService {
     await this.findOne(clubId, id)
     return this.prisma.court.update({
       where: { id },
-      data: { name: dto.name, priceCents: dto.priceCents },
+      data: {
+        name: dto.name,
+        priceCents: dto.priceCents,
+        openTime: dto.openTime,
+        closeTime: dto.closeTime,
+        courtType: dto.courtType,
+      },
       select: courtSelect,
     })
   }

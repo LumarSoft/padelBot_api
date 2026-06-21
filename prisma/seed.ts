@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import * as bcrypt from 'bcrypt'
 import { PrismaMariaDb } from '@prisma/adapter-mariadb'
-import { PrismaClient, Prisma } from '../generated/prisma/client'
+import { PrismaClient } from '../generated/prisma/client'
 
 const DEMO_EMAIL = 'admin@clubdemo.com'
 const DEMO_PASSWORD = 'padel1234'
@@ -31,36 +31,26 @@ async function main(): Promise<void> {
       },
     })
 
-    // Demo courts + slots (only if the club has no courts yet).
     const existingCourts = await prisma.court.count({ where: { clubId: club.id } })
     if (existingCourts === 0) {
-      const court1 = await prisma.court.create({
-        data: { name: 'Cancha 1', clubId: club.id },
+      await prisma.court.createMany({
+        data: [
+          { name: 'Cancha 1', priceCents: 1200000, clubId: club.id },
+          { name: 'Cancha 2', priceCents: 1200000, clubId: club.id },
+        ],
       })
-      const court2 = await prisma.court.create({
-        data: { name: 'Cancha 2', clubId: club.id },
-      })
+      console.log('  Seeded 2 courts.')
+    }
 
-      // A handful of 90-minute slots for today, from 18:00.
-      const base = new Date()
-      base.setHours(18, 0, 0, 0)
-      const courts = [court1, court2]
-      const slots: Prisma.SlotCreateManyInput[] = []
-      for (let i = 0; i < 4; i += 1) {
-        const startsAt = new Date(base.getTime() + i * 90 * 60 * 1000)
-        const endsAt = new Date(startsAt.getTime() + 90 * 60 * 1000)
-        for (const court of courts) {
-          slots.push({
-            clubId: club.id,
-            courtId: court.id,
-            startsAt,
-            endsAt,
-            priceCents: 1200000,
-          })
-        }
-      }
-      await prisma.slot.createMany({ data: slots })
-      console.log(`  Seeded ${courts.length} courts and ${slots.length} slots.`)
+    // Re-register the WhatsApp line if a PHONE_NUMBER_ID is configured.
+    const phoneNumberId = process.env.PHONE_NUMBER_ID
+    if (phoneNumberId) {
+      await prisma.whatsAppLine.upsert({
+        where: { phoneNumberId },
+        update: { clubId: club.id, isActive: true },
+        create: { phoneNumberId, displayPhone: phoneNumberId, clubId: club.id },
+      })
+      console.log(`  WhatsApp line registered: ${phoneNumberId}`)
     }
 
     console.log('Seed complete.')

@@ -1,32 +1,42 @@
 import { shiftDateKey, wallTimeToUtc } from './datetime'
 
-/**
- * The club's fixed daily schedule (operating hours). Availability is "open by
- * default": every band on every court is bookable unless a Slot row marks it
- * BOOKED or BLOCKED. A booking materializes the Slot row on the fly — the same
- * model the admin panel uses (see `ReserveCellForm.ensureSlotId`).
- */
 export interface ScheduleBand {
   start: string // "HH:MM"
-  end: string // "HH:MM" ("00:00" closes at midnight of the next day)
+  end: string // "HH:MM" ("00:00" = midnight of the next day)
 }
 
-export const SCHEDULE_BANDS: ScheduleBand[] = [
-  { start: '09:00', end: '10:30' },
-  { start: '10:30', end: '12:00' },
-  { start: '12:00', end: '13:30' },
-  { start: '13:30', end: '15:00' },
-  { start: '15:00', end: '16:30' },
-  { start: '16:30', end: '18:00' },
-  { start: '18:00', end: '19:30' },
-  { start: '19:30', end: '21:00' },
-  { start: '21:00', end: '22:30' },
-  { start: '22:30', end: '00:00' },
-]
+export const SLOT_DURATION_MINUTES = 90
 
-/** Finds a schedule band by its start time ("HH:MM"). */
-export function findBand(start: string): ScheduleBand | undefined {
-  return SCHEDULE_BANDS.find(b => b.start === start)
+/**
+ * Generates the daily schedule bands for a court from its openTime/closeTime.
+ * closeTime "00:00" means midnight (end of the calendar day).
+ */
+export function generateBands(openTime: string, closeTime: string): ScheduleBand[] {
+  const [oh, om] = openTime.split(':').map(Number)
+  const [ch, cm] = closeTime.split(':').map(Number)
+
+  let cursor = oh * 60 + om
+  const endOfDay = ch === 0 && cm === 0 ? 24 * 60 : ch * 60 + cm
+
+  const bands: ScheduleBand[] = []
+  while (cursor + SLOT_DURATION_MINUTES <= endOfDay) {
+    const next = cursor + SLOT_DURATION_MINUTES
+    const sh = Math.floor(cursor / 60)
+    const sm = cursor % 60
+    const eh = Math.floor(next / 60) % 24
+    const em = next % 60
+    bands.push({
+      start: `${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}`,
+      end: next >= 24 * 60 ? '00:00' : `${String(eh).padStart(2, '0')}:${String(em).padStart(2, '0')}`,
+    })
+    cursor = next
+  }
+  return bands
+}
+
+/** Finds a band by its start time within a court's generated schedule. */
+export function findBandInSchedule(bands: ScheduleBand[], start: string): ScheduleBand | undefined {
+  return bands.find(b => b.start === start)
 }
 
 /** UTC start/end instants for a band on a given club-local day. */

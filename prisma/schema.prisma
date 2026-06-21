@@ -33,8 +33,13 @@ enum Role {
 model Court {
   id        String   @id @default(cuid())
   name      String
-  /// Default price (in cents) applied to slots created on this court.
+  /// Price (in cents) for every slot on this court.
   priceCents Int     @default(0)
+  /// Wall-clock time ("HH:MM") when the first daily slot starts.
+  openTime  String   @default("09:00")
+  /// Wall-clock time ("HH:MM") when the last daily slot ends; "00:00" means midnight.
+  closeTime  String    @default("00:00")
+  courtType  CourtType @default(INDOOR)
   clubId    String
   club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   slots     Slot[]
@@ -43,6 +48,11 @@ model Court {
   updatedAt DateTime @updatedAt
 
   @@index([clubId])
+}
+
+enum CourtType {
+  INDOOR
+  OUTDOOR
 }
 
 enum SlotStatus {

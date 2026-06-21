@@ -1,4 +1,7 @@
-import { IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator'
+import { IsEnum, IsInt, IsOptional, IsString, Matches, MaxLength, Min, MinLength } from 'class-validator'
+import { CourtType } from 'generated/prisma/client'
+
+const TIME_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/
 
 export class UpdateCourtDto {
   @IsOptional()
@@ -11,4 +14,18 @@ export class UpdateCourtDto {
   @IsInt()
   @Min(0)
   priceCents?: number
+
+  @IsOptional()
+  @IsString()
+  @Matches(TIME_REGEX, { message: 'openTime must be a valid HH:MM time' })
+  openTime?: string
+
+  @IsOptional()
+  @IsString()
+  @Matches(TIME_REGEX, { message: 'closeTime must be a valid HH:MM time' })
+  closeTime?: string
+
+  @IsOptional()
+  @IsEnum(CourtType)
+  courtType?: CourtType
 }

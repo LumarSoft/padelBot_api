@@ -2,15 +2,12 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
-import { bandDateTimes, findBand, SCHEDULE_BANDS } from '../availability/lib/schedule'
+import { bandDateTimes, generateBands, findBandInSchedule } from '../availability/lib/schedule'
 import { shiftDateKey } from '../availability/lib/datetime'
 import { CreateSlotDto } from './dto/create-slot.dto'
 import { UpdateSlotDto } from './dto/update-slot.dto'
 import { QuerySlotsDto } from './dto/query-slots.dto'
 import { BulkBlockSlotsDto } from './dto/bulk-block-slots.dto'
-
-/** Schedule band start times, derived from the single source of truth. */
-const SLOT_STARTS = SCHEDULE_BANDS.map(b => b.start)
 
 const slotSelect = {
   id: true,
@@ -126,21 +123,28 @@ export class SlotsService {
     const courtIds = [...new Set(dto.courtIds)]
     const courts = await this.prisma.court.findMany({
       where: { clubId, id: { in: courtIds } },
-      select: { id: true, priceCents: true },
+      select: { id: true, priceCents: true, openTime: true, closeTime: true },
     })
     if (courts.length !== courtIds.length) {
       throw new BadRequestException('One or more courts do not belong to this club')
     }
     const priceByCourt = new Map(courts.map(c => [c.id, c.priceCents]))
+    const bandsByCourt = new Map(courts.map(c => [c.id, generateBands(c.openTime, c.closeTime)]))
 
-    const starts = dto.slotStarts && dto.slotStarts.length > 0 ? dto.slotStarts : SLOT_STARTS
     const dates = this.enumerateDates(dto.fromDate, dto.toDate)
 
     const targets: { courtId: string; startsAt: Date; endsAt: Date }[] = []
     for (const date of dates) {
-      for (const start of starts) {
-        const { startsAt, endsAt } = this.buildBand(date, start)
-        for (const courtId of courtIds) {
+      for (const courtId of courtIds) {
+        const courtBands = bandsByCourt.get(courtId)!
+        const starts =
+          dto.slotStarts && dto.slotStarts.length > 0
+            ? dto.slotStarts.filter(s => courtBands.some(b => b.start === s))
+            : courtBands.map(b => b.start)
+        for (const start of starts) {
+          const band = findBandInSchedule(courtBands, start)
+          if (!band) continue
+          const { startsAt, endsAt } = bandDateTimes(date, band)
           targets.push({ courtId, startsAt, endsAt })
         }
       }
@@ -212,14 +216,6 @@ export class SlotsService {
       cursor = shiftDateKey(cursor, 1)
     }
     return dates
-  }
-
-  private buildBand(date: string, start: string): { startsAt: Date; endsAt: Date } {
-    const band = findBand(start)
-    if (!band) throw new BadRequestException(`Invalid slot start ${start}`)
-    // bandDateTimes anchors the wall-clock band to the club timezone so the stored
-    // UTC instants match those created from the admin panel and the bot.
-    return bandDateTimes(date, band)
   }
 
   private assertValidRange(startsAt: Date, endsAt: Date): void {

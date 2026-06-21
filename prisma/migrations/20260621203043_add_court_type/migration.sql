@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE `Court` ADD COLUMN `courtType` ENUM('INDOOR', 'OUTDOOR') NOT NULL DEFAULT 'INDOOR';

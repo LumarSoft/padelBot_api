@@ -4,7 +4,7 @@ import { CreateBookingDto } from './dto/create-booking.dto'
 import { RescheduleBookingDto } from './dto/reschedule-booking.dto'
 import { QueryBookingsDto } from './dto/query-bookings.dto'
 import { SlotStatus } from 'generated/prisma/client'
-import { bandDateTimes, findBand } from '../availability/lib/schedule'
+import { bandDateTimes, findBandInSchedule, generateBands } from '../availability/lib/schedule'
 import { formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { BookingAction, BookingEventsService } from '../events/booking-events.service'
@@ -132,7 +132,14 @@ export class BookingsService {
    * the availability check and the write are atomic.
    */
   async bookBand(clubId: string, input: BookBandInput) {
-    const band = findBand(input.bandStart)
+    const court = await this.prisma.court.findFirst({
+      where: { id: input.courtId, clubId },
+      select: { priceCents: true, openTime: true, closeTime: true },
+    })
+    if (!court) throw new NotFoundException(`Court ${input.courtId} not found`)
+
+    const bands = generateBands(court.openTime, court.closeTime)
+    const band = findBandInSchedule(bands, input.bandStart)
     if (!band) throw new BadRequestException(`Invalid slot band ${input.bandStart}`)
 
     const { startsAt, endsAt } = bandDateTimes(input.dateKey, band)
@@ -154,11 +161,6 @@ export class BookingsService {
         await tx.slot.update({ where: { id: existing.id }, data: { status: SlotStatus.BOOKED } })
         slotId = existing.id
       } else {
-        const court = await tx.court.findFirst({
-          where: { id: input.courtId, clubId },
-          select: { priceCents: true },
-        })
-        if (!court) throw new NotFoundException(`Court ${input.courtId} not found`)
         try {
           const slot = await tx.slot.create({
             data: {

@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { CourtOption, SlotOption } from '../bot/types'
 import { dayRangeUtc, formatTimeRange, shiftDateKey, toDateKey } from './lib/datetime'
-import { bandDateTimes, SCHEDULE_BANDS } from './lib/schedule'
+import { bandDateTimes, generateBands } from './lib/schedule'
 
 /** A date that has at least one bookable band, with how many are free. */
 export interface AvailableDate {
@@ -25,7 +25,7 @@ export class AvailabilityService {
   async courtsForDate(clubId: string, dateKey: string): Promise<CourtOption[]> {
     const courts = await this.prisma.court.findMany({
       where: { clubId },
-      select: { id: true, name: true, priceCents: true },
+      select: { id: true, name: true, priceCents: true, openTime: true, closeTime: true },
       orderBy: { name: 'asc' },
     })
     if (courts.length === 0) return []
@@ -35,8 +35,9 @@ export class AvailabilityService {
 
     return courts
       .filter(court => {
+        const bands = generateBands(court.openTime, court.closeTime)
         const taken = occupied.get(court.id) ?? new Set<string>()
-        return SCHEDULE_BANDS.some(band => {
+        return bands.some(band => {
           const { startsAt } = bandDateTimes(dateKey, band)
           return startsAt > now && !taken.has(startsAt.toISOString())
         })
@@ -48,7 +49,7 @@ export class AvailabilityService {
   async slotsForDate(clubId: string, dateKey: string, courtId: string): Promise<SlotOption[]> {
     const court = await this.prisma.court.findFirst({
       where: { id: courtId, clubId },
-      select: { priceCents: true },
+      select: { priceCents: true, openTime: true, closeTime: true },
     })
     if (!court) return []
 
@@ -61,13 +62,12 @@ export class AvailabilityService {
     const now = new Date()
 
     const options: SlotOption[] = []
-    for (const band of SCHEDULE_BANDS) {
+    for (const band of generateBands(court.openTime, court.closeTime)) {
       const { startsAt, endsAt } = bandDateTimes(dateKey, band)
-      if (startsAt <= now) continue // don't offer past bands
+      if (startsAt <= now) continue
 
       const found = byStart.get(startsAt.toISOString())
       if (found) {
-        // A materialized row exists: only AVAILABLE ones are offerable.
         if (found.status !== 'AVAILABLE') continue
         options.push({
           bandStart: band.start,
@@ -76,7 +76,6 @@ export class AvailabilityService {
           price: found.priceCents,
         })
       } else {
-        // No row yet → implicitly free at the court's default price.
         options.push({ bandStart: band.start, label: formatTimeRange(startsAt, endsAt), price: court.priceCents })
       }
     }
@@ -95,8 +94,11 @@ export class AvailabilityService {
   ): Promise<AvailableDate[]> {
     const { horizonDays = 21, limit = 3, excludeDateKey } = options
 
-    const courtCount = await this.prisma.court.count({ where: { clubId } })
-    if (courtCount === 0) return []
+    const courts = await this.prisma.court.findMany({
+      where: { clubId },
+      select: { id: true, openTime: true, closeTime: true },
+    })
+    if (courts.length === 0) return []
 
     const windowStart = dayRangeUtc(fromDateKey).gte
     const windowEnd = dayRangeUtc(shiftDateKey(fromDateKey, horizonDays)).gte
@@ -116,11 +118,13 @@ export class AvailabilityService {
       const key = shiftDateKey(fromDateKey, i)
       if (key === excludeDateKey) continue
 
-      let futureBands = 0
-      for (const band of SCHEDULE_BANDS) {
-        if (bandDateTimes(key, band).startsAt > now) futureBands++
+      let totalFutureBands = 0
+      for (const court of courts) {
+        for (const band of generateBands(court.openTime, court.closeTime)) {
+          if (bandDateTimes(key, band).startsAt > now) totalFutureBands++
+        }
       }
-      const free = futureBands * courtCount - (occupiedByDay.get(key) ?? 0)
+      const free = totalFutureBands - (occupiedByDay.get(key) ?? 0)
       if (free > 0) results.push({ dateKey: key, count: free })
     }
     return results

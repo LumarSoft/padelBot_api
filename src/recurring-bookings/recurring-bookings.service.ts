@@ -3,7 +3,7 @@ import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { shiftDateKey, todayKey, wallTimeToUtc, weekdayOfKey } from '../availability/lib/datetime'
-import { SCHEDULE_BANDS } from '../availability/lib/schedule'
+import { findBandInSchedule, generateBands } from '../availability/lib/schedule'
 import { CreateRecurringBookingDto } from './dto/create-recurring-booking.dto'
 import { UpdateRecurringBookingDto } from './dto/update-recurring-booking.dto'
 
@@ -50,8 +50,8 @@ export class RecurringBookingsService {
   }
 
   async create(clubId: string, createdByUserId: number, dto: CreateRecurringBookingDto) {
-    await this.assertCourtBelongsToClub(clubId, dto.courtId)
-    this.assertValidSlotPair(dto.slotStart, dto.slotEnd)
+    const court = await this.assertCourtBelongsToClub(clubId, dto.courtId)
+    this.assertValidSlotPair(generateBands(court.openTime, court.closeTime), dto.slotStart, dto.slotEnd)
 
     const rb = await this.prisma.recurringBooking.create({
       data: {
@@ -251,20 +251,21 @@ export class RecurringBookingsService {
     return results
   }
 
-  private assertValidSlotPair(slotStart: string, slotEnd: string): void {
-    const valid = SCHEDULE_BANDS.some(b => b.start === slotStart && b.end === slotEnd)
-    if (!valid) {
+  private assertValidSlotPair(bands: ReturnType<typeof generateBands>, slotStart: string, slotEnd: string): void {
+    const band = findBandInSchedule(bands, slotStart)
+    if (!band || band.end !== slotEnd) {
       throw new BadRequestException(`Invalid slot pair: ${slotStart} – ${slotEnd}`)
     }
   }
 
-  private async assertCourtBelongsToClub(clubId: string, courtId: string): Promise<void> {
+  private async assertCourtBelongsToClub(clubId: string, courtId: string) {
     const court = await this.prisma.court.findFirst({
       where: { id: courtId, clubId },
-      select: { id: true },
+      select: { id: true, openTime: true, closeTime: true },
     })
     if (!court) {
       throw new BadRequestException(`Court ${courtId} not found for this club`)
     }
+    return court
   }
 }
