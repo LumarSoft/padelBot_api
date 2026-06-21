@@ -1,23 +1,16 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { isUniqueConstraintError } from '../prisma/prisma-errors'
+import { bandDateTimes, findBand, SCHEDULE_BANDS } from '../availability/lib/schedule'
+import { shiftDateKey } from '../availability/lib/datetime'
 import { CreateSlotDto } from './dto/create-slot.dto'
 import { UpdateSlotDto } from './dto/update-slot.dto'
 import { QuerySlotsDto } from './dto/query-slots.dto'
 import { BulkBlockSlotsDto } from './dto/bulk-block-slots.dto'
 
-const SLOT_PAIRS: Record<string, string> = {
-  '09:00': '10:30',
-  '10:30': '12:00',
-  '12:00': '13:30',
-  '13:30': '15:00',
-  '15:00': '16:30',
-  '16:30': '18:00',
-  '18:00': '19:30',
-  '19:30': '21:00',
-  '21:00': '22:30',
-  '22:30': '00:00',
-}
+/** Schedule band start times, derived from the single source of truth. */
+const SLOT_STARTS = SCHEDULE_BANDS.map(b => b.start)
 
 const slotSelect = {
   id: true,
@@ -69,17 +62,26 @@ export class SlotsService {
     this.assertValidRange(startsAt, endsAt)
     await this.assertCourtBelongsToClub(clubId, dto.courtId)
 
-    return this.prisma.slot.create({
-      data: {
-        clubId,
-        courtId: dto.courtId,
-        startsAt,
-        endsAt,
-        priceCents: dto.priceCents,
-        status: dto.status,
-      },
-      select: slotSelect,
-    })
+    try {
+      return await this.prisma.slot.create({
+        data: {
+          clubId,
+          courtId: dto.courtId,
+          startsAt,
+          endsAt,
+          priceCents: dto.priceCents,
+          status: dto.status,
+        },
+        select: slotSelect,
+      })
+    } catch (error) {
+      // The unique index on (courtId, startsAt) already holds a slot for this
+      // court and time — likely created concurrently by the bot.
+      if (isUniqueConstraintError(error)) {
+        throw new ConflictException('A slot already exists for this court at this time')
+      }
+      throw error
+    }
   }
 
   async update(clubId: string, id: string, dto: UpdateSlotDto) {
@@ -131,7 +133,7 @@ export class SlotsService {
     }
     const priceByCourt = new Map(courts.map(c => [c.id, c.priceCents]))
 
-    const starts = dto.slotStarts && dto.slotStarts.length > 0 ? dto.slotStarts : Object.keys(SLOT_PAIRS)
+    const starts = dto.slotStarts && dto.slotStarts.length > 0 ? dto.slotStarts : SLOT_STARTS
     const dates = this.enumerateDates(dto.fromDate, dto.toDate)
 
     const targets: { courtId: string; startsAt: Date; endsAt: Date }[] = []
@@ -176,7 +178,10 @@ export class SlotsService {
     }
 
     await this.prisma.$transaction([
-      ...(toCreate.length ? [this.prisma.slot.createMany({ data: toCreate })] : []),
+      // skipDuplicates: if a slot for any target (courtId, startsAt) was created
+      // concurrently after our findMany above, the unique index would otherwise
+      // abort the whole bulk insert — INSERT IGNORE skips those rows instead.
+      ...(toCreate.length ? [this.prisma.slot.createMany({ data: toCreate, skipDuplicates: true })] : []),
       ...(toBlockIds.length
         ? [
             this.prisma.slot.updateMany({
@@ -191,37 +196,30 @@ export class SlotsService {
   }
 
   private enumerateDates(from: string, to: string): string[] {
-    const start = new Date(`${from.slice(0, 10)}T00:00:00`)
-    const end = new Date(`${to.slice(0, 10)}T00:00:00`)
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    const start = from.slice(0, 10)
+    const end = to.slice(0, 10)
+    // Validate as real calendar dates without pulling in the server timezone.
+    if (Number.isNaN(Date.parse(`${start}T00:00:00Z`)) || Number.isNaN(Date.parse(`${end}T00:00:00Z`))) {
       throw new BadRequestException('Invalid date range')
     }
     if (end < start) {
       throw new BadRequestException('toDate must be on or after fromDate')
     }
     const dates: string[] = []
-    const cursor = new Date(start)
+    let cursor = start
     while (cursor <= end) {
-      const y = cursor.getFullYear()
-      const m = String(cursor.getMonth() + 1).padStart(2, '0')
-      const d = String(cursor.getDate()).padStart(2, '0')
-      dates.push(`${y}-${m}-${d}`)
-      cursor.setDate(cursor.getDate() + 1)
+      dates.push(cursor)
+      cursor = shiftDateKey(cursor, 1)
     }
     return dates
   }
 
   private buildBand(date: string, start: string): { startsAt: Date; endsAt: Date } {
-    const end = SLOT_PAIRS[start]
-    const startsAt = new Date(`${date}T${start}:00`)
-    let endsAt: Date
-    if (end === '00:00') {
-      endsAt = new Date(`${date}T00:00:00`)
-      endsAt.setDate(endsAt.getDate() + 1)
-    } else {
-      endsAt = new Date(`${date}T${end}:00`)
-    }
-    return { startsAt, endsAt }
+    const band = findBand(start)
+    if (!band) throw new BadRequestException(`Invalid slot start ${start}`)
+    // bandDateTimes anchors the wall-clock band to the club timezone so the stored
+    // UTC instants match those created from the admin panel and the bot.
+    return bandDateTimes(date, band)
   }
 
   private assertValidRange(startsAt: Date, endsAt: Date): void {

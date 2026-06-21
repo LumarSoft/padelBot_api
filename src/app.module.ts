@@ -9,9 +9,20 @@ import { BookingsModule } from './bookings/bookings.module'
 import { RecurringBookingsModule } from './recurring-bookings/recurring-bookings.module'
 import { WhatsAppLinesModule } from './whatsapp-lines/whatsapp-lines.module'
 import { BotModule } from './bot/bot.module'
+import { WhatsAppModule } from './whatsapp/whatsapp.module'
 
 @Module({
-  imports: [PrismaModule, AuthModule, CourtsModule, SlotsModule, BookingsModule, RecurringBookingsModule, WhatsAppLinesModule, BotModule],
+  imports: [
+    PrismaModule,
+    AuthModule,
+    CourtsModule,
+    SlotsModule,
+    BookingsModule,
+    RecurringBookingsModule,
+    WhatsAppLinesModule,
+    BotModule,
+    WhatsAppModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

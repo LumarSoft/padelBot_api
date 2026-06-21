@@ -4,7 +4,8 @@ import { ValidationPipe } from '@nestjs/common'
 import { AppModule } from './app.module'
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule)
+  // rawBody: true exposes req.rawBody (Buffer) needed for Meta webhook signature verification
+  const app = await NestFactory.create(AppModule, { rawBody: true })
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

@@ -1,6 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { isUniqueConstraintError } from '../prisma/prisma-errors'
+import { shiftDateKey, todayKey, wallTimeToUtc, weekdayOfKey } from '../availability/lib/datetime'
+import { SCHEDULE_BANDS } from '../availability/lib/schedule'
 import { CreateRecurringBookingDto } from './dto/create-recurring-booking.dto'
 import { UpdateRecurringBookingDto } from './dto/update-recurring-booking.dto'
 
@@ -170,10 +173,20 @@ export class RecurringBookingsService {
     // Create missing slots one-by-one (MySQL's createMany doesn't return IDs)
     let createdIds: string[] = []
     if (toCreate.length > 0) {
-      const created = await this.prisma.$transaction(
-        toCreate.map(data => this.prisma.slot.create({ data, select: { id: true } })),
-      )
-      createdIds = created.map(s => s.id)
+      try {
+        const created = await this.prisma.$transaction(
+          toCreate.map(data => this.prisma.slot.create({ data, select: { id: true } })),
+        )
+        createdIds = created.map(s => s.id)
+      } catch (error) {
+        // A slot for one of these occurrences was created concurrently (admin or
+        // bot) after our findMany. The unique index on (courtId, startsAt) rolls
+        // the batch back — surface a retryable conflict instead of a raw 500.
+        if (isUniqueConstraintError(error)) {
+          throw new ConflictException('A conflicting slot was created concurrently; please retry')
+        }
+        throw error
+      }
     }
 
     // Flip AVAILABLE → BOOKED
@@ -207,10 +220,10 @@ export class RecurringBookingsService {
 
   /**
    * Computes the next `count` occurrences of `targetDay` starting from today
-   * (today is included if it matches). Dates are built as local-time ISO strings
-   * (no trailing Z) so they are treated the same way as slots created via
-   * SlotsService.buildBand() – consistent with how the rest of the codebase
-   * constructs slot datetimes.
+   * (today is included if it matches). Both the weekday matching and the
+   * wall-clock band are anchored to the club timezone, so the stored UTC instants
+   * match slots created via SlotsService.buildBand() and the admin panel,
+   * regardless of the server's timezone.
    */
   private nextOccurrences(
     targetDay: number,
@@ -220,56 +233,26 @@ export class RecurringBookingsService {
   ): { startsAt: Date; endsAt: Date }[] {
     const results: { startsAt: Date; endsAt: Date }[] = []
 
-    const cursor = new Date()
-    cursor.setHours(0, 0, 0, 0)
-
-    // Advance to the next occurrence of targetDay (today counts if it matches)
-    const todayDay = cursor.getDay()
+    // Advance to the next occurrence of targetDay (today counts if it matches).
+    const todayDay = weekdayOfKey(todayKey())
     const daysUntil = (targetDay - todayDay + 7) % 7
-    cursor.setDate(cursor.getDate() + daysUntil)
+    let cursorKey = shiftDateKey(todayKey(), daysUntil)
 
     for (let i = 0; i < count; i++) {
-      const yyyy = cursor.getFullYear()
-      const mm = String(cursor.getMonth() + 1).padStart(2, '0')
-      const dd = String(cursor.getDate()).padStart(2, '0')
-      const dateStr = `${yyyy}-${mm}-${dd}`
-
-      const startsAt = new Date(`${dateStr}T${slotStart}:00`)
-
-      let endsAt: Date
-      if (slotEnd === '00:00') {
-        // 22:30–00:00 band ends at midnight the following day
-        const nextDay = new Date(cursor)
-        nextDay.setDate(nextDay.getDate() + 1)
-        const ny = nextDay.getFullYear()
-        const nm = String(nextDay.getMonth() + 1).padStart(2, '0')
-        const nd = String(nextDay.getDate()).padStart(2, '0')
-        endsAt = new Date(`${ny}-${nm}-${nd}T00:00:00`)
-      } else {
-        endsAt = new Date(`${dateStr}T${slotEnd}:00`)
-      }
+      const startsAt = wallTimeToUtc(cursorKey, slotStart)
+      // The 22:30–00:00 band ends at midnight of the following day.
+      const endsAt =
+        slotEnd === '00:00' ? wallTimeToUtc(shiftDateKey(cursorKey, 1), '00:00') : wallTimeToUtc(cursorKey, slotEnd)
 
       results.push({ startsAt, endsAt })
-      cursor.setDate(cursor.getDate() + 7)
+      cursorKey = shiftDateKey(cursorKey, 7)
     }
 
     return results
   }
 
   private assertValidSlotPair(slotStart: string, slotEnd: string): void {
-    const PAIRS: [string, string][] = [
-      ['09:00', '10:30'],
-      ['10:30', '12:00'],
-      ['12:00', '13:30'],
-      ['13:30', '15:00'],
-      ['15:00', '16:30'],
-      ['16:30', '18:00'],
-      ['18:00', '19:30'],
-      ['19:30', '21:00'],
-      ['21:00', '22:30'],
-      ['22:30', '00:00'],
-    ]
-    const valid = PAIRS.some(([s, e]) => s === slotStart && e === slotEnd)
+    const valid = SCHEDULE_BANDS.some(b => b.start === slotStart && b.end === slotEnd)
     if (!valid) {
       throw new BadRequestException(`Invalid slot pair: ${slotStart} – ${slotEnd}`)
     }

@@ -66,8 +66,10 @@ model Slot {
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
 
+  /// A court can only have one slot per start time. Guarantees that
+  /// concurrent admin + bot bookings on an empty band cannot duplicate a slot.
+  @@unique([courtId, startsAt])
   @@index([clubId])
-  @@index([courtId])
   @@index([clubId, startsAt])
 }
 

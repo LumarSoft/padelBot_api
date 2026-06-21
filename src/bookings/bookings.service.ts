@@ -4,6 +4,18 @@ import { CreateBookingDto } from './dto/create-booking.dto'
 import { RescheduleBookingDto } from './dto/reschedule-booking.dto'
 import { QueryBookingsDto } from './dto/query-bookings.dto'
 import { SlotStatus } from 'generated/prisma/client'
+import { bandDateTimes, findBand } from '../availability/lib/schedule'
+import { isUniqueConstraintError } from '../prisma/prisma-errors'
+
+/** Booking a schedule band that may not have a materialized Slot row yet. */
+export interface BookBandInput {
+  courtId: string
+  dateKey: string
+  bandStart: string
+  playerName: string
+  playerPhone?: string
+  notes?: string
+}
 
 const bookingSelect = {
   id: true,
@@ -98,6 +110,77 @@ export class BookingsService {
     ])
 
     return booking
+  }
+
+  /**
+   * Books a schedule band under the open-by-default model. If the Slot row
+   * doesn't exist yet it is materialized as BOOKED at the court's default price;
+   * if it exists it must be AVAILABLE. Wrapped in an interactive transaction so
+   * the availability check and the write are atomic.
+   */
+  async bookBand(clubId: string, input: BookBandInput) {
+    const band = findBand(input.bandStart)
+    if (!band) throw new BadRequestException(`Invalid slot band ${input.bandStart}`)
+
+    const { startsAt, endsAt } = bandDateTimes(input.dateKey, band)
+    if (startsAt.getTime() <= Date.now()) {
+      throw new ConflictException('Cannot book a slot in the past')
+    }
+
+    return this.prisma.$transaction(async tx => {
+      const existing = await tx.slot.findFirst({
+        where: { clubId, courtId: input.courtId, startsAt },
+        select: { id: true, status: true },
+      })
+
+      let slotId: string
+      if (existing) {
+        if (existing.status !== SlotStatus.AVAILABLE) {
+          throw new ConflictException('Slot is not available')
+        }
+        await tx.slot.update({ where: { id: existing.id }, data: { status: SlotStatus.BOOKED } })
+        slotId = existing.id
+      } else {
+        const court = await tx.court.findFirst({
+          where: { id: input.courtId, clubId },
+          select: { priceCents: true },
+        })
+        if (!court) throw new NotFoundException(`Court ${input.courtId} not found`)
+        try {
+          const slot = await tx.slot.create({
+            data: {
+              clubId,
+              courtId: input.courtId,
+              startsAt,
+              endsAt,
+              priceCents: court.priceCents,
+              status: SlotStatus.BOOKED,
+            },
+            select: { id: true },
+          })
+          slotId = slot.id
+        } catch (error) {
+          // Another writer (admin panel or a concurrent bot turn) materialized
+          // this exact slot between our lookup and insert. The unique index on
+          // (courtId, startsAt) rejects the duplicate — the band is taken now.
+          if (isUniqueConstraintError(error)) {
+            throw new ConflictException('Slot is not available')
+          }
+          throw error
+        }
+      }
+
+      return tx.booking.create({
+        data: {
+          slotId,
+          clubId,
+          playerName: input.playerName,
+          playerPhone: input.playerPhone ?? null,
+          notes: input.notes,
+        },
+        select: bookingSelect,
+      })
+    })
   }
 
   async cancel(clubId: string, id: string) {

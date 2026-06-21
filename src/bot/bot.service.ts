@@ -1,16 +1,14 @@
 import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { BookingsService } from '../bookings/bookings.service'
+import { AvailabilityService } from '../availability/availability.service'
+import { formatDayMonth, formatTimeRange, todayKey } from '../availability/lib/datetime'
+import { LlmService } from '../llm/llm.service'
 import { ConversationSessionService, keepName } from './conversation-session.service'
-import { BotState, BookingOption, CourtOption, HandlerResult, SessionContext, SlotOption } from './types'
+import { BotState, BookingOption, HandlerResult, SessionContext } from './types'
 import {
   ASK_DATE,
   ASK_NAME,
-  BAD_BOOKING,
-  BAD_COURT,
-  BAD_DATE,
-  BAD_OPTION,
-  BAD_SLOT,
   BOOKING_ABORTED,
   BOOKING_FAILED,
   CANCEL_ABORTED,
@@ -26,7 +24,7 @@ import {
   confirmCancel,
   courtsList,
   myBookingsList,
-  noCourts,
+  noAvailabilityWithSuggestions,
   slotsList,
 } from './messages'
 
@@ -35,7 +33,9 @@ export class BotService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly bookingsService: BookingsService,
+    private readonly availability: AvailabilityService,
     private readonly sessionService: ConversationSessionService,
+    private readonly llmService: LlmService,
   ) {}
 
   async handleMessage(waId: string, clubId: string, body: string): Promise<string> {
@@ -43,7 +43,16 @@ export class BotService {
     const msg = body.trim()
 
     const { reply, state, ctx } = await this.dispatch(session.state as BotState, msg, session.context, clubId, waId)
-    await this.sessionService.update(session.id, state, ctx)
+
+    // Keep last 8 messages (4 turns) so the LLM has short-term conversational context.
+    const prevHistory = session.context.history ?? []
+    const newHistory = [
+      ...prevHistory,
+      { role: 'user' as const, content: msg },
+      { role: 'assistant' as const, content: reply },
+    ].slice(-8)
+
+    await this.sessionService.update(session.id, state, { ...ctx, history: newHistory })
     return reply
   }
 
@@ -58,21 +67,24 @@ export class BotService {
   ): Promise<HandlerResult> {
     switch (state) {
       case BotState.IDLE:
-        return Promise.resolve(this.onIdle(ctx))
+        // First message of a (new or expired) session. Greet only on a bare
+        // greeting; otherwise act on the intent immediately instead of dropping
+        // it behind a generic welcome.
+        return this.onIdle(msg, ctx, clubId, waId)
       case BotState.MENU:
         return this.onMenu(msg, ctx, clubId, waId)
       case BotState.BOOK_DATE:
-        return this.onBookDate(msg, ctx, clubId)
+        return this.onBookDate(msg, ctx, clubId, waId)
       case BotState.BOOK_NAME:
         return this.onBookName(msg, ctx, clubId)
       case BotState.BOOK_COURT:
-        return this.onBookCourt(msg, ctx, clubId)
+        return this.onBookCourt(msg, ctx, clubId, waId)
       case BotState.BOOK_SLOT:
-        return Promise.resolve(this.onBookSlot(msg, ctx))
+        return this.onBookSlot(msg, ctx, clubId, waId)
       case BotState.BOOK_CONFIRM:
         return this.onBookConfirm(msg, ctx, clubId, waId)
       case BotState.CANCEL_SELECT:
-        return Promise.resolve(this.onCancelSelect(msg, ctx))
+        return this.onCancelSelect(msg, ctx, clubId, waId)
       case BotState.CANCEL_CONFIRM:
         return this.onCancelConfirm(msg, ctx, clubId)
       default:
@@ -82,23 +94,37 @@ export class BotService {
 
   // ── State handlers ─────────────────────────────────────────────────────────
 
-  private onIdle(ctx: SessionContext): HandlerResult {
-    return { reply: WELCOME, state: BotState.MENU, ctx }
+  private onIdle(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
+    // A bare greeting / empty message → warm welcome with the menu.
+    if (isGreeting(msg)) {
+      return Promise.resolve({ reply: WELCOME, state: BotState.MENU, ctx })
+    }
+    // Anything else is real intent → handle it as if we were already at the menu.
+    return this.onMenu(msg, ctx, clubId, waId)
   }
 
   private async onMenu(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     if (msg === '1') return { reply: ASK_DATE, state: BotState.BOOK_DATE, ctx }
     if (msg === '2') return this.buildMyBookings(ctx, clubId, waId)
     if (msg === '3') return this.buildCancelList(ctx, clubId, waId)
-    return { reply: BAD_OPTION, state: BotState.MENU, ctx }
+    // Natural language → LLM interprets intent
+    return this.llmService.handleFallback(BotState.MENU, msg, ctx, clubId, waId)
   }
 
-  private async onBookDate(msg: string, ctx: SessionContext, clubId: string): Promise<HandlerResult> {
+  private async onBookDate(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     const date = parseDateDMY(msg)
-    if (!date) return { reply: BAD_DATE, state: BotState.BOOK_DATE, ctx }
+    if (!date) {
+      // Could be "mañana", "el sábado", etc. → LLM resolves
+      return this.llmService.handleFallback(BotState.BOOK_DATE, msg, ctx, clubId, waId)
+    }
 
-    const courts = await this.getAvailableCourts(clubId, date)
-    if (courts.length === 0) return { reply: noCourts(date), state: BotState.MENU, ctx }
+    const courts = await this.availability.courtsForDate(clubId, date)
+    if (courts.length === 0) {
+      // Don't dead-end: offer the nearest days that do have availability and
+      // stay in BOOK_DATE so the player can just reply with one of them.
+      const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
+      return { reply: noAvailabilityWithSuggestions(date, suggestions), state: BotState.BOOK_DATE, ctx }
+    }
 
     const nextCtx: SessionContext = { ...ctx, selectedDate: date, courtOptions: courts }
 
@@ -114,9 +140,33 @@ export class BotService {
     }
 
     const nextCtx: SessionContext = { ...ctx, playerName: name }
-    const courts = nextCtx.courtOptions ?? (await this.getAvailableCourts(clubId, nextCtx.selectedDate!))
 
-    if (courts.length === 0) return { reply: noCourts(nextCtx.selectedDate!), state: BotState.MENU, ctx: nextCtx }
+    // LLM may have pre-filled slot → skip straight to confirmation
+    if (nextCtx.selectedSlotId && nextCtx.selectedCourtId) {
+      return { reply: confirmBooking(nextCtx), state: BotState.BOOK_CONFIRM, ctx: nextCtx }
+    }
+
+    // LLM may have pre-filled court + slots → skip to slot selection
+    if (nextCtx.selectedCourtId && nextCtx.slotOptions?.length) {
+      return {
+        reply: slotsList(nextCtx.slotOptions, nextCtx.selectedCourtName!, nextCtx.selectedDate!),
+        state: BotState.BOOK_SLOT,
+        ctx: nextCtx,
+      }
+    }
+
+    // Normal flow → show courts
+    const courts = nextCtx.courtOptions ?? (await this.availability.courtsForDate(clubId, nextCtx.selectedDate!))
+    if (courts.length === 0) {
+      const suggestions = await this.availability.nextAvailableDates(clubId, nextCtx.selectedDate!, {
+        excludeDateKey: nextCtx.selectedDate,
+      })
+      return {
+        reply: noAvailabilityWithSuggestions(nextCtx.selectedDate!, suggestions),
+        state: BotState.BOOK_DATE,
+        ctx: nextCtx,
+      }
+    }
 
     return {
       reply: courtsList(courts, nextCtx.selectedDate!),
@@ -125,16 +175,17 @@ export class BotService {
     }
   }
 
-  private async onBookCourt(msg: string, ctx: SessionContext, clubId: string): Promise<HandlerResult> {
+  private async onBookCourt(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     const courts = ctx.courtOptions ?? []
     const idx = parseInt(msg, 10) - 1
 
     if (isNaN(idx) || idx < 0 || idx >= courts.length) {
-      return { reply: `${BAD_COURT}\n\n${courtsList(courts, ctx.selectedDate!)}`, state: BotState.BOOK_COURT, ctx }
+      // Could be a court name in natural language → LLM resolves
+      return this.llmService.handleFallback(BotState.BOOK_COURT, msg, ctx, clubId, waId)
     }
 
     const court = courts[idx]
-    const slots = await this.getAvailableSlots(clubId, ctx.selectedDate!, court.id)
+    const slots = await this.availability.slotsForDate(clubId, ctx.selectedDate!, court.id)
 
     if (slots.length === 0) {
       return { reply: NO_SLOTS, state: BotState.MENU, ctx: keepName(ctx) }
@@ -147,22 +198,20 @@ export class BotService {
     }
   }
 
-  private onBookSlot(msg: string, ctx: SessionContext): HandlerResult {
+  private async onBookSlot(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     const slots = ctx.slotOptions ?? []
     const idx = parseInt(msg, 10) - 1
 
     if (isNaN(idx) || idx < 0 || idx >= slots.length) {
-      return {
-        reply: `${BAD_SLOT}\n\n${slotsList(slots, ctx.selectedCourtName!, ctx.selectedDate!)}`,
-        state: BotState.BOOK_SLOT,
-        ctx,
-      }
+      // Could be "el de las 18", "el último", etc. → LLM resolves
+      return this.llmService.handleFallback(BotState.BOOK_SLOT, msg, ctx, clubId, waId)
     }
 
     const slot = slots[idx]
     const nextCtx: SessionContext = {
       ...ctx,
-      selectedSlotId: slot.id,
+      selectedSlotId: slot.slotId,
+      selectedBandStart: slot.bandStart,
       selectedSlotLabel: slot.label,
       selectedSlotPrice: slot.price,
     }
@@ -171,35 +220,52 @@ export class BotService {
   }
 
   private async onBookConfirm(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    const answer = msg.toLowerCase()
+    const answer = normalizeYesNo(msg)
 
-    if (answer !== 's' && answer !== 'n') {
-      return { reply: `${confirmBooking(ctx)}\n\nRespondé *S* o *N*.`, state: BotState.BOOK_CONFIRM, ctx }
+    if (!answer) {
+      return {
+        reply: `${confirmBooking(ctx)}\n\nRespondé *S* para confirmar o *N* para cancelar.`,
+        state: BotState.BOOK_CONFIRM,
+        ctx,
+      }
     }
     if (answer === 'n') {
       return { reply: BOOKING_ABORTED, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
     try {
-      await this.bookingsService.book(clubId, {
-        slotId: ctx.selectedSlotId!,
-        playerName: ctx.playerName!,
-        playerPhone: waId,
-      })
+      if (ctx.selectedSlotId) {
+        // A real AVAILABLE Slot row already exists for this band.
+        await this.bookingsService.book(clubId, {
+          slotId: ctx.selectedSlotId,
+          playerName: ctx.playerName!,
+          playerPhone: waId,
+        })
+      } else {
+        // Open-by-default band → materialize the slot and book it atomically.
+        await this.bookingsService.bookBand(clubId, {
+          courtId: ctx.selectedCourtId!,
+          dateKey: ctx.selectedDate!,
+          bandStart: ctx.selectedBandStart!,
+          playerName: ctx.playerName!,
+          playerPhone: waId,
+        })
+      }
       return { reply: bookingConfirmed(ctx), state: BotState.MENU, ctx: keepName(ctx) }
     } catch {
       return { reply: BOOKING_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
     }
   }
 
-  private onCancelSelect(msg: string, ctx: SessionContext): HandlerResult {
+  private async onCancelSelect(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     if (msg === '0') return { reply: MENU, state: BotState.MENU, ctx: keepName(ctx) }
 
     const options = ctx.bookingOptions ?? []
     const idx = parseInt(msg, 10) - 1
 
     if (isNaN(idx) || idx < 0 || idx >= options.length) {
-      return { reply: `${BAD_BOOKING}\n\n${cancelList(options)}`, state: BotState.CANCEL_SELECT, ctx }
+      // Could be a description like "el del sábado" → LLM resolves
+      return this.llmService.handleFallback(BotState.CANCEL_SELECT, msg, ctx, clubId, waId)
     }
 
     const booking = options[idx]
@@ -211,10 +277,14 @@ export class BotService {
   }
 
   private async onCancelConfirm(msg: string, ctx: SessionContext, clubId: string): Promise<HandlerResult> {
-    const answer = msg.toLowerCase()
+    const answer = normalizeYesNo(msg)
 
-    if (answer !== 's' && answer !== 'n') {
-      return { reply: `${confirmCancel(ctx.selectedBookingLabel!)}\n\nRespondé *S* o *N*.`, state: BotState.CANCEL_CONFIRM, ctx }
+    if (!answer) {
+      return {
+        reply: `${confirmCancel(ctx.selectedBookingLabel!)}\n\nRespondé *S* o *N*.`,
+        state: BotState.CANCEL_CONFIRM,
+        ctx,
+      }
     }
     if (answer === 'n') {
       return { reply: CANCEL_ABORTED, state: BotState.MENU, ctx: keepName(ctx) }
@@ -246,35 +316,7 @@ export class BotService {
 
   // ── DB queries ─────────────────────────────────────────────────────────────
 
-  private async getAvailableCourts(clubId: string, date: string): Promise<CourtOption[]> {
-    const slots = await this.prisma.slot.findMany({
-      where: {
-        clubId,
-        status: 'AVAILABLE',
-        startsAt: { gte: new Date(`${date}T00:00:00`), lt: new Date(`${date}T23:59:59`) },
-      },
-      select: { courtId: true, court: { select: { name: true } } },
-      distinct: ['courtId'],
-      orderBy: { court: { name: 'asc' } },
-    })
-    return slots.map(s => ({ id: s.courtId, name: s.court.name }))
-  }
-
-  private async getAvailableSlots(clubId: string, date: string, courtId: string): Promise<SlotOption[]> {
-    const slots = await this.prisma.slot.findMany({
-      where: {
-        clubId,
-        courtId,
-        status: 'AVAILABLE',
-        startsAt: { gte: new Date(`${date}T00:00:00`), lt: new Date(`${date}T23:59:59`) },
-      },
-      select: { id: true, startsAt: true, endsAt: true, priceCents: true },
-      orderBy: { startsAt: 'asc' },
-    })
-    return slots.map(s => ({ id: s.id, label: slotLabel(s.startsAt, s.endsAt), price: s.priceCents }))
-  }
-
-  private async findUserBookings(clubId: string, waId: string) {
+  private findUserBookings(clubId: string, waId: string) {
     return this.prisma.booking.findMany({
       where: { clubId, playerPhone: waId, status: 'CONFIRMED' },
       select: {
@@ -291,39 +333,117 @@ export class BotService {
 /**
  * Parses "DD/MM" or "D/M" into "YYYY-MM-DD".
  * If the date has already passed this year, assumes next year.
+ * Today is resolved in the club timezone so the year rollover is consistent
+ * with how the rest of the bot reasons about dates.
  */
 function parseDateDMY(input: string): string | null {
-  const m = input.trim().match(/^(\d{1,2})[\/\-](\d{1,2})$/)
+  const m = input.trim().match(/^(\d{1,2})[/-](\d{1,2})$/)
   if (!m) return null
 
   const day = parseInt(m[1], 10)
   const month = parseInt(m[2], 10)
   if (month < 1 || month > 12 || day < 1 || day > 31) return null
 
-  const now = new Date()
-  let year = now.getFullYear()
-  const candidate = new Date(year, month - 1, day)
-  if (isNaN(candidate.getTime())) return null
+  // Validate the calendar day (rejects 31/02, etc.) using a UTC probe.
+  const probe = new Date(Date.UTC(2000, month - 1, day))
+  if (probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return null
 
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  if (candidate < today) year += 1
-
-  const final = new Date(year, month - 1, day)
-  if (isNaN(final.getTime())) return null
+  const [todayY, todayM, todayD] = todayKey().split('-').map(Number)
+  let year = todayY
+  const isBeforeToday = month < todayM || (month === todayM && day < todayD)
+  if (isBeforeToday) year += 1
 
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
-function pad2(n: number): string {
-  return String(n).padStart(2, '0')
+/** True for bare greetings / openers where a welcome makes sense. */
+function isGreeting(msg: string): boolean {
+  const t = msg
+    .toLowerCase()
+    .trim()
+    .replace(/[!¡¿?.,]/g, '')
+  if (t.length === 0) return true
+  const GREETINGS = new Set([
+    'hola',
+    'holaa',
+    'holaaa',
+    'buenas',
+    'buenass',
+    'hey',
+    'ey',
+    'ola',
+    'menu',
+    'menú',
+    'inicio',
+    'empezar',
+    'start',
+    'buen dia',
+    'buen día',
+    'buenos dias',
+    'buenos días',
+    'buenas tardes',
+    'buenas noches',
+    'que tal',
+    'qué tal',
+    'hola buenas',
+  ])
+  return GREETINGS.has(t)
 }
 
-function slotLabel(startsAt: Date, endsAt: Date): string {
-  return `${pad2(startsAt.getHours())}:${pad2(startsAt.getMinutes())}–${pad2(endsAt.getHours())}:${pad2(endsAt.getMinutes())}`
+/**
+ * Normalizes a free-text reply to 's' | 'n' | null. Matches whole words (so "no"
+ * inside another word doesn't trigger) and handles common phrases, so people can
+ * answer naturally ("dale", "sí confirmo", "mejor no") instead of just S/N.
+ */
+function normalizeYesNo(msg: string): 's' | 'n' | null {
+  const text = msg
+    .toLowerCase()
+    .trim()
+    .replace(/[!¡¿?.,]/g, '')
+  const words = text.split(/\s+/)
+
+  const NO = new Set(['n', 'no', 'nop', 'nope', 'nel', 'negativo', 'cancelar', 'cancela', 'tampoco'])
+  const YES = new Set([
+    's',
+    'si',
+    'sí',
+    'sip',
+    'sii',
+    'dale',
+    'va',
+    'ok',
+    'oka',
+    'okey',
+    'okay',
+    'bueno',
+    'buenisimo',
+    'buenísimo',
+    'claro',
+    'obvio',
+    'confirmo',
+    'confirmar',
+    'confirmá',
+    'confirma',
+    'listo',
+    'adelante',
+    'perfecto',
+    'genial',
+    'joya',
+    'correcto',
+  ])
+
+  const hasYesWord = words.some(w => YES.has(w))
+  const hasNoWord = words.some(w => NO.has(w))
+
+  // Explicit decline phrases win over a stray affirmative.
+  if (/\bmejor no\b|\bno gracias\b|\bdej[aá]lo\b|\bahora no\b/.test(text)) return 'n'
+  // A leading "no" ("no, dale") is a decline.
+  if (hasNoWord && !hasYesWord) return 'n'
+  if (hasYesWord && !hasNoWord) return 's'
+  return null
 }
 
 function bookingLabel(b: { slot: { startsAt: Date; endsAt: Date; court: { name: string } } }): string {
-  const { startsAt } = b.slot
-  const dateStr = `${pad2(startsAt.getDate())}/${pad2(startsAt.getMonth() + 1)}`
-  return `${dateStr} · ${b.slot.court.name} · ${slotLabel(b.slot.startsAt, b.slot.endsAt)}`
+  const dateStr = formatDayMonth(b.slot.startsAt)
+  return `${dateStr} · ${b.slot.court.name} · ${formatTimeRange(b.slot.startsAt, b.slot.endsAt)}`
 }
