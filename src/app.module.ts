@@ -10,6 +10,7 @@ import { RecurringBookingsModule } from './recurring-bookings/recurring-bookings
 import { WhatsAppLinesModule } from './whatsapp-lines/whatsapp-lines.module'
 import { BotModule } from './bot/bot.module'
 import { WhatsAppModule } from './whatsapp/whatsapp.module'
+import { EventsModule } from './events/events.module'
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { WhatsAppModule } from './whatsapp/whatsapp.module'
     WhatsAppLinesModule,
     BotModule,
     WhatsAppModule,
+    EventsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

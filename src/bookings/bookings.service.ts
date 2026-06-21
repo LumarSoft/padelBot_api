@@ -5,7 +5,9 @@ import { RescheduleBookingDto } from './dto/reschedule-booking.dto'
 import { QueryBookingsDto } from './dto/query-bookings.dto'
 import { SlotStatus } from 'generated/prisma/client'
 import { bandDateTimes, findBand } from '../availability/lib/schedule'
+import { formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
+import { BookingAction, BookingEventsService } from '../events/booking-events.service'
 
 /** Booking a schedule band that may not have a materialized Slot row yet. */
 export interface BookBandInput {
@@ -41,9 +43,19 @@ const bookingSelect = {
   },
 } as const
 
+/** Shape needed to build an event summary — satisfied by any `bookingSelect` row. */
+type BookingForEvent = {
+  clubId: string
+  playerName: string
+  slot: { startsAt: Date; endsAt: Date; court: { name: string } }
+}
+
 @Injectable()
 export class BookingsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: BookingEventsService,
+  ) {}
 
   findAll(clubId: string, query: QueryBookingsDto) {
     return this.prisma.booking.findMany({
@@ -109,6 +121,7 @@ export class BookingsService {
       }),
     ])
 
+    this.emitBookingChange('created', booking)
     return booking
   }
 
@@ -127,7 +140,7 @@ export class BookingsService {
       throw new ConflictException('Cannot book a slot in the past')
     }
 
-    return this.prisma.$transaction(async tx => {
+    const booking = await this.prisma.$transaction(async tx => {
       const existing = await tx.slot.findFirst({
         where: { clubId, courtId: input.courtId, startsAt },
         select: { id: true, status: true },
@@ -181,6 +194,9 @@ export class BookingsService {
         select: bookingSelect,
       })
     })
+
+    this.emitBookingChange('created', booking)
+    return booking
   }
 
   async cancel(clubId: string, id: string) {
@@ -201,6 +217,7 @@ export class BookingsService {
       }),
     ])
 
+    this.emitBookingChange('cancelled', updated)
     return updated
   }
 
@@ -238,6 +255,21 @@ export class BookingsService {
       }),
     ])
 
+    this.emitBookingChange('rescheduled', updated)
     return updated
+  }
+
+  /**
+   * Broadcasts a booking change to the club's connected admins (live dashboard).
+   * Best-effort: emitting never blocks or fails the booking itself.
+   */
+  private emitBookingChange(action: BookingAction, booking: BookingForEvent): void {
+    const { startsAt, endsAt, court } = booking.slot
+    this.events.emit({
+      type: 'booking.changed',
+      clubId: booking.clubId,
+      action,
+      summary: `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`,
+    })
   }
 }

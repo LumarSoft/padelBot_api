@@ -5,6 +5,7 @@ import { AvailabilityService } from '../availability/availability.service'
 import { formatDayMonth, formatTimeRange, todayKey } from '../availability/lib/datetime'
 import { LlmService } from '../llm/llm.service'
 import { ConversationSessionService, keepName } from './conversation-session.service'
+import { matchCourt, matchSlot } from './lib/match'
 import { BotState, BookingOption, HandlerResult, SessionContext } from './types'
 import {
   ASK_DATE,
@@ -177,14 +178,13 @@ export class BotService {
 
   private async onBookCourt(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     const courts = ctx.courtOptions ?? []
-    const idx = parseInt(msg, 10) - 1
+    const court = matchCourt(msg, courts)
 
-    if (isNaN(idx) || idx < 0 || idx >= courts.length) {
-      // Could be a court name in natural language → LLM resolves
+    if (!court) {
+      // Couldn't pin a court by name → let the LLM resolve looser phrasings.
       return this.llmService.handleFallback(BotState.BOOK_COURT, msg, ctx, clubId, waId)
     }
 
-    const court = courts[idx]
     const slots = await this.availability.slotsForDate(clubId, ctx.selectedDate!, court.id)
 
     if (slots.length === 0) {
@@ -200,14 +200,13 @@ export class BotService {
 
   private async onBookSlot(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     const slots = ctx.slotOptions ?? []
-    const idx = parseInt(msg, 10) - 1
+    const slot = matchSlot(msg, slots)
 
-    if (isNaN(idx) || idx < 0 || idx >= slots.length) {
-      // Could be "el de las 18", "el último", etc. → LLM resolves
+    if (!slot) {
+      // Non-time phrasings ("el último", "el primero") → LLM resolves.
       return this.llmService.handleFallback(BotState.BOOK_SLOT, msg, ctx, clubId, waId)
     }
 
-    const slot = slots[idx]
     const nextCtx: SessionContext = {
       ...ctx,
       selectedSlotId: slot.slotId,
@@ -224,7 +223,7 @@ export class BotService {
 
     if (!answer) {
       return {
-        reply: `${confirmBooking(ctx)}\n\nRespondé *S* para confirmar o *N* para cancelar.`,
+        reply: `Perdón, no te entendí del todo 🤔\n\n${confirmBooking(ctx)}`,
         state: BotState.BOOK_CONFIRM,
         ctx,
       }
@@ -281,7 +280,7 @@ export class BotService {
 
     if (!answer) {
       return {
-        reply: `${confirmCancel(ctx.selectedBookingLabel!)}\n\nRespondé *S* o *N*.`,
+        reply: `Perdón, no te entendí del todo 🤔\n\n${confirmCancel(ctx.selectedBookingLabel!)}`,
         state: BotState.CANCEL_CONFIRM,
         ctx,
       }

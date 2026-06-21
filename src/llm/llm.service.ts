@@ -3,7 +3,8 @@ import OpenAI from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
 import { formatTimeRange, toDateKey } from '../availability/lib/datetime'
-import { BotState, CourtOption, HandlerResult, SessionContext, SlotOption } from '../bot/types'
+import { BotState, HandlerResult, SessionContext } from '../bot/types'
+import { matchCourt, matchSlot } from '../bot/lib/match'
 import {
   ASK_DATE,
   ASK_NAME,
@@ -225,19 +226,6 @@ interface BookingToolArgs {
   date?: string
   courtName?: string
   timePreference?: string
-}
-
-function matchCourt(name: string, courts: CourtOption[]): CourtOption | undefined {
-  const q = name.toLowerCase().trim()
-  return courts.find(c => {
-    const cn = c.name.toLowerCase()
-    return cn.includes(q) || q.includes(cn)
-  })
-}
-
-function matchSlot(timePreference: string, slots: SlotOption[]): SlotOption | undefined {
-  // timePreference is "HH:MM"; match against the band start.
-  return slots.find(s => s.bandStart === timePreference || s.label.startsWith(timePreference))
 }
 
 function buildBookingLabel(b: { slot: { startsAt: Date; endsAt: Date; court: { name: string } } }): string {

@@ -16,12 +16,10 @@ function fmtPrice(cents: number): string {
 // ── Static strings ──────────────────────────────────────────────────────────
 
 export const MENU =
-  'Contame qué necesitás 🎾 Podés escribirme con tus palabras (ej: *"un turno para el sábado a la tarde"*) o elegir una opción:\n\n' +
-  '1️⃣ Reservar un turno\n' +
-  '2️⃣ Ver mis reservas\n' +
-  '3️⃣ Cancelar una reserva'
+  'Contame qué necesitás y lo resolvemos 🎾 Puedo reservar un turno, mostrarte tus reservas o cancelar una. ' +
+  'Escribime con tus palabras, como por ejemplo *"un turno para el sábado a la tarde"*.'
 
-export const WELCOME = `👋 ¡Hola! Soy el asistente del club. Estoy para ayudarte con tus turnos.\n\n${MENU}`
+export const WELCOME = `👋 ¡Hola! Soy el asistente del club, encantado 🎾 Estoy para darte una mano con tus turnos.\n\n${MENU}`
 export const BAD_OPTION = `Mmm, no entendí esa opción 🤔\n\n${MENU}`
 export const ASK_DATE = `📅 ¿Para qué día lo querés? Decime la fecha (ej: *25/06*) o algo como *"mañana"* o *"el sábado"*.`
 export const BAD_DATE = `No me quedó clara la fecha 🤔 Probá con el día y mes (ej: *25/06*) o algo como *"el sábado"*.`
@@ -67,13 +65,13 @@ export function noAvailabilityWithSuggestions(dateKey: string, suggestions: Avai
 }
 
 export function courtsList(courts: CourtOption[], date: string): string {
-  const list = courts.map((c, i) => `${i + 1}. ${c.name}`).join('\n')
-  return `🎾 Para el *${fmtDate(date)}* tengo estas canchas con lugar:\n\n${list}\n\nDecime el número o el nombre de la cancha.`
+  const list = courts.map(c => `• ${c.name}`).join('\n')
+  return `🎾 Para el *${fmtDate(date)}* tengo estas canchas con lugar:\n\n${list}\n\nDecime cuál preferís.`
 }
 
 export function slotsList(slots: SlotOption[], courtName: string, date: string): string {
-  const list = slots.map((s, i) => `${i + 1}. ${s.label} (${fmtPrice(s.price)})`).join('\n')
-  return `⏰ Estos son los horarios libres en *${courtName}* el *${fmtDate(date)}*:\n\n${list}\n\nDecime el número, o el horario que prefieras (ej: *las 18*).`
+  const list = slots.map(s => `• ${s.label} — ${fmtPrice(s.price)}`).join('\n')
+  return `⏰ Estos son los horarios libres en *${courtName}* el *${fmtDate(date)}*:\n\n${list}\n\nDecime cuál te queda bien (ej: *las 18*).`
 }
 
 export function confirmBooking(ctx: SessionContext): string {
@@ -84,7 +82,7 @@ export function confirmBooking(ctx: SessionContext): string {
     `⏰ Horario: ${ctx.selectedSlotLabel}\n` +
     `💰 Precio: ${fmtPrice(ctx.selectedSlotPrice!)}\n` +
     `👤 Nombre: ${ctx.playerName}\n\n` +
-    `¿Confirmás? Respondé *S* para confirmar o *N* para cancelar.`
+    `👀 Revisá que esté todo bien. Si coincide, confirmame y te lo dejo reservado 🎾`
   )
 }
 
@@ -98,15 +96,17 @@ export function bookingConfirmed(ctx: SessionContext): string {
 }
 
 export function myBookingsList(options: BookingOption[]): string {
-  const list = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')
+  const list = options.map(o => `• ${o.label}`).join('\n')
   return `📋 *Tus reservas confirmadas:*\n\n${list}\n\n${MENU}`
 }
 
 export function cancelList(options: BookingOption[]): string {
+  // Numbered on purpose: cancelling is destructive, so a precise pick beats
+  // free-text matching here.
   const list = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')
-  return `❌ ¿Cuál reserva querés cancelar?\n\n${list}\n\nRespondé con el número, o *0* para volver.`
+  return `❌ ¿Cuál reserva querés cancelar?\n\n${list}\n\nDecime el número, o *0* para volver.`
 }
 
 export function confirmCancel(label: string): string {
-  return `¿Cancelás la reserva *${label}*?\n\nRespondé *S* para confirmar o *N* para volver.`
+  return `Me estás pidiendo cancelar la reserva *${label}*. ¿Te la doy de baja? Confirmame y la cancelo, o avisame si preferís dejarla.`
 }
