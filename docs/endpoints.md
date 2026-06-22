@@ -389,6 +389,38 @@ Moves a booking to a different slot. The old slot becomes `AVAILABLE`; the new s
 
 `409 Conflict` — new slot is not available
 
+### PATCH /bookings/:id/confirm-payment
+
+Manually confirms the transfer deposit for a `PENDING_PAYMENT` booking (front-desk verified the money landed). Flips the booking to `CONFIRMED` and notifies the player via WhatsApp. Idempotent and club-scoped.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{ "confirmed": true }
+```
+
+`{ "confirmed": false }` — booking existed but was already processed (not pending)
+
+`404 Not Found` — booking not found in the caller's club
+
+### PATCH /bookings/:id/reject-payment
+
+Manually rejects a `PENDING_PAYMENT` booking (transfer never arrived). Cancels the booking, releases the slot back to `AVAILABLE`, and notifies the player. Idempotent and club-scoped.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{ "cancelled": true }
+```
+
+`{ "cancelled": false }` — booking existed but was already processed (not pending)
+
+`404 Not Found` — booking not found in the caller's club
+
 ## Recurring Bookings (Turnos Fijos)
 
 Admin-only recurring reservations. When created, the pattern is automatically applied to all existing matching `AVAILABLE` slots. The pattern can be re-applied manually via the `apply` action.
@@ -497,3 +529,77 @@ Re-applies a recurring booking to all currently `AVAILABLE` matching slots (usef
 `400 Bad Request` — recurring booking is inactive
 
 `404 Not Found`
+
+## Clubs
+
+Per-club settings. The transfer config holds the MercadoPago alias/CVU players send the deposit to.
+
+### GET /clubs/me/transfer-config
+
+Returns the caller's club transfer config.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{ "transferAlias": "padel.club.mp", "transferHolder": "Padel Club SRL" }
+```
+
+Fields are `null` until configured.
+
+### PATCH /clubs/me/transfer-config
+
+Updates the caller's club transfer config. **Owner only.** Send a field as an empty string to clear it.
+
+**Auth required:** Yes (role `owner`)
+
+**Request body**
+
+| Field          | Type   | Required | Constraints   |
+| -------------- | ------ | -------- | ------------- |
+| transferAlias  | string | No       | max 120 chars |
+| transferHolder | string | No       | max 120 chars |
+
+```json
+{ "transferAlias": "padel.club.mp", "transferHolder": "Padel Club SRL" }
+```
+
+`200 OK` — the updated transfer config
+
+`403 Forbidden` — caller is not the club owner
+
+## Payments (Webhooks)
+
+Deposits are paid by bank transfer to the club's MercadoPago alias/CVU. An incoming transfer is matched to a pending booking by its **exact unique amount** (`transferAmountCents`), then the booking is confirmed and the player notified. These endpoints are unauthenticated by JWT — they are secured by a signature / shared secret instead.
+
+### POST /webhooks/mercadopago
+
+MercadoPago IPN webhook. The `x-signature` HMAC is verified, the payment is fetched from the MP API, and the booking is reconciled: by `external_reference` for legacy checkout payments, or by exact amount for incoming transfers.
+
+**Auth required:** No (verified via `x-signature` header)
+
+`200 OK` — always (processing is best-effort and idempotent)
+
+`401 Unauthorized` — invalid `x-signature`
+
+### POST /webhooks/transfer
+
+Generic transfer-received webhook for an external notification source (e.g. a PagaVoz-style bridge that reads the MercadoPago/bank app's "money received" notification). Confirms the single non-expired pending booking whose `transferAmountCents` equals `amountCents`; if zero or more than one match, nothing is confirmed (left for manual review).
+
+**Auth required:** No JWT — requires the `x-bridge-secret` header to equal `TRANSFER_BRIDGE_SECRET` (fails closed when the env var is unset).
+
+**Request body**
+
+| Field      | Type   | Required | Constraints           |
+| ---------- | ------ | -------- | --------------------- |
+| amountCents | number | Yes     | positive integer      |
+| reference  | string | Yes      | source-unique movement id |
+
+```json
+{ "amountCents": 250047, "reference": "mov_abc123" }
+```
+
+`200 OK` — always (processing is best-effort and idempotent)
+
+`403 Forbidden` — missing/invalid `x-bridge-secret`, or bridge not configured

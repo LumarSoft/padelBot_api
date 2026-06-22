@@ -10,6 +10,7 @@ import { BotState, BookingOption, HandlerResult, SessionContext } from './types'
 import {
   ASK_DATE,
   ASK_NAME,
+  ATTACHMENT_NO_PENDING,
   BOOKING_ABORTED,
   BOOKING_FAILED,
   CANCEL_ABORTED,
@@ -18,15 +19,18 @@ import {
   MENU,
   NO_BOOKINGS,
   NO_SLOTS,
+  PAYMENT_CLAIM_NO_PENDING,
+  PAYMENT_UNAVAILABLE,
   WELCOME,
-  bookingConfirmed,
   cancelList,
   confirmBooking,
   confirmCancel,
   courtsList,
   myBookingsList,
   noAvailabilityWithSuggestions,
+  paymentClaimAck,
   slotsList,
+  transferPending,
 } from './messages'
 
 @Injectable()
@@ -42,19 +46,48 @@ export class BotService {
   async handleMessage(waId: string, clubId: string, body: string): Promise<string> {
     const session = await this.sessionService.getOrCreate(waId, clubId)
     const msg = body.trim()
+    const state = session.state as BotState
 
-    const { reply, state, ctx } = await this.dispatch(session.state as BotState, msg, session.context, clubId, waId)
+    // "Ya transferí" / "te mando el comprobante" after booking (state is MENU/IDLE):
+    // acknowledge and let the poller confirm the real money — never from a claim.
+    const result =
+      isPaymentClaim(msg) && (state === BotState.MENU || state === BotState.IDLE)
+        ? await this.paymentClaimReply(clubId, waId, session.context)
+        : await this.dispatch(state, msg, session.context, clubId, waId)
 
     // Keep last 8 messages (4 turns) so the LLM has short-term conversational context.
     const prevHistory = session.context.history ?? []
     const newHistory = [
       ...prevHistory,
       { role: 'user' as const, content: msg },
-      { role: 'assistant' as const, content: reply },
+      { role: 'assistant' as const, content: result.reply },
     ].slice(-8)
 
-    await this.sessionService.update(session.id, state, { ...ctx, history: newHistory })
-    return reply
+    await this.sessionService.update(session.id, result.state, { ...result.ctx, history: newHistory })
+    return result.reply
+  }
+
+  /**
+   * Reply to an inbound image/document (typically a transfer receipt). We don't read
+   * the file — the poller confirms the actual money — so we just reassure the player.
+   */
+  async handleAttachment(waId: string, clubId: string): Promise<string> {
+    const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
+    if (!pending) return ATTACHMENT_NO_PENDING
+    const { startsAt, endsAt, court } = pending.slot
+    return paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+  }
+
+  /** Builds the "we're waiting for your transfer" reply, keeping the FSM state put. */
+  private async paymentClaimReply(clubId: string, waId: string, ctx: SessionContext): Promise<HandlerResult> {
+    const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
+    if (!pending) return { reply: PAYMENT_CLAIM_NO_PENDING, state: BotState.MENU, ctx: keepName(ctx) }
+    const { startsAt, endsAt, court } = pending.slot
+    return {
+      reply: paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents),
+      state: BotState.MENU,
+      ctx: keepName(ctx),
+    }
   }
 
   // ── Dispatcher ─────────────────────────────────────────────────────────────
@@ -232,17 +265,28 @@ export class BotService {
       return { reply: BOOKING_ABORTED, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
+    // The club must have a transfer alias configured before we lock a slot the
+    // player can't actually pay for.
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: { transferAlias: true, transferHolder: true },
+    })
+    if (!club?.transferAlias) {
+      return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    // Lock the slot with a pending booking; the unique transfer amount comes back
+    // so we can tell the player exactly how much to send.
+    let pendingBooking: { id: string; transferAmountCents: number }
     try {
       if (ctx.selectedSlotId) {
-        // A real AVAILABLE Slot row already exists for this band.
-        await this.bookingsService.book(clubId, {
+        pendingBooking = await this.bookingsService.bookPending(clubId, {
           slotId: ctx.selectedSlotId,
           playerName: ctx.playerName!,
           playerPhone: waId,
         })
       } else {
-        // Open-by-default band → materialize the slot and book it atomically.
-        await this.bookingsService.bookBand(clubId, {
+        pendingBooking = await this.bookingsService.bookBandPending(clubId, {
           courtId: ctx.selectedCourtId!,
           dateKey: ctx.selectedDate!,
           bandStart: ctx.selectedBandStart!,
@@ -250,9 +294,18 @@ export class BotService {
           playerPhone: waId,
         })
       }
-      return { reply: bookingConfirmed(ctx), state: BotState.MENU, ctx: keepName(ctx) }
     } catch {
       return { reply: BOOKING_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    return {
+      reply: transferPending(
+        ctx,
+        { alias: club.transferAlias, holder: club.transferHolder },
+        pendingBooking.transferAmountCents,
+      ),
+      state: BotState.MENU,
+      ctx: keepName(ctx),
     }
   }
 
@@ -353,6 +406,16 @@ function parseDateDMY(input: string): string | null {
   if (isBeforeToday) year += 1
 
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+/** True when the message reads like "I already paid / here's the receipt". */
+function isPaymentClaim(msg: string): boolean {
+  // NFD + strip diacritics so "depósito"/"aboné" match the accent-free stems below.
+  const normalized = msg
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+  return /\b(transfer|comprobante|deposit|ya pag|ya abon|ya envi|ya hice|ya mand)/.test(normalized)
 }
 
 /** True for bare greetings / openers where a welcome makes sense. */

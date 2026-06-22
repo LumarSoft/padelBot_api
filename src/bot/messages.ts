@@ -1,5 +1,5 @@
 import { AvailableDate } from '../availability/availability.service'
-import { dayLabelFromKey, dayMonthFromKey } from '../availability/lib/datetime'
+import { dayLabelFromKey, dayMonthFromKey, formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
 import { BookingOption, CourtOption, SessionContext, SlotOption } from './types'
 
 // ── Formatters ─────────────────────────────────────────────────────────────
@@ -11,6 +11,11 @@ function fmtDate(dateKey: string): string {
 function fmtPrice(cents: number): string {
   if (cents === 0) return 'sin precio'
   return `$${(cents / 100).toLocaleString('es-AR')}`
+}
+
+/** Like fmtPrice but always shows the two centavos digits — the transfer must be exact. */
+function fmtExact(cents: number): string {
+  return `$${(cents / 100).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 // ── Static strings ──────────────────────────────────────────────────────────
@@ -34,6 +39,9 @@ export const BOOKING_FAILED = `😕 Uy, no pude confirmar la reserva — puede q
 export const CANCEL_CONFIRMED = `✅ Listo, cancelé tu reserva. ¡Cualquier cosa avisame!`
 export const CANCEL_FAILED = `😕 No pude cancelar la reserva. Probá de nuevo en un ratito o escribime.\n\n${MENU}`
 export const CANCEL_ABORTED = `Perfecto, dejé tu reserva como estaba 👍`
+export const PAYMENT_UNAVAILABLE = `😅 Justo no puedo tomar el pago por acá en este momento. Escribile al club así te ayudan a confirmar la reserva. 🎾`
+export const PAYMENT_CLAIM_NO_PENDING = `Mmm, no me figura ninguna reserva tuya esperando pago 🤔. Si transferiste recién, dame un par de minutos y revisá; si no, escribime *reservar* y armamos el turno. 🎾`
+export const ATTACHMENT_NO_PENDING = `Recibí tu archivo 🙌 pero por acá no puedo abrir imágenes. Si transferiste para una reserva, esperá un toque y te confirmo solo; si necesitás otra cosa, escribime con palabras. 🎾`
 
 // ── Dynamic builders ────────────────────────────────────────────────────────
 
@@ -109,4 +117,41 @@ export function cancelList(options: BookingOption[]): string {
 
 export function confirmCancel(label: string): string {
   return `Me estás pidiendo cancelar la reserva *${label}*. ¿Te la doy de baja? Confirmame y la cancelo, o avisame si preferís dejarla.`
+}
+
+export function transferPending(
+  ctx: SessionContext,
+  transfer: { alias: string; holder: string | null },
+  transferAmountCents: number,
+): string {
+  const holderLine = transfer.holder ? `\n👤 Titular: *${transfer.holder}*` : ''
+  return (
+    `⏳ *Reserva pre-confirmada — falta el pago*\n\n` +
+    `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n` +
+    `🎾 ${ctx.selectedCourtName}\n\n` +
+    `Para confirmar el turno, transferí tu parte de la seña (1 de 4 jugadores):\n\n` +
+    `💰 Importe *exacto*: *${fmtExact(transferAmountCents)}*\n` +
+    `🏦 Alias: *${transfer.alias}*${holderLine}\n\n` +
+    `⚠️ Transferí el monto *exacto, con los centavos* — así reconozco tu pago al instante y te confirmo solo. ` +
+    `Si transferís otro importe, no voy a poder asociarlo automáticamente.\n\n` +
+    `⏰ Tenés *30 minutos*. Cuando se acredite te aviso por acá; si no llega a tiempo, el turno queda libre.`
+  )
+}
+
+/**
+ * Reassurance when the player says they already transferred (or sends a receipt
+ * image). We never confirm from a screenshot — the poller confirms the real money —
+ * so we just acknowledge and tell them it's coming.
+ */
+export function paymentClaimAck(
+  courtName: string,
+  startsAt: Date,
+  endsAt: Date,
+  transferAmountCents: number | null,
+): string {
+  const amountLine = transferAmountCents != null ? ` de *${fmtExact(transferAmountCents)}*` : ''
+  return (
+    `¡Gracias! 🙌 Tu transferencia${amountLine} me llega sola — no hace falta que mandes el comprobante.\n\n` +
+    `Apenas se acredite (suele ser un par de minutos) te confirmo *${courtName} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}* por acá. 🎾`
+  )
 }

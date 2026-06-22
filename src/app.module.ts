@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common'
+import { ScheduleModule } from '@nestjs/schedule'
 import { AppController } from './app.controller'
 import { AppService } from './app.service'
 import { PrismaModule } from './prisma/prisma.module'
@@ -11,9 +12,12 @@ import { WhatsAppLinesModule } from './whatsapp-lines/whatsapp-lines.module'
 import { BotModule } from './bot/bot.module'
 import { WhatsAppModule } from './whatsapp/whatsapp.module'
 import { EventsModule } from './events/events.module'
+import { PaymentsModule } from './payments/payments.module'
+import { ClubsModule } from './clubs/clubs.module'
 
 @Module({
   imports: [
+    ScheduleModule.forRoot(),
     PrismaModule,
     AuthModule,
     CourtsModule,
@@ -24,6 +28,8 @@ import { EventsModule } from './events/events.module'
     BotModule,
     WhatsAppModule,
     EventsModule,
+    PaymentsModule,
+    ClubsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

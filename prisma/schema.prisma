@@ -12,6 +12,10 @@ model Club {
   id        String   @id @default(cuid())
   name      String
   slug      String   @unique
+  /// MercadoPago alias/CVU players transfer the deposit to. Null until the owner configures it.
+  transferAlias  String?
+  /// Account holder name shown to players alongside the alias ("titular").
+  transferHolder String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -100,6 +104,7 @@ model User {
 }
 
 enum BookingStatus {
+  PENDING_PAYMENT
   CONFIRMED
   CANCELLED
 }
@@ -113,12 +118,24 @@ model Booking {
   club               Club              @relation(fields: [clubId], references: [id], onDelete: Cascade)
   playerName         String
   playerPhone        String?
-  status             BookingStatus     @default(CONFIRMED)
+  status             BookingStatus     @default(PENDING_PAYMENT)
   notes              String?
   bookedByUserId     Int?
   bookedByUser       User?             @relation(fields: [bookedByUserId], references: [id])
   recurringBookingId String?
   recurringBooking   RecurringBooking? @relation(fields: [recurringBookingId], references: [id], onDelete: SetNull)
+  /// Amount (cents) the first player must pay to confirm this slot.
+  depositCents       Int               @default(0)
+  /// Exact amount (cents) the player must transfer. Equals depositCents rounded to
+  /// whole pesos plus a unique 1-99 centavos tag, so an incoming transfer maps to
+  /// exactly one pending booking during reconciliation. Null for admin-created bookings.
+  transferAmountCents Int?
+  /// MercadoPago preference ID returned when the payment link was created.
+  mpPreferenceId     String?
+  /// MercadoPago payment ID set once the webhook confirms the payment.
+  mpPaymentId        String?
+  /// When the pending payment link expires; null for admin-created bookings.
+  paymentExpiresAt   DateTime?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
@@ -126,6 +143,8 @@ model Booking {
   @@index([slotId])
   @@index([recurringBookingId])
   @@index([clubId, status])
+  @@index([status, paymentExpiresAt])
+  @@index([status, transferAmountCents])
 }
 
 /// Maps a Meta WhatsApp Business phone number ID to a club (tenant).

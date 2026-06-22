@@ -75,27 +75,45 @@ export class WhatsAppController {
         if (!phoneNumberId) continue
 
         for (const message of value?.messages ?? []) {
-          if (message?.type !== 'text') continue
           const waId: string | undefined = message?.from
-          const body: string | undefined = message?.text?.body
-          if (!waId || !body) continue
+          if (!waId) continue
 
-          await this.processMessage(phoneNumberId, waId, body)
+          if (message?.type === 'text') {
+            const body: string | undefined = message?.text?.body
+            if (!body) continue
+            await this.processMessage(phoneNumberId, waId, body)
+          } else if (message?.type === 'image' || message?.type === 'document') {
+            // Likely a transfer receipt — acknowledge it (the poller confirms the money).
+            await this.processAttachment(phoneNumberId, waId)
+          }
         }
       }
     }
   }
 
   private async processMessage(phoneNumberId: string, waId: string, body: string): Promise<void> {
-    let clubId: string
-    try {
-      ;({ clubId } = await this.whatsappLinesService.resolveClub(phoneNumberId))
-    } catch {
-      this.logger.warn(`No active club for phoneNumberId=${phoneNumberId} — message ignored`)
-      return
-    }
+    const clubId = await this.resolveClubId(phoneNumberId)
+    if (!clubId) return
 
     const reply = await this.botService.handleMessage(waId, clubId, body)
     await this.whatsappService.sendText(phoneNumberId, waId, reply)
+  }
+
+  private async processAttachment(phoneNumberId: string, waId: string): Promise<void> {
+    const clubId = await this.resolveClubId(phoneNumberId)
+    if (!clubId) return
+
+    const reply = await this.botService.handleAttachment(waId, clubId)
+    await this.whatsappService.sendText(phoneNumberId, waId, reply)
+  }
+
+  private async resolveClubId(phoneNumberId: string): Promise<string | null> {
+    try {
+      const { clubId } = await this.whatsappLinesService.resolveClub(phoneNumberId)
+      return clubId
+    } catch {
+      this.logger.warn(`No active club for phoneNumberId=${phoneNumberId} — message ignored`)
+      return null
+    }
   }
 }

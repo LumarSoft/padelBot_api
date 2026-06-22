@@ -8,5 +8,6 @@ import { WhatsAppService } from './whatsapp.service'
   imports: [WhatsAppLinesModule, BotModule],
   controllers: [WhatsAppController],
   providers: [WhatsAppService],
+  exports: [WhatsAppService],
 })
 export class WhatsAppModule {}
