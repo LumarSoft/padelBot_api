@@ -1,25 +1,27 @@
 import { Injectable } from '@nestjs/common'
 import { Prisma } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { BookingEventsService } from '../events/booking-events.service'
 import { BotState, SessionContext } from './types'
 
 const SESSION_TTL_MINUTES = 30
 
 @Injectable()
 export class ConversationSessionService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: BookingEventsService,
+  ) {}
 
-  /**
-   * Returns the active session for this user+club, or creates one from scratch.
-   * Expired sessions are reset to IDLE but their playerName is preserved so the
-   * user doesn't have to re-enter it on the next interaction.
-   */
-  async getOrCreate(waId: string, clubId: string): Promise<{ id: string; state: string; context: SessionContext }> {
+  async getOrCreate(
+    waId: string,
+    clubId: string,
+  ): Promise<{ id: string; state: string; mode: string; context: SessionContext }> {
     const now = new Date()
 
     const existing = await this.prisma.conversationSession.findUnique({
       where: { waId_clubId: { waId, clubId } },
-      select: { id: true, state: true, context: true, expiresAt: true },
+      select: { id: true, state: true, mode: true, context: true, expiresAt: true },
     })
 
     if (existing) {
@@ -28,25 +30,58 @@ export class ConversationSessionService {
         const reset = await this.prisma.conversationSession.update({
           where: { id: existing.id },
           data: { state: BotState.IDLE, context: keepName(ctx) as Prisma.InputJsonValue, expiresAt: newExpiry() },
-          select: { id: true, state: true, context: true },
+          select: { id: true, state: true, mode: true, context: true },
         })
-        return { id: reset.id, state: reset.state, context: safeParseContext(reset.context) }
+        return { id: reset.id, state: reset.state, mode: reset.mode, context: safeParseContext(reset.context) }
       }
-      return { id: existing.id, state: existing.state, context: ctx }
+      return { id: existing.id, state: existing.state, mode: existing.mode, context: ctx }
     }
 
     const created = await this.prisma.conversationSession.create({
       data: { waId, clubId, state: BotState.IDLE, context: {}, expiresAt: newExpiry() },
-      select: { id: true, state: true, context: true },
+      select: { id: true, state: true, mode: true, context: true },
     })
-    return { id: created.id, state: created.state, context: safeParseContext(created.context) }
+    return { id: created.id, state: created.state, mode: created.mode, context: safeParseContext(created.context) }
   }
 
   async update(id: string, state: BotState, ctx: SessionContext): Promise<void> {
     await this.prisma.conversationSession.update({
       where: { id },
-      data: { state, context: ctx as Prisma.InputJsonValue, expiresAt: newExpiry() },
+      data: {
+        state,
+        context: ctx as Prisma.InputJsonValue,
+        expiresAt: newExpiry(),
+        ...(ctx.playerName ? { playerName: ctx.playerName } : {}),
+      },
     })
+  }
+
+  async setMode(sessionId: string, mode: 'AI' | 'HUMAN'): Promise<void> {
+    await this.prisma.conversationSession.update({
+      where: { id: sessionId },
+      data: { mode },
+    })
+  }
+
+  async saveMessage(sessionId: string, role: 'USER' | 'BOT' | 'ADMIN', content: string): Promise<void> {
+    await this.prisma.conversationMessage.create({
+      data: { sessionId, role, content },
+    })
+
+    // Fetch session to emit SSE event
+    const session = await this.prisma.conversationSession.findUnique({
+      where: { id: sessionId },
+      select: { clubId: true, waId: true, playerName: true },
+    })
+    if (session) {
+      this.events.emitConversation({
+        type: 'conversation.message',
+        clubId: session.clubId,
+        sessionId,
+        waId: session.waId,
+        playerName: session.playerName,
+      })
+    }
   }
 }
 

@@ -96,7 +96,9 @@ export class WhatsAppController {
     if (!clubId) return
 
     const reply = await this.botService.handleMessage(waId, clubId, body)
-    await this.whatsappService.sendText(phoneNumberId, waId, reply)
+    if (reply !== null) {
+      await this.whatsappService.sendText(phoneNumberId, waId, reply)
+    }
   }
 
   private async processAttachment(phoneNumberId: string, waId: string): Promise<void> {
@@ -104,7 +106,9 @@ export class WhatsAppController {
     if (!clubId) return
 
     const reply = await this.botService.handleAttachment(waId, clubId)
-    await this.whatsappService.sendText(phoneNumberId, waId, reply)
+    if (reply !== null) {
+      await this.whatsappService.sendText(phoneNumberId, waId, reply)
+    }
   }
 
   private async resolveClubId(phoneNumberId: string): Promise<string | null> {

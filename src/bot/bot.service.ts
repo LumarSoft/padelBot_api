@@ -43,9 +43,18 @@ export class BotService {
     private readonly llmService: LlmService,
   ) {}
 
-  async handleMessage(waId: string, clubId: string, body: string): Promise<string> {
+  async handleMessage(waId: string, clubId: string, body: string): Promise<string | null> {
     const session = await this.sessionService.getOrCreate(waId, clubId)
     const msg = body.trim()
+
+    // Always persist the incoming message for admin visibility.
+    await this.sessionService.saveMessage(session.id, 'USER', msg)
+
+    // In HUMAN mode the admin handles the reply — bot stays silent.
+    if (session.mode === 'HUMAN') {
+      return null
+    }
+
     const state = session.state as BotState
 
     // "Ya transferí" / "te mando el comprobante" after booking (state is MENU/IDLE):
@@ -64,6 +73,7 @@ export class BotService {
     ].slice(-8)
 
     await this.sessionService.update(session.id, result.state, { ...result.ctx, history: newHistory })
+    await this.sessionService.saveMessage(session.id, 'BOT', result.reply)
     return result.reply
   }
 
@@ -71,11 +81,20 @@ export class BotService {
    * Reply to an inbound image/document (typically a transfer receipt). We don't read
    * the file — the poller confirms the actual money — so we just reassure the player.
    */
-  async handleAttachment(waId: string, clubId: string): Promise<string> {
+  async handleAttachment(waId: string, clubId: string): Promise<string | null> {
+    const session = await this.sessionService.getOrCreate(waId, clubId)
+    await this.sessionService.saveMessage(session.id, 'USER', '[Imagen / comprobante recibido]')
+
+    if (session.mode === 'HUMAN') {
+      return null
+    }
+
     const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
     if (!pending) return ATTACHMENT_NO_PENDING
     const { startsAt, endsAt, court } = pending.slot
-    return paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+    const reply = paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+    await this.sessionService.saveMessage(session.id, 'BOT', reply)
+    return reply
   }
 
   /** Builds the "we're waiting for your transfer" reply, keeping the FSM state put. */

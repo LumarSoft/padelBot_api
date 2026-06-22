@@ -14,6 +14,7 @@ import { WhatsAppModule } from './whatsapp/whatsapp.module'
 import { EventsModule } from './events/events.module'
 import { PaymentsModule } from './payments/payments.module'
 import { ClubsModule } from './clubs/clubs.module'
+import { ConversationsModule } from './conversations/conversations.module'
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { ClubsModule } from './clubs/clubs.module'
     EventsModule,
     PaymentsModule,
     ClubsModule,
+    ConversationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
