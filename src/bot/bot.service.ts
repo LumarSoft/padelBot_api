@@ -33,6 +33,9 @@ import {
   transferPending,
 } from './messages'
 
+/** Inbound messages are truncated to this length before processing (cost / abuse guard). */
+const MAX_MESSAGE_LENGTH = 1000
+
 @Injectable()
 export class BotService {
   constructor(
@@ -45,7 +48,8 @@ export class BotService {
 
   async handleMessage(waId: string, clubId: string, body: string): Promise<string | null> {
     const session = await this.sessionService.getOrCreate(waId, clubId)
-    const msg = body.trim()
+    // Cap length so a pathologically long message can't bloat the LLM prompt / cost.
+    const msg = body.trim().slice(0, MAX_MESSAGE_LENGTH)
 
     // Always persist the incoming message for admin visibility.
     await this.sessionService.saveMessage(session.id, 'USER', msg)

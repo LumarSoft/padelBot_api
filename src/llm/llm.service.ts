@@ -20,10 +20,16 @@ import {
 import { buildSystemPrompt, formatCurrentDate } from './system.prompt'
 import { TOOLS } from './tools'
 
+/** Per-user LLM call budget — protects against spam driving up OpenAI cost. */
+const LLM_WINDOW_MS = 60_000
+const LLM_MAX_CALLS_PER_WINDOW = Number(process.env.LLM_MAX_CALLS_PER_MIN) || 12
+
 @Injectable()
 export class LlmService {
   private readonly logger = new Logger(LlmService.name)
   private readonly openai: OpenAI
+  /** waId → recent LLM-call timestamps (sliding window), for per-user rate limiting. */
+  private readonly llmCalls = new Map<string, number[]>()
 
   constructor(
     private readonly prisma: PrismaService,
@@ -43,12 +49,36 @@ export class LlmService {
     clubId: string,
     waId: string,
   ): Promise<HandlerResult> {
+    // Per-user budget: if exceeded, steer back to the menu instead of calling OpenAI.
+    if (this.isRateLimited(waId)) {
+      this.logger.warn(`LLM rate limit hit for ${waId}`)
+      return { reply: MENU, state: BotState.MENU, ctx }
+    }
     try {
       return await this.callOpenAI(state, message, ctx, clubId, waId)
     } catch (err) {
       this.logger.error('LLM fallback error', err)
       return { reply: MENU, state: BotState.MENU, ctx }
     }
+  }
+
+  /** Sliding-window check; records the call when allowed. Prunes idle users as it goes. */
+  private isRateLimited(waId: string): boolean {
+    const now = Date.now()
+    const recent = (this.llmCalls.get(waId) ?? []).filter(t => now - t < LLM_WINDOW_MS)
+    if (recent.length >= LLM_MAX_CALLS_PER_WINDOW) {
+      this.llmCalls.set(waId, recent)
+      return true
+    }
+    recent.push(now)
+    this.llmCalls.set(waId, recent)
+    // Opportunistically drop other users that have gone idle so the map stays small.
+    if (this.llmCalls.size > 1000) {
+      for (const [id, times] of this.llmCalls) {
+        if (times.every(t => now - t >= LLM_WINDOW_MS)) this.llmCalls.delete(id)
+      }
+    }
+    return false
   }
 
   // ── Core LLM call ──────────────────────────────────────────────────────────

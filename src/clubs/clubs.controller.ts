@@ -1,4 +1,15 @@
-import { Body, Controller, ForbiddenException, Get, Patch, UseGuards } from '@nestjs/common'
+import {
+  Body,
+  Controller,
+  Delete,
+  ForbiddenException,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Patch,
+  UseGuards,
+} from '@nestjs/common'
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { AuthenticatedUser } from '../auth/types/jwt-payload'
@@ -17,9 +28,36 @@ export class ClubsController {
 
   @Patch('me/transfer-config')
   updateTransferConfig(@CurrentUser() user: AuthenticatedUser, @Body() dto: UpdateTransferConfigDto) {
+    this.assertOwner(user)
+    return this.clubsService.updateTransferConfig(user.clubId, dto)
+  }
+
+  // ── MercadoPago Connect (OAuth) ──────────────────────────────────────────────
+
+  @Get('me/mercadopago')
+  getMercadoPagoStatus(@CurrentUser() user: AuthenticatedUser) {
+    return this.clubsService.getMercadoPagoStatus(user.clubId)
+  }
+
+  /** Returns the URL the owner's browser must visit to authorize their MP account. */
+  @Post('me/mercadopago/connect')
+  @HttpCode(HttpStatus.OK)
+  connectMercadoPago(@CurrentUser() user: AuthenticatedUser): { url: string } {
+    this.assertOwner(user)
+    return { url: this.clubsService.buildConnectUrl(user.clubId) }
+  }
+
+  @Delete('me/mercadopago')
+  @HttpCode(HttpStatus.OK)
+  async disconnectMercadoPago(@CurrentUser() user: AuthenticatedUser): Promise<{ disconnected: true }> {
+    this.assertOwner(user)
+    await this.clubsService.disconnectMercadoPago(user.clubId)
+    return { disconnected: true }
+  }
+
+  private assertOwner(user: AuthenticatedUser): void {
     if (user.role !== 'owner') {
       throw new ForbiddenException('Only the club owner can change payment settings')
     }
-    return this.clubsService.updateTransferConfig(user.clubId, dto)
   }
 }

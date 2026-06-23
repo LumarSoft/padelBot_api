@@ -1,8 +1,12 @@
 import { Body, Controller, ForbiddenException, Headers, HttpCode, Post } from '@nestjs/common'
+import { SkipThrottle } from '@nestjs/throttler'
 import { timingSafeEqual } from 'crypto'
 import { PaymentsService } from './payments.service'
 import { TransferNotificationDto } from './dto/transfer-notification.dto'
 
+// Payment provider webhooks can burst; they are authenticated by signature / shared
+// secret, so they opt out of the global IP rate limit.
+@SkipThrottle()
 @Controller('webhooks')
 export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}

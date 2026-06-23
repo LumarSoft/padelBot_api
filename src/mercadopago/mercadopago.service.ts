@@ -21,26 +21,115 @@ export interface MpMoneyIn {
 /** Operation types that represent money arriving into the account (an incoming transfer). */
 const MONEY_IN_OPERATION_TYPES = new Set(['account_fund', 'money_transfer', 'cvu_in'])
 
+/** Tokens + metadata returned by the MercadoPago OAuth token endpoint. */
+export interface MpOAuthTokens {
+  accessToken: string
+  refreshToken: string
+  /** MP user id of the account that authorized the connection. */
+  userId: string
+  /** Absolute expiry of the access token. */
+  expiresAt: Date
+}
+
 @Injectable()
 export class MercadoPagoService {
   private readonly logger = new Logger(MercadoPagoService.name)
   private readonly baseUrl = 'https://api.mercadopago.com'
 
-  private get accessToken() {
+  /** The shared/legacy access token (single-account fallback for clubs not yet connected). */
+  private get envAccessToken() {
     return process.env.MERCADOPAGO_ACCESS_TOKEN ?? ''
   }
 
-  /** Whether an access token is configured (polling/webhook lookups need it). */
-  get isConfigured(): boolean {
-    return this.accessToken.length > 0
+  /** Resolves the token to use for an API call: a per-club token, else the env fallback. */
+  private resolveToken(token?: string): string {
+    return token && token.length > 0 ? token : this.envAccessToken
   }
+
+  /** Whether a shared/legacy access token is configured (fallback reconciliation path). */
+  get isConfigured(): boolean {
+    return this.envAccessToken.length > 0
+  }
+
+  /** Whether MercadoPago Connect (OAuth) is configured so clubs can link their own account. */
+  get isOAuthConfigured(): boolean {
+    return !!(process.env.MP_OAUTH_CLIENT_ID && process.env.MP_OAUTH_CLIENT_SECRET && process.env.MP_OAUTH_REDIRECT_URI)
+  }
+
+  // ── OAuth (MercadoPago Connect) ─────────────────────────────────────────────
+
+  /**
+   * Authorization URL the club owner is redirected to so they grant access to their
+   * own MercadoPago account. `state` is an opaque, signed value we verify on callback.
+   */
+  getAuthorizationUrl(state: string): string {
+    const params = new URLSearchParams({
+      client_id: process.env.MP_OAUTH_CLIENT_ID!,
+      response_type: 'code',
+      platform_id: 'mp',
+      redirect_uri: process.env.MP_OAUTH_REDIRECT_URI!,
+      state,
+    })
+    return `https://auth.mercadopago.com.ar/authorization?${params.toString()}`
+  }
+
+  /** Exchanges the OAuth `code` from the callback for the club's access/refresh tokens. */
+  async exchangeCodeForToken(code: string): Promise<MpOAuthTokens> {
+    return this.requestToken({
+      grant_type: 'authorization_code',
+      client_id: process.env.MP_OAUTH_CLIENT_ID!,
+      client_secret: process.env.MP_OAUTH_CLIENT_SECRET!,
+      code,
+      redirect_uri: process.env.MP_OAUTH_REDIRECT_URI!,
+    })
+  }
+
+  /** Refreshes a club's access token before it expires using its refresh token. */
+  async refreshAccessToken(refreshToken: string): Promise<MpOAuthTokens> {
+    return this.requestToken({
+      grant_type: 'refresh_token',
+      client_id: process.env.MP_OAUTH_CLIENT_ID!,
+      client_secret: process.env.MP_OAUTH_CLIENT_SECRET!,
+      refresh_token: refreshToken,
+    })
+  }
+
+  private async requestToken(payload: Record<string, string>): Promise<MpOAuthTokens> {
+    const res = await fetch(`${this.baseUrl}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(payload),
+    })
+
+    if (!res.ok) {
+      const text = await res.text()
+      this.logger.error(`MP OAuth token error ${res.status}: ${text}`)
+      throw new Error('Failed to obtain MercadoPago token')
+    }
+
+    const data = (await res.json()) as {
+      access_token: string
+      refresh_token: string
+      user_id: number | string
+      expires_in: number
+    }
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      userId: String(data.user_id),
+      expiresAt: new Date(Date.now() + (data.expires_in ?? 0) * 1000),
+    }
+  }
+
+  // ── Payments API ────────────────────────────────────────────────────────────
 
   /**
    * Lists approved money-in movements (incoming transfers) created since `since`.
    * MercadoPago does NOT fire `payment` webhooks for plain incoming transfers, but
    * it does expose them here — so this is how the deposit flow is reconciled.
+   * `token` selects the account to read (a club's own token; falls back to env).
    */
-  async listRecentMoneyIn(since: Date): Promise<MpMoneyIn[]> {
+  async listRecentMoneyIn(since: Date, token?: string): Promise<MpMoneyIn[]> {
     const params = new URLSearchParams({
       sort: 'date_created',
       criteria: 'desc',
@@ -52,7 +141,7 @@ export class MercadoPagoService {
     })
 
     const res = await fetch(`${this.baseUrl}/v1/payments/search?${params.toString()}`, {
-      headers: { Authorization: `Bearer ${this.accessToken}` },
+      headers: { Authorization: `Bearer ${this.resolveToken(token)}` },
     })
 
     if (!res.ok) {
@@ -81,9 +170,9 @@ export class MercadoPagoService {
       }))
   }
 
-  async getPayment(paymentId: string): Promise<MpPayment> {
+  async getPayment(paymentId: string, token?: string): Promise<MpPayment> {
     const res = await fetch(`${this.baseUrl}/v1/payments/${paymentId}`, {
-      headers: { Authorization: `Bearer ${this.accessToken}` },
+      headers: { Authorization: `Bearer ${this.resolveToken(token)}` },
     })
 
     if (!res.ok) {

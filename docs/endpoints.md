@@ -569,6 +569,67 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 
 `403 Forbidden` — caller is not the club owner
 
+### GET /clubs/me/mercadopago
+
+Returns whether the caller's club has connected its own MercadoPago account (OAuth).
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{ "connected": true, "connectedAt": "2026-06-21T18:00:00.000Z", "mpUserId": "123456789" }
+```
+
+### POST /clubs/me/mercadopago/connect
+
+Starts the MercadoPago Connect (OAuth) flow. Returns the authorization URL the owner's
+browser must visit to authorize their MercadoPago account. **Owner only.**
+
+**Auth required:** Yes (role `owner`)
+
+`200 OK`
+
+```json
+{ "url": "https://auth.mercadopago.com.ar/authorization?client_id=...&state=..." }
+```
+
+`400 Bad Request` — MercadoPago Connect or `ENCRYPTION_KEY` not configured on the server
+
+`403 Forbidden` — caller is not the club owner
+
+### GET /clubs/mercadopago/callback
+
+OAuth callback hit by MercadoPago after the owner authorizes. **Not JWT-authenticated** —
+secured by the signed, time-limited `state`. Exchanges the `code` for the club's tokens
+(stored encrypted) and redirects the browser back to the panel (`/configuracion?mp=connected`
+or `?mp=error`).
+
+**Auth required:** No (verified via signed `state`)
+
+**Query params**
+
+| Field | Type   | Required | Notes                          |
+| ----- | ------ | -------- | ------------------------------ |
+| code  | string | Yes      | OAuth authorization code       |
+| state | string | Yes      | Signed state issued at connect |
+
+`302 Found` — redirect to the panel
+
+### DELETE /clubs/me/mercadopago
+
+Disconnects the club's MercadoPago account (clears stored tokens). **Owner only.**
+
+**Auth required:** Yes (role `owner`)
+
+`200 OK`
+
+```json
+{ "disconnected": true }
+```
+
+`403 Forbidden` — caller is not the club owner
+
 ## Payments (Webhooks)
 
 Deposits are paid by bank transfer to the club's MercadoPago alias/CVU. An incoming transfer is matched to a pending booking by its **exact unique amount** (`transferAmountCents`), then the booking is confirmed and the player notified. These endpoints are unauthenticated by JWT — they are secured by a signature / shared secret instead.

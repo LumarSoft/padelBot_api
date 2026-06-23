@@ -1,4 +1,5 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, UseGuards } from '@nestjs/common'
+import { Throttle } from '@nestjs/throttler'
 import { Request } from 'express'
 import { AuthService, LoginResult } from './auth.service'
 import { LoginDto } from './dto/login.dto'
@@ -9,6 +10,8 @@ import { AuthenticatedUser } from './types/jwt-payload'
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  // Tight limit to blunt credential brute-force / stuffing: 5 attempts per minute per IP.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
   login(@Body() dto: LoginDto): Promise<LoginResult> {

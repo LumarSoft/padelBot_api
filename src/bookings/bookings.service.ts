@@ -395,24 +395,31 @@ export class BookingsService {
 
   /**
    * Picks the exact amount the player must transfer so an incoming transfer maps to
-   * exactly one pending booking. Takes the deposit rounded down to whole pesos and
-   * appends a unique 1-99 centavos tag not currently used by any other pending
-   * booking sharing that whole-peso amount. Uniqueness is global (the MercadoPago
-   * account is shared across clubs), and checked inside the caller's transaction.
-   * Falls back to the raw deposit if all 99 tags are taken (manual confirmation
-   * then resolves the ambiguity).
+   * exactly one pending booking. The centavos act as the unique identifier within a
+   * whole-peso bucket. We PREFER the deposit's real amount (its own centavos) so the
+   * player almost always transfers a clean number — only on a collision with another
+   * pending booking in the same bucket do we pick a different free centavos tag (0-99).
+   * Uniqueness is checked inside the caller's transaction. Falls back to the raw deposit
+   * if all 100 tags are taken (manual confirmation then resolves the ambiguity).
    */
   private async allocateTransferAmount(tx: Prisma.TransactionClient, depositCents: number): Promise<number> {
     const wholePesos = Math.floor(depositCents / 100) * 100
+    const preferredTag = depositCents - wholePesos // the deposit's real centavos (0-99)
+
     const taken = await tx.booking.findMany({
       where: {
         status: 'PENDING_PAYMENT',
-        transferAmountCents: { gte: wholePesos + 1, lte: wholePesos + 99 },
+        transferAmountCents: { gte: wholePesos, lte: wholePesos + 99 },
       },
       select: { transferAmountCents: true },
     })
     const usedTags = new Set(taken.map(b => b.transferAmountCents! - wholePesos))
-    for (let tag = 1; tag <= 99; tag++) {
+
+    // Prefer the exact deposit so most players transfer the clean, real amount.
+    if (!usedTags.has(preferredTag)) return wholePesos + preferredTag
+
+    // Collision: fall back to any other free centavos tag as the unique identifier.
+    for (let tag = 0; tag <= 99; tag++) {
       if (!usedTags.has(tag)) return wholePesos + tag
     }
     this.logger.warn(`No free transfer-amount tag for ${wholePesos} — falling back to raw deposit`)
@@ -453,10 +460,21 @@ export class BookingsService {
    * happened to be assigned the same (freed-up) amount. Confirms ONLY on a single
    * match — otherwise it leaves everything for manual review (never auto-confirm
    * an ambiguous transfer). Returns the confirmed booking id, or null.
+   *
+   * `clubId` scopes the match to a single club: pass it when the transfer was read
+   * from that club's OWN MercadoPago account (so a movement can only confirm that
+   * club's bookings). Omit it for the shared/legacy account, where amounts are unique
+   * globally across all clubs sharing it.
    */
-  async confirmPaymentByAmount(amountCents: number, paymentRef: string, paidAt: Date): Promise<string | null> {
+  async confirmPaymentByAmount(
+    amountCents: number,
+    paymentRef: string,
+    paidAt: Date,
+    clubId?: string,
+  ): Promise<string | null> {
     const candidates = await this.prisma.booking.findMany({
       where: {
+        ...(clubId ? { clubId } : {}),
         status: 'PENDING_PAYMENT',
         transferAmountCents: amountCents,
         createdAt: { lte: paidAt },

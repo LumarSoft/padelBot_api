@@ -2,6 +2,7 @@ import { Injectable, Logger, UnauthorizedException } from '@nestjs/common'
 import { Cron, CronExpression, Interval } from '@nestjs/schedule'
 import { PrismaService } from '../prisma/prisma.service'
 import { BookingsService } from '../bookings/bookings.service'
+import { ClubsService } from '../clubs/clubs.service'
 import { MercadoPagoService, MpMoneyIn, MpPayment } from '../mercadopago/mercadopago.service'
 import { WhatsAppService } from '../whatsapp/whatsapp.service'
 
@@ -16,6 +17,7 @@ export class PaymentsService {
 
   constructor(
     private readonly bookingsService: BookingsService,
+    private readonly clubsService: ClubsService,
     private readonly mp: MercadoPagoService,
     private readonly whatsapp: WhatsAppService,
     private readonly prisma: PrismaService,
@@ -73,22 +75,73 @@ export class PaymentsService {
    * transfers, but exposes them in the payments API. Each movement is matched by its
    * exact amount within the booking's pending window, so re-scanning the same window
    * each tick is safe (already-confirmed bookings simply no longer match).
-   * Skips the API call entirely when nothing is pending.
+   *
+   * Multi-tenant: each club that connected its OWN MercadoPago account is polled with
+   * that account's token and matched scoped to its clubId. Clubs that have NOT connected
+   * fall back to the shared env account, polled once and matched globally (amounts are
+   * globally unique there). A broken token for one club never blocks the others.
+   * Skips everything when nothing is pending.
    */
   @Interval(POLL_INTERVAL_MS)
   async pollIncomingTransfers(): Promise<void> {
-    if (!this.mp.isConfigured) return
+    const pendingClubIds = await this.pendingClubIds()
+    if (pendingClubIds.length === 0) return
 
-    const pendingCount = await this.prisma.booking.count({ where: { status: 'PENDING_PAYMENT' } })
-    if (pendingCount === 0) return
+    const since = new Date(Date.now() - POLL_WINDOW_MS)
+    let usedSharedAccount = false
 
+    for (const clubId of pendingClubIds) {
+      const token = await this.clubsService.getValidMpAccessToken(clubId)
+
+      if (token) {
+        await this.reconcileClub(clubId, token, since)
+      } else {
+        // No own account → relies on the shared env account; poll it once below.
+        usedSharedAccount = true
+      }
+    }
+
+    if (usedSharedAccount && this.mp.isConfigured) {
+      await this.reconcileSharedAccount(since)
+    }
+  }
+
+  /** Distinct clubs that currently have at least one pending-payment booking. */
+  private async pendingClubIds(): Promise<string[]> {
+    const rows = await this.prisma.booking.findMany({
+      where: { status: 'PENDING_PAYMENT' },
+      select: { clubId: true },
+      distinct: ['clubId'],
+    })
+    return rows.map(r => r.clubId)
+  }
+
+  /** Reconciles one club's bookings against its OWN MercadoPago account. */
+  private async reconcileClub(clubId: string, token: string, since: Date): Promise<void> {
     let movements: MpMoneyIn[]
     try {
-      movements = await this.mp.listRecentMoneyIn(new Date(Date.now() - POLL_WINDOW_MS))
+      movements = await this.mp.listRecentMoneyIn(since, token)
+    } catch {
+      this.logger.error(`MercadoPago poll failed for club ${clubId}`)
+      return
+    }
+    for (const m of movements) {
+      const bookingId = await this.bookingsService.confirmPaymentByAmount(m.amountCents, m.id, m.dateCreated, clubId)
+      if (bookingId) {
+        this.logger.log(`Confirmed booking ${bookingId} from MP transfer ${m.id} (${m.amountCents} cents)`)
+        await this.sendPaymentConfirmedMessage(bookingId)
+      }
+    }
+  }
+
+  /** Reconciles bookings of clubs on the shared env account (matched globally by amount). */
+  private async reconcileSharedAccount(since: Date): Promise<void> {
+    let movements: MpMoneyIn[]
+    try {
+      movements = await this.mp.listRecentMoneyIn(since)
     } catch {
       return // already logged in the service
     }
-
     for (const m of movements) {
       const bookingId = await this.bookingsService.confirmPaymentByAmount(m.amountCents, m.id, m.dateCreated)
       if (bookingId) {

@@ -27,6 +27,7 @@
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.0.1",
     "@nestjs/schedule": "^6.1.3",
+    "@nestjs/throttler": "^6.5.0",
     "@prisma/adapter-mariadb": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "bcrypt": "^6.0.0",
@@ -75,6 +76,9 @@
     ],
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
+    "moduleNameMapper": {
+      "^generated/(.*)$": "<rootDir>/../generated/$1"
+    },
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },

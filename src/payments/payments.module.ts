@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common'
 import { BookingsModule } from '../bookings/bookings.module'
+import { ClubsModule } from '../clubs/clubs.module'
 import { MercadoPagoModule } from '../mercadopago/mercadopago.module'
 import { WhatsAppModule } from '../whatsapp/whatsapp.module'
 import { PaymentsController } from './payments.controller'
@@ -7,7 +8,7 @@ import { PaymentsAdminController } from './payments-admin.controller'
 import { PaymentsService } from './payments.service'
 
 @Module({
-  imports: [BookingsModule, MercadoPagoModule, WhatsAppModule],
+  imports: [BookingsModule, ClubsModule, MercadoPagoModule, WhatsAppModule],
   controllers: [PaymentsController, PaymentsAdminController],
   providers: [PaymentsService],
 })

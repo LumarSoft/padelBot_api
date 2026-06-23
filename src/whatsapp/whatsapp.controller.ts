@@ -11,10 +11,14 @@ import {
   Req,
 } from '@nestjs/common'
 import { Request } from 'express'
+import { SkipThrottle } from '@nestjs/throttler'
 import { BotService } from '../bot/bot.service'
 import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
 import { WhatsAppService } from './whatsapp.service'
 
+// Meta delivers (and retries) message webhooks in bursts — rate limiting would drop
+// legitimate inbound messages. The endpoint is already verified by HMAC signature.
+@SkipThrottle()
 @Controller('')
 export class WhatsAppController {
   private readonly logger = new Logger(WhatsAppController.name)
@@ -35,7 +39,10 @@ export class WhatsAppController {
     @Query('hub.verify_token') token: string,
     @Query('hub.challenge') challenge: string,
   ): string {
-    if (mode === 'subscribe' && token === process.env.META_VERIFY_TOKEN) {
+    // Canonical name is WHATSAPP_VERIFY_TOKEN; META_VERIFY_TOKEN kept as a fallback
+    // so existing deployments don't break on the rename.
+    const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN ?? process.env.META_VERIFY_TOKEN
+    if (mode === 'subscribe' && token === verifyToken) {
       return challenge
     }
     throw new ForbiddenException('Webhook verification failed')
@@ -76,7 +83,12 @@ export class WhatsAppController {
 
         for (const message of value?.messages ?? []) {
           const waId: string | undefined = message?.from
-          if (!waId) continue
+          const messageId: string | undefined = message?.id
+          if (!waId || !messageId) continue
+
+          // Skip duplicates: Meta retries deliveries, which would otherwise double-book
+          // or double-charge LLM calls. claimMessage is an atomic first-writer-wins.
+          if (!(await this.whatsappService.claimMessage(messageId))) continue
 
           if (message?.type === 'text') {
             const body: string | undefined = message?.text?.body

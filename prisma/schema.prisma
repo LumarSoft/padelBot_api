@@ -16,6 +16,19 @@ model Club {
   transferAlias  String?
   /// Account holder name shown to players alongside the alias ("titular").
   transferHolder String?
+
+  /// MercadoPago Connect (OAuth) — each club connects its OWN MP account so the deposit
+  /// money lands in the club's account and the poller can reconcile it with that account's
+  /// token. Null until the owner connects MercadoPago. Tokens are stored ENCRYPTED at rest.
+  mpAccessToken    String?  @db.Text
+  mpRefreshToken   String?  @db.Text
+  /// MercadoPago user id of the connected account (its own, for display / debugging).
+  mpUserId         String?
+  /// When the connected access token expires; the poller refreshes it before then.
+  mpTokenExpiresAt DateTime?
+  /// When the owner connected MercadoPago (null = not connected).
+  mpConnectedAt    DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -126,12 +139,11 @@ model Booking {
   recurringBooking   RecurringBooking? @relation(fields: [recurringBookingId], references: [id], onDelete: SetNull)
   /// Amount (cents) the first player must pay to confirm this slot.
   depositCents       Int               @default(0)
-  /// Exact amount (cents) the player must transfer. Equals depositCents rounded to
-  /// whole pesos plus a unique 1-99 centavos tag, so an incoming transfer maps to
-  /// exactly one pending booking during reconciliation. Null for admin-created bookings.
+  /// Exact amount (cents) the player must transfer. Normally equals the real deposit;
+  /// only on a collision with another pending booking in the same whole-peso bucket is
+  /// a different centavos tag chosen, so an incoming transfer still maps to exactly one
+  /// pending booking during reconciliation. Null for admin-created bookings.
   transferAmountCents Int?
-  /// MercadoPago preference ID returned when the payment link was created.
-  mpPreferenceId     String?
   /// MercadoPago payment ID set once the webhook confirms the payment.
   mpPaymentId        String?
   /// When the pending payment link expires; null for admin-created bookings.
@@ -202,6 +214,17 @@ model ConversationMessage {
 
   @@index([sessionId])
   @@index([sessionId, createdAt])
+}
+
+/// Dedup log of WhatsApp webhook messages already handled. Meta retries webhook
+/// deliveries (on slow/non-200 responses), so we record each Meta message id and skip
+/// re-processing — prevents double bookings / duplicate LLM calls. Rows are pruned daily.
+model ProcessedWebhookMessage {
+  /// Meta's message id (wamid…), globally unique per message.
+  id        String   @id
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
 }
 
 /// A weekly recurring reservation created by an admin.
