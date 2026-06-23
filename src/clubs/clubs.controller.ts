@@ -15,11 +15,23 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { AuthenticatedUser } from '../auth/types/jwt-payload'
 import { ClubsService } from './clubs.service'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
+import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
 
 @Controller('clubs')
 @UseGuards(JwtAuthGuard)
 export class ClubsController {
   constructor(private readonly clubsService: ClubsService) {}
+
+  @Get('me/profile')
+  getProfile(@CurrentUser() user: AuthenticatedUser) {
+    return this.clubsService.getProfile(user.clubId)
+  }
+
+  @Patch('me/profile')
+  updateProfile(@CurrentUser() user: AuthenticatedUser, @Body() dto: UpdateClubProfileDto) {
+    this.assertOwner(user)
+    return this.clubsService.updateProfile(user.clubId, dto)
+  }
 
   @Get('me/transfer-config')
   getTransferConfig(@CurrentUser() user: AuthenticatedUser) {

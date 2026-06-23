@@ -292,7 +292,7 @@ export class BotService {
     // player can't actually pay for.
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { transferAlias: true, transferHolder: true },
+      select: { transferAlias: true, transferHolder: true, depositMode: true },
     })
     if (!club?.transferAlias) {
       return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
@@ -326,6 +326,7 @@ export class BotService {
         ctx,
         { alias: club.transferAlias, holder: club.transferHolder },
         pendingBooking.transferAmountCents,
+        club.depositMode,
       ),
       state: BotState.MENU,
       ctx: keepName(ctx),

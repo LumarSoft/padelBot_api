@@ -123,13 +123,18 @@ export function transferPending(
   ctx: SessionContext,
   transfer: { alias: string; holder: string | null },
   transferAmountCents: number,
+  depositMode: 'DEPOSIT' | 'FULL' = 'DEPOSIT',
 ): string {
   const holderLine = transfer.holder ? `\n👤 Titular: *${transfer.holder}*` : ''
+  const whatToPay =
+    depositMode === 'FULL'
+      ? 'transferí el total de la cancha'
+      : 'transferí la seña para reservar'
   return (
     `⏳ *Reserva pre-confirmada — falta el pago*\n\n` +
     `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n` +
     `🎾 ${ctx.selectedCourtName}\n\n` +
-    `Para confirmar el turno, transferí tu parte de la seña (1 de 4 jugadores):\n\n` +
+    `Para confirmar el turno, ${whatToPay}:\n\n` +
     `💰 Importe *exacto*: *${fmtExact(transferAmountCents)}*\n` +
     `🏦 Alias: *${transfer.alias}*${holderLine}\n\n` +
     `⚠️ Transferí el monto *exacto, con los centavos* — así reconozco tu pago al instante y te confirmo solo. ` +

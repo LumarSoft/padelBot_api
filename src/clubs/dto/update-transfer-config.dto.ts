@@ -1,4 +1,5 @@
-import { IsOptional, IsString, MaxLength } from 'class-validator'
+import { IsEnum, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
+import { DepositMode } from 'generated/prisma/client'
 
 export class UpdateTransferConfigDto {
   /** MercadoPago alias/CVU players transfer the deposit to. Empty string clears it. */
@@ -12,4 +13,16 @@ export class UpdateTransferConfigDto {
   @IsString()
   @MaxLength(120)
   transferHolder?: string
+
+  /** DEPOSIT = charge a seña (depositPercent of the price); FULL = charge the whole court. */
+  @IsOptional()
+  @IsEnum(DepositMode)
+  depositMode?: DepositMode
+
+  /** Seña as a percentage of the court price (1–100). Only used when depositMode = DEPOSIT. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  depositPercent?: number
 }

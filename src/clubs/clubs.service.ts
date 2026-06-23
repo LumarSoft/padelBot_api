@@ -3,10 +3,19 @@ import { PrismaService } from '../prisma/prisma.service'
 import { CryptoService } from '../common/crypto/crypto.service'
 import { MercadoPagoService } from '../mercadopago/mercadopago.service'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
+import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
+import { DepositMode } from 'generated/prisma/client'
 
 export interface TransferConfig {
   transferAlias: string | null
   transferHolder: string | null
+  depositMode: DepositMode
+  depositPercent: number
+}
+
+export interface ClubProfile {
+  name: string
+  slug: string
 }
 
 export interface MercadoPagoStatus {
@@ -32,10 +41,27 @@ export class ClubsService {
     private readonly mp: MercadoPagoService,
   ) {}
 
+  async getProfile(clubId: string): Promise<ClubProfile> {
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: { name: true, slug: true },
+    })
+    if (!club) throw new NotFoundException(`Club ${clubId} not found`)
+    return club
+  }
+
+  async updateProfile(clubId: string, dto: UpdateClubProfileDto): Promise<ClubProfile> {
+    await this.prisma.club.update({
+      where: { id: clubId },
+      data: { name: dto.name.trim() },
+    })
+    return this.getProfile(clubId)
+  }
+
   async getTransferConfig(clubId: string): Promise<TransferConfig> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { transferAlias: true, transferHolder: true },
+      select: { transferAlias: true, transferHolder: true, depositMode: true, depositPercent: true },
     })
     if (!club) throw new NotFoundException(`Club ${clubId} not found`)
     return club
@@ -47,6 +73,8 @@ export class ClubsService {
       data: {
         ...(dto.transferAlias !== undefined ? { transferAlias: dto.transferAlias.trim() || null } : {}),
         ...(dto.transferHolder !== undefined ? { transferHolder: dto.transferHolder.trim() || null } : {}),
+        ...(dto.depositMode !== undefined ? { depositMode: dto.depositMode } : {}),
+        ...(dto.depositPercent !== undefined ? { depositPercent: dto.depositPercent } : {}),
       },
     })
     return this.getTransferConfig(clubId)

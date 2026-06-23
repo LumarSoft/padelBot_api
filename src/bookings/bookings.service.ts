@@ -53,7 +53,8 @@ type BookingForEvent = {
   slot: { startsAt: Date; endsAt: Date; court: { name: string } }
 }
 
-const PLAYERS_PER_MATCH = 4
+/** Default seña percentage (one of four padel players) when a club has none set. */
+const DEFAULT_DEPOSIT_PERCENT = 25
 /** Minutes a player has to transfer before the pending booking auto-cancels (env-tunable). */
 const PAYMENT_WINDOW_MS = (Number(process.env.PAYMENT_WINDOW_MIN) || 30) * 60 * 1000
 
@@ -293,7 +294,7 @@ export class BookingsService {
     if (!slot) throw new NotFoundException(`Slot ${dto.slotId} not found`)
     if (slot.status !== SlotStatus.AVAILABLE) throw new ConflictException(`Slot ${dto.slotId} is not available`)
 
-    const depositCents = Math.ceil(slot.priceCents / PLAYERS_PER_MATCH)
+    const depositCents = await this.resolveDepositCents(clubId, slot.priceCents)
     const paymentExpiresAt = new Date(Date.now() + PAYMENT_WINDOW_MS)
 
     const booking = await this.prisma.$transaction(async tx => {
@@ -338,7 +339,7 @@ export class BookingsService {
     const { startsAt, endsAt } = bandDateTimes(input.dateKey, band)
     if (startsAt.getTime() <= Date.now()) throw new ConflictException('Cannot book a slot in the past')
 
-    const depositCents = Math.ceil(court.priceCents / PLAYERS_PER_MATCH)
+    const depositCents = await this.resolveDepositCents(clubId, court.priceCents)
     const paymentExpiresAt = new Date(Date.now() + PAYMENT_WINDOW_MS)
 
     const booking = await this.prisma.$transaction(async tx => {
@@ -391,6 +392,22 @@ export class BookingsService {
     })
 
     return { id: booking.id, depositCents: booking.depositCents, transferAmountCents: booking.transferAmountCents! }
+  }
+
+  /**
+   * Resolves how much the player must pay to confirm, per the club's payment policy:
+   * the full court price (depositMode = FULL) or a percentage of it as the seña
+   * (depositMode = DEPOSIT, default 25% — one of four padel players). A 0-priced
+   * court yields a 0 deposit, preserving the previous behavior.
+   */
+  private async resolveDepositCents(clubId: string, priceCents: number): Promise<number> {
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: { depositMode: true, depositPercent: true },
+    })
+    if (club?.depositMode === 'FULL') return priceCents
+    const percent = club?.depositPercent ?? DEFAULT_DEPOSIT_PERCENT
+    return Math.ceil((priceCents * percent) / 100)
   }
 
   /**

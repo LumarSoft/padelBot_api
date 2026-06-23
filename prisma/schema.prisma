@@ -17,6 +17,14 @@ model Club {
   /// Account holder name shown to players alongside the alias ("titular").
   transferHolder String?
 
+  /// How much the bot asks the player to transfer to confirm a booking:
+  /// DEPOSIT = a partial deposit (seña) of `depositPercent` of the court price,
+  /// FULL = the whole court price. The owner sets this per club.
+  depositMode    DepositMode @default(DEPOSIT)
+  /// Percentage of the court price charged as the seña when depositMode = DEPOSIT.
+  /// Default 25 (one of four padel players). Ignored when depositMode = FULL.
+  depositPercent Int         @default(25)
+
   /// MercadoPago Connect (OAuth) — each club connects its OWN MP account so the deposit
   /// money lands in the club's account and the poller can reconcile it with that account's
   /// token. Null until the owner connects MercadoPago. Tokens are stored ENCRYPTED at rest.
@@ -44,6 +52,12 @@ model Club {
 enum Role {
   OWNER
   STAFF
+}
+
+/// Whether the bot charges a partial deposit (seña) or the full court price.
+enum DepositMode {
+  DEPOSIT
+  FULL
 }
 
 /// A physical court the club offers slots on.
