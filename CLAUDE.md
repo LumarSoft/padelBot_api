@@ -47,7 +47,7 @@ npx prisma studio        # visual DB browser
 
 ## Product & domain
 
-This is **Canchea**, a multi-tenant SaaS for padel clubs in Rosario, Argentina (see `../docs/BITACORA.md` for the product story). A WhatsApp bot attends players, books courts and reconciles the deposit ("seña") transfer automatically; owners manage everything from the Next.js panel (`../padelBot_admin`). The data model and tenant boundaries live in `prisma/schema.prisma` — **read it first**; it is the source of truth.
+This is **PadelBot**, a multi-tenant SaaS for padel clubs in Rosario, Argentina (see `../docs/BITACORA.md` for the product story). A WhatsApp bot attends players, books courts and reconciles the deposit ("seña") transfer automatically; owners manage everything from the Next.js panel (`../padelBot_admin`). The data model and tenant boundaries live in `prisma/schema.prisma` — **read it first**; it is the source of truth.
 
 **Multi-tenant of record:** `Club` is the tenant. Every relevant row (`Court`, `Slot`, `Booking`, `RecurringBooking`, `WhatsAppLine`, `ConversationSession`, `User`) carries a `clubId` and is isolated per club. **Never** write a query that can cross tenants — always scope by the caller's `clubId` from the JWT.
 
@@ -73,7 +73,7 @@ This is **Canchea**, a multi-tenant SaaS for padel clubs in Rosario, Argentina (
 **Payment policy (seña vs full):** what the bot asks the player to transfer is per-club config on `Club`: `depositMode` (`DEPOSIT` = a seña of `depositPercent`% of the court price, default 25%; `FULL` = the whole court price). `BookingsService.resolveDepositCents` computes the amount; the bot's confirmation wording adapts in `messages.ts`. The owner sets this in the panel's Pagos tab. (Per-player choice at booking time is a future extension — see ROADMAP.)
 - `common/crypto` — AES encrypt/decrypt for secrets at rest. `common/filters` — global exception filter.
 
-**What's NOT built yet (see `../docs/ROADMAP.md`):** self-service onboarding (alta of a club without manual DB work), SaaS billing of Canchea itself, configurable slot duration per court, "tipo de complejo" and multi-venue (one brand with several addresses), player reminders, and automated tests of the critical flows.
+**What's NOT built yet (see `../docs/ROADMAP.md`):** self-service onboarding (alta of a club without manual DB work), SaaS billing of PadelBot itself, configurable slot duration per court, "tipo de complejo" and multi-venue (one brand with several addresses), player reminders, and automated tests of the critical flows.
 
 > ⚠️ **Pending migration:** `prisma/migrations/20260623190000_add_deposit_mode` (adds `Club.depositMode`/`depositPercent`) must be applied with `npx prisma migrate deploy` (or `dev`) before running against a real DB. The Prisma client is already regenerated.
 

@@ -83,7 +83,10 @@ export class StatsService {
       ingresosCents: ingresos._sum.depositCents ?? 0,
       reservasBot,
       reservasPanel,
-      series: this.buildSeries(startKey, createdInWindow.map(b => b.createdAt)),
+      series: this.buildSeries(
+        startKey,
+        createdInWindow.map(b => b.createdAt),
+      ),
     }
   }
 

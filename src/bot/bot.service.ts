@@ -24,7 +24,6 @@ import {
   NO_SLOTS,
   PAYMENT_CLAIM_NO_PENDING,
   PAYMENT_UNAVAILABLE,
-  WELCOME,
   cancelList,
   confirmBooking,
   confirmCancel,
@@ -33,7 +32,9 @@ import {
   noAvailabilityWithSuggestions,
   paymentClaimAck,
   slotsList,
+  thanksReply,
   transferPending,
+  welcome,
 } from './messages'
 
 /** Inbound messages are truncated to this length before processing (cost / abuse guard). */
@@ -157,16 +158,60 @@ export class BotService {
       case BotState.CANCEL_CONFIRM:
         return this.onCancelConfirm(msg, ctx, clubId)
       default:
-        return Promise.resolve({ reply: WELCOME, state: BotState.MENU, ctx })
+        return Promise.resolve({ reply: welcome(ctx.playerName), state: BotState.MENU, ctx })
     }
+  }
+
+  /**
+   * Guard placed in front of every LLM fallback: trivial intents (greetings, thanks)
+   * are answered with a predefined message — for free — and only genuinely ambiguous
+   * messages reach the LLM. Applied across all flows so we don't pay for "hola"/"gracias".
+   */
+  private fallback(
+    state: BotState,
+    msg: string,
+    ctx: SessionContext,
+    clubId: string,
+    waId: string,
+  ): Promise<HandlerResult> {
+    const cheap = this.cheapReply(state, msg, ctx)
+    if (cheap) return Promise.resolve(cheap)
+    return this.llmService.handleFallback(state, msg, ctx, clubId, waId)
+  }
+
+  /**
+   * A predefined answer for a trivial intent, or null when the message is real intent
+   * that the LLM should interpret. On the menu a greeting/thanks returns the menu;
+   * mid-flow it keeps the player on the current step instead of resetting.
+   */
+  private cheapReply(state: BotState, msg: string, ctx: SessionContext): HandlerResult | null {
+    const menuLike = state === BotState.MENU || state === BotState.IDLE
+
+    if (isGreeting(msg)) {
+      if (menuLike) return { reply: welcome(ctx.playerName), state: BotState.MENU, ctx }
+      const step = stepPrompt(state, ctx)
+      if (step) {
+        const hi = ctx.playerName ? `👋 ¡Hola, ${ctx.playerName}!` : '👋 ¡Hola!'
+        return { reply: `${hi} Seguimos con lo que estábamos 🎾\n\n${step}`, state, ctx }
+      }
+    }
+
+    if (isThanks(msg)) {
+      if (menuLike) return { reply: thanksReply(ctx.playerName), state: BotState.MENU, ctx }
+      const step = stepPrompt(state, ctx)
+      if (step) return { reply: `¡De nada! 🎾\n\n${step}`, state, ctx }
+    }
+
+    return null
   }
 
   // ── State handlers ─────────────────────────────────────────────────────────
 
   private onIdle(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    // A bare greeting / empty message → warm welcome with the menu.
+    // A bare greeting / empty message → warm welcome with the menu (personalized
+    // with the player's name when we know it — no LLM call needed).
     if (isGreeting(msg)) {
-      return Promise.resolve({ reply: WELCOME, state: BotState.MENU, ctx })
+      return Promise.resolve({ reply: welcome(ctx.playerName), state: BotState.MENU, ctx })
     }
     // Anything else is real intent → handle it as if we were already at the menu.
     return this.onMenu(msg, ctx, clubId, waId)
@@ -179,7 +224,7 @@ export class BotService {
     // need the LLM for it.
     if (/\b(cancelar|anular|dar de baja)\b/i.test(msg)) return this.buildCancelList(ctx, clubId, waId)
     // Natural language → LLM interprets intent
-    return this.llmService.handleFallback(BotState.MENU, msg, ctx, clubId, waId)
+    return this.fallback(BotState.MENU, msg, ctx, clubId, waId)
   }
 
   /** Hands the conversation to a human advisor and flags it for the panel. */
@@ -192,7 +237,7 @@ export class BotService {
     const date = parseDateDMY(msg)
     if (!date) {
       // Could be "mañana", "el sábado", etc. → LLM resolves
-      return this.llmService.handleFallback(BotState.BOOK_DATE, msg, ctx, clubId, waId)
+      return this.fallback(BotState.BOOK_DATE, msg, ctx, clubId, waId)
     }
 
     const courts = await this.availability.courtsForDate(clubId, date)
@@ -264,7 +309,7 @@ export class BotService {
 
     if (!court) {
       // Couldn't pin a court by name → let the LLM resolve looser phrasings.
-      return this.llmService.handleFallback(BotState.BOOK_COURT, msg, ctx, clubId, waId)
+      return this.fallback(BotState.BOOK_COURT, msg, ctx, clubId, waId)
     }
 
     // "Suggest court at time" flow: the time was already chosen, so resolve that band
@@ -307,7 +352,7 @@ export class BotService {
 
     if (!slot) {
       // Non-time phrasings ("el último", "el primero") → LLM resolves.
-      return this.llmService.handleFallback(BotState.BOOK_SLOT, msg, ctx, clubId, waId)
+      return this.fallback(BotState.BOOK_SLOT, msg, ctx, clubId, waId)
     }
 
     const nextCtx: SessionContext = {
@@ -383,12 +428,17 @@ export class BotService {
       return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
-    return this.createPendingBooking(clubId, waId, { ...ctx, playerDni: dni }, {
-      transferAlias: club.transferAlias,
-      transferHolder: club.transferHolder,
-      depositMode: club.depositMode,
-      requireDniMatch: club.requireDniMatch,
-    })
+    return this.createPendingBooking(
+      clubId,
+      waId,
+      { ...ctx, playerDni: dni },
+      {
+        transferAlias: club.transferAlias,
+        transferHolder: club.transferHolder,
+        depositMode: club.depositMode,
+        requireDniMatch: club.requireDniMatch,
+      },
+    )
   }
 
   /** Locks the slot with a pending booking and tells the player exactly how much to transfer. */
@@ -447,7 +497,7 @@ export class BotService {
 
     if (isNaN(idx) || idx < 0 || idx >= options.length) {
       // Could be a description like "el del sábado" → LLM resolves
-      return this.llmService.handleFallback(BotState.CANCEL_SELECT, msg, ctx, clubId, waId)
+      return this.fallback(BotState.CANCEL_SELECT, msg, ctx, clubId, waId)
     }
 
     const booking = options[idx]
@@ -589,6 +639,40 @@ function isPaymentClaim(msg: string): boolean {
     .normalize('NFD')
     .replace(/\p{Diacritic}/gu, '')
   return /\b(transfer|comprobante|deposit|ya pag|ya abon|ya envi|ya hice|ya mand)/.test(normalized)
+}
+
+/**
+ * The re-prompt for the current flow step, rebuilt from the session context — used to
+ * keep a player oriented after a cheap greeting/thanks mid-flow without an LLM call.
+ * Returns null when the step can't be rebuilt (let the LLM handle it instead).
+ */
+function stepPrompt(state: BotState, ctx: SessionContext): string | null {
+  switch (state) {
+    case BotState.BOOK_DATE:
+      return ASK_DATE
+    case BotState.BOOK_COURT:
+      return ctx.courtOptions?.length && ctx.selectedDate ? courtsList(ctx.courtOptions, ctx.selectedDate) : null
+    case BotState.BOOK_SLOT:
+      return ctx.slotOptions?.length && ctx.selectedCourtName && ctx.selectedDate
+        ? slotsList(ctx.slotOptions, ctx.selectedCourtName, ctx.selectedDate)
+        : null
+    case BotState.CANCEL_SELECT:
+      return ctx.bookingOptions?.length ? cancelList(ctx.bookingOptions) : null
+    default:
+      return null
+  }
+}
+
+/** True for short "thanks" messages — cheap to answer without the LLM. */
+function isThanks(msg: string): boolean {
+  const t = msg
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[!¡¿?.,]/g, '')
+    .trim()
+  if (t.length === 0 || t.split(/\s+/).length > 4) return false
+  return /\b(gracias|graciass|graciasss|thanks|thank you|thx)\b/.test(t)
 }
 
 /** True for bare greetings / openers where a welcome makes sense. */

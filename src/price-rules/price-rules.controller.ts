@@ -17,11 +17,7 @@ export class PriceRulesController {
   }
 
   @Post('courts/:courtId/price-rules')
-  create(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('courtId') courtId: string,
-    @Body() dto: CreatePriceRuleDto,
-  ) {
+  create(@CurrentUser() user: AuthenticatedUser, @Param('courtId') courtId: string, @Body() dto: CreatePriceRuleDto) {
     return this.priceRulesService.create(user.clubId, courtId, dto)
   }
 

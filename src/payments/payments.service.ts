@@ -147,11 +147,17 @@ export class PaymentsService {
       return // already logged in the service
     }
     for (const m of movements) {
-      const bookingId = await this.bookingsService.confirmPaymentByAmount(m.amountCents, m.id, m.dateCreated, undefined, {
-        cuit: m.payerCuit,
-        email: m.payerEmail,
-        mpUserId: m.payerMpUserId,
-      })
+      const bookingId = await this.bookingsService.confirmPaymentByAmount(
+        m.amountCents,
+        m.id,
+        m.dateCreated,
+        undefined,
+        {
+          cuit: m.payerCuit,
+          email: m.payerEmail,
+          mpUserId: m.payerMpUserId,
+        },
+      )
       if (bookingId) {
         this.logger.log(`Confirmed booking ${bookingId} from MP transfer ${m.id} (${m.amountCents} cents)`)
         await this.sendPaymentConfirmedMessage(bookingId)

@@ -27,7 +27,22 @@ export const MENU =
   '3️⃣ Hablar con un asesor\n\n' +
   'Respondé con el número, o escribime con tus palabras (ej: *"un turno el sábado a la tarde"*).'
 
-export const WELCOME = `👋 ¡Hola! Soy el asistente del club 🎾\n\n${MENU}`
+/**
+ * Greeting + menu. Personalized when we already know the player's name, so a returning
+ * "hola" is answered with a warm, predefined message — no LLM call needed.
+ */
+export function welcome(name?: string): string {
+  const hi = name ? `👋 ¡Hola de nuevo, ${name}! 🎾` : `👋 ¡Hola! Soy *PadelBot*, el asistente del club 🎾`
+  return `${hi}\n\n${MENU}`
+}
+
+/** Predefined acknowledgement for a "gracias", so we don't spend an LLM call on it. */
+export function thanksReply(name?: string): string {
+  const hi = name ? `¡De nada, ${name}! 🎾` : '¡De nada! 🎾'
+  return `${hi} Si necesitás algo más, acá estoy.\n\n${MENU}`
+}
+
+export const WELCOME = welcome()
 
 export const ADVISOR_HANDOFF =
   '🙌 Dale, te derivo con un asesor del club. En un ratito te escriben por acá. ' +
@@ -93,8 +108,7 @@ export function courtsList(courts: CourtOption[], date: string): string {
 export function courtsAtTimeList(courts: CourtOption[], timeLabel: string, date: string): string {
   const list = courts.map(c => `• ${c.name}`).join('\n')
   return (
-    `🎾 Para el *${fmtDate(date)}* a las *${timeLabel}* tengo libre:\n\n${list}\n\n` +
-    `Decime en cuál te la reservo.`
+    `🎾 Para el *${fmtDate(date)}* a las *${timeLabel}* tengo libre:\n\n${list}\n\n` + `Decime en cuál te la reservo.`
   )
 }
 
@@ -148,8 +162,7 @@ export function transferPending(
   requireDni = false,
 ): string {
   const holderLine = transfer.holder ? `\n👤 Titular: *${transfer.holder}*` : ''
-  const whatToPay =
-    depositMode === 'FULL' ? 'transferí el total de la cancha' : 'transferí la seña para reservar'
+  const whatToPay = depositMode === 'FULL' ? 'transferí el total de la cancha' : 'transferí la seña para reservar'
 
   // In DNI mode the amount is round and identity is validated by the payer's DNI, so we
   // don't ask for exact centavos — we ask them to pay from their OWN account.
