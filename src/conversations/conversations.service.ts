@@ -20,6 +20,7 @@ export class ConversationsService {
         playerName: true,
         mode: true,
         state: true,
+        needsAdvisor: true,
         updatedAt: true,
         messages: {
           orderBy: { createdAt: 'desc' },
@@ -27,7 +28,7 @@ export class ConversationsService {
           select: { role: true, content: true, createdAt: true },
         },
       },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [{ needsAdvisor: 'desc' }, { updatedAt: 'desc' }],
     })
 
     return sessions.map(s => ({
@@ -36,6 +37,7 @@ export class ConversationsService {
       playerName: s.playerName ?? null,
       mode: s.mode,
       state: s.state,
+      needsAdvisor: s.needsAdvisor,
       updatedAt: s.updatedAt,
       lastMessage: s.messages[0] ?? null,
     }))
@@ -66,7 +68,8 @@ export class ConversationsService {
 
     await this.prisma.conversationSession.update({
       where: { id: sessionId },
-      data: { mode },
+      // Acting on the conversation clears the "waiting for advisor" flag.
+      data: { mode, needsAdvisor: false },
     })
 
     return { mode }
@@ -91,10 +94,11 @@ export class ConversationsService {
       select: { id: true, role: true, content: true, createdAt: true },
     })
 
-    // Update updatedAt so the conversation bubbles to the top of the list
+    // Update updatedAt so the conversation bubbles to the top of the list; replying
+    // also clears the "waiting for advisor" flag.
     await this.prisma.conversationSession.update({
       where: { id: sessionId },
-      data: { updatedAt: new Date() },
+      data: { updatedAt: new Date(), needsAdvisor: false },
     })
 
     // Fire SSE event so other connected admins see the new message

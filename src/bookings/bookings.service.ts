@@ -5,6 +5,8 @@ import { RescheduleBookingDto } from './dto/reschedule-booking.dto'
 import { QueryBookingsDto } from './dto/query-bookings.dto'
 import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { bandDateTimes, findBandInSchedule, generateBands } from '../availability/lib/schedule'
+import { resolveBandPriceCents } from '../availability/lib/pricing'
+import { dniFromIdentification, dniMatches } from '../common/identity'
 import { formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { BookingAction, BookingEventsService } from '../events/booking-events.service'
@@ -16,6 +18,7 @@ export interface BookBandInput {
   bandStart: string
   playerName: string
   playerPhone?: string
+  playerDni?: string
   notes?: string
 }
 
@@ -25,6 +28,9 @@ const bookingSelect = {
   clubId: true,
   playerName: true,
   playerPhone: true,
+  playerDni: true,
+  payerCuit: true,
+  payerEmail: true,
   status: true,
   notes: true,
   recurringBookingId: true,
@@ -66,6 +72,13 @@ export interface PendingBookingResult {
 }
 
 type CancelledPendingInfo = { playerPhone: string | null; clubId: string }
+
+/** Identity of who actually transferred, captured from MercadoPago. */
+export interface PayerInfo {
+  cuit?: string | null
+  email?: string | null
+  mpUserId?: string | null
+}
 
 @Injectable()
 export class BookingsService {
@@ -153,7 +166,12 @@ export class BookingsService {
   async bookBand(clubId: string, input: BookBandInput) {
     const court = await this.prisma.court.findFirst({
       where: { id: input.courtId, clubId },
-      select: { priceCents: true, openTime: true, closeTime: true },
+      select: {
+        priceCents: true,
+        openTime: true,
+        closeTime: true,
+        priceRules: { select: { dayOfWeek: true, startTime: true, priceCents: true } },
+      },
     })
     if (!court) throw new NotFoundException(`Court ${input.courtId} not found`)
 
@@ -165,6 +183,8 @@ export class BookingsService {
     if (startsAt.getTime() <= Date.now()) {
       throw new ConflictException('Cannot book a slot in the past')
     }
+
+    const bandPriceCents = resolveBandPriceCents(court.priceCents, court.priceRules, input.dateKey, band.start)
 
     const booking = await this.prisma.$transaction(async tx => {
       const existing = await tx.slot.findFirst({
@@ -187,7 +207,7 @@ export class BookingsService {
               courtId: input.courtId,
               startsAt,
               endsAt,
-              priceCents: court.priceCents,
+              priceCents: bandPriceCents,
               status: SlotStatus.BOOKED,
             },
             select: { id: true },
@@ -294,7 +314,7 @@ export class BookingsService {
     if (!slot) throw new NotFoundException(`Slot ${dto.slotId} not found`)
     if (slot.status !== SlotStatus.AVAILABLE) throw new ConflictException(`Slot ${dto.slotId} is not available`)
 
-    const depositCents = await this.resolveDepositCents(clubId, slot.priceCents)
+    const { depositCents, requireDniMatch } = await this.resolvePaymentPlan(clubId, slot.priceCents)
     const paymentExpiresAt = new Date(Date.now() + PAYMENT_WINDOW_MS)
 
     const booking = await this.prisma.$transaction(async tx => {
@@ -303,7 +323,8 @@ export class BookingsService {
         throw new ConflictException(`Slot ${dto.slotId} is not available`)
 
       await tx.slot.update({ where: { id: dto.slotId }, data: { status: SlotStatus.BOOKED } })
-      const transferAmountCents = await this.allocateTransferAmount(tx, depositCents)
+      // Strict DNI mode uses a clean round amount; otherwise the centavos tag disambiguates.
+      const transferAmountCents = requireDniMatch ? depositCents : await this.allocateTransferAmount(tx, depositCents)
 
       return tx.booking.create({
         data: {
@@ -311,6 +332,7 @@ export class BookingsService {
           clubId,
           playerName: dto.playerName,
           playerPhone: dto.playerPhone ?? null,
+          playerDni: dto.playerDni ?? null,
           notes: dto.notes,
           status: 'PENDING_PAYMENT',
           depositCents,
@@ -328,7 +350,12 @@ export class BookingsService {
   async bookBandPending(clubId: string, input: BookBandInput): Promise<PendingBookingResult> {
     const court = await this.prisma.court.findFirst({
       where: { id: input.courtId, clubId },
-      select: { priceCents: true, openTime: true, closeTime: true },
+      select: {
+        priceCents: true,
+        openTime: true,
+        closeTime: true,
+        priceRules: { select: { dayOfWeek: true, startTime: true, priceCents: true } },
+      },
     })
     if (!court) throw new NotFoundException(`Court ${input.courtId} not found`)
 
@@ -339,7 +366,8 @@ export class BookingsService {
     const { startsAt, endsAt } = bandDateTimes(input.dateKey, band)
     if (startsAt.getTime() <= Date.now()) throw new ConflictException('Cannot book a slot in the past')
 
-    const depositCents = await this.resolveDepositCents(clubId, court.priceCents)
+    const bandPriceCents = resolveBandPriceCents(court.priceCents, court.priceRules, input.dateKey, band.start)
+    const { depositCents, requireDniMatch } = await this.resolvePaymentPlan(clubId, bandPriceCents)
     const paymentExpiresAt = new Date(Date.now() + PAYMENT_WINDOW_MS)
 
     const booking = await this.prisma.$transaction(async tx => {
@@ -361,7 +389,7 @@ export class BookingsService {
               courtId: input.courtId,
               startsAt,
               endsAt,
-              priceCents: court.priceCents,
+              priceCents: bandPriceCents,
               status: SlotStatus.BOOKED,
             },
             select: { id: true },
@@ -373,7 +401,7 @@ export class BookingsService {
         }
       }
 
-      const transferAmountCents = await this.allocateTransferAmount(tx, depositCents)
+      const transferAmountCents = requireDniMatch ? depositCents : await this.allocateTransferAmount(tx, depositCents)
 
       return tx.booking.create({
         data: {
@@ -381,6 +409,7 @@ export class BookingsService {
           clubId,
           playerName: input.playerName,
           playerPhone: input.playerPhone ?? null,
+          playerDni: input.playerDni ?? null,
           notes: input.notes,
           status: 'PENDING_PAYMENT',
           depositCents,
@@ -395,19 +424,24 @@ export class BookingsService {
   }
 
   /**
-   * Resolves how much the player must pay to confirm, per the club's payment policy:
-   * the full court price (depositMode = FULL) or a percentage of it as the seña
-   * (depositMode = DEPOSIT, default 25% — one of four padel players). A 0-priced
-   * court yields a 0 deposit, preserving the previous behavior.
+   * Resolves the club's payment policy for a booking: how much the player must transfer
+   * (the full court price when depositMode = FULL, else a percentage of it as the seña —
+   * default 25%, one of four padel players; a 0-priced court yields 0) and whether the
+   * club requires DNI-matched confirmation (which also means a clean round amount).
    */
-  private async resolveDepositCents(clubId: string, priceCents: number): Promise<number> {
+  private async resolvePaymentPlan(
+    clubId: string,
+    priceCents: number,
+  ): Promise<{ depositCents: number; requireDniMatch: boolean }> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { depositMode: true, depositPercent: true },
+      select: { depositMode: true, depositPercent: true, requireDniMatch: true },
     })
-    if (club?.depositMode === 'FULL') return priceCents
-    const percent = club?.depositPercent ?? DEFAULT_DEPOSIT_PERCENT
-    return Math.ceil((priceCents * percent) / 100)
+    const depositCents =
+      club?.depositMode === 'FULL'
+        ? priceCents
+        : Math.ceil((priceCents * (club?.depositPercent ?? DEFAULT_DEPOSIT_PERCENT)) / 100)
+    return { depositCents, requireDniMatch: club?.requireDniMatch ?? false }
   }
 
   /**
@@ -449,10 +483,17 @@ export class BookingsService {
    * of truth for the confirmation (an MP payment id, a bridge id, or null for a
    * manual admin confirmation).
    */
-  async confirmPayment(bookingId: string, paymentRef?: string | null): Promise<boolean> {
+  async confirmPayment(bookingId: string, paymentRef?: string | null, payer?: PayerInfo): Promise<boolean> {
     const { count } = await this.prisma.booking.updateMany({
       where: { id: bookingId, status: 'PENDING_PAYMENT' },
-      data: { status: 'CONFIRMED', mpPaymentId: paymentRef ?? null },
+      data: {
+        status: 'CONFIRMED',
+        mpPaymentId: paymentRef ?? null,
+        // Record who actually paid (visibility / audit) when MercadoPago exposed it.
+        ...(payer?.cuit ? { payerCuit: payer.cuit } : {}),
+        ...(payer?.email ? { payerEmail: payer.email } : {}),
+        ...(payer?.mpUserId ? { payerMpUserId: payer.mpUserId } : {}),
+      },
     })
     if (count === 0) return false
 
@@ -488,6 +529,7 @@ export class BookingsService {
     paymentRef: string,
     paidAt: Date,
     clubId?: string,
+    payer?: PayerInfo,
   ): Promise<string | null> {
     const candidates = await this.prisma.booking.findMany({
       where: {
@@ -497,9 +539,36 @@ export class BookingsService {
         createdAt: { lte: paidAt },
         paymentExpiresAt: { gte: paidAt },
       },
-      select: { id: true },
+      select: { id: true, playerDni: true },
     })
 
+    if (candidates.length === 0) return null
+
+    // Strict mode (per club): only auto-confirm when the payer's DNI matches the
+    // reservation's. The amount is round (no centavos tag), so several bookings can share
+    // it — the DNI is the disambiguator.
+    const requireDni = clubId ? await this.clubRequiresDniMatch(clubId) : false
+    if (requireDni) {
+      const payerDni = dniFromIdentification(payer?.cuit)
+      if (!payerDni) {
+        this.logger.warn(
+          `Transfer ${paymentRef} (${amountCents} cents) has no usable payer DNI but the club requires it — manual review`,
+        )
+        return null
+      }
+      const matched = candidates.filter(c => dniMatches(c.playerDni, payerDni))
+      if (matched.length !== 1) {
+        this.logger.warn(
+          `Transfer ${paymentRef}: payer DNI matched ${matched.length} of ${candidates.length} pending bookings — manual review`,
+        )
+        return null
+      }
+      const confirmed = await this.confirmPayment(matched[0].id, paymentRef, payer)
+      return confirmed ? matched[0].id : null
+    }
+
+    // Non-strict: the unique transfer amount is the identifier, so confirm only on a
+    // single match (never auto-confirm an ambiguous transfer).
     if (candidates.length !== 1) {
       this.logger.warn(
         `Transfer of ${amountCents} cents matched ${candidates.length} pending bookings (ref ${paymentRef}) — needs manual review`,
@@ -507,8 +576,14 @@ export class BookingsService {
       return null
     }
 
-    const confirmed = await this.confirmPayment(candidates[0].id, paymentRef)
+    const confirmed = await this.confirmPayment(candidates[0].id, paymentRef, payer)
     return confirmed ? candidates[0].id : null
+  }
+
+  /** Whether the club requires DNI-matched auto-confirmation. */
+  private async clubRequiresDniMatch(clubId: string): Promise<boolean> {
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { requireDniMatch: true } })
+    return club?.requireDniMatch ?? false
   }
 
   /**

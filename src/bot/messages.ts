@@ -21,14 +21,23 @@ function fmtExact(cents: number): string {
 // ── Static strings ──────────────────────────────────────────────────────────
 
 export const MENU =
-  'Contame qué necesitás y lo resolvemos 🎾 Puedo reservar un turno, mostrarte tus reservas o cancelar una. ' +
-  'Escribime con tus palabras, como por ejemplo *"un turno para el sábado a la tarde"*.'
+  '¿Qué querés hacer?\n\n' +
+  '1️⃣ Reservar un turno\n' +
+  '2️⃣ Ver o cancelar mis reservas\n' +
+  '3️⃣ Hablar con un asesor\n\n' +
+  'Respondé con el número, o escribime con tus palabras (ej: *"un turno el sábado a la tarde"*).'
 
-export const WELCOME = `👋 ¡Hola! Soy el asistente del club, encantado 🎾 Estoy para darte una mano con tus turnos.\n\n${MENU}`
+export const WELCOME = `👋 ¡Hola! Soy el asistente del club 🎾\n\n${MENU}`
+
+export const ADVISOR_HANDOFF =
+  '🙌 Dale, te derivo con un asesor del club. En un ratito te escriben por acá. ' +
+  'Dejá tu consulta (un torneo, una duda, lo que necesites) y la van a ver. 🎾'
 export const BAD_OPTION = `Mmm, no entendí esa opción 🤔\n\n${MENU}`
 export const ASK_DATE = `📅 ¿Para qué día lo querés? Decime la fecha (ej: *25/06*) o algo como *"mañana"* o *"el sábado"*.`
 export const BAD_DATE = `No me quedó clara la fecha 🤔 Probá con el día y mes (ej: *25/06*) o algo como *"el sábado"*.`
 export const ASK_NAME = `👤 ¡Genial! ¿A nombre de quién pongo la reserva?`
+export const ASK_DNI = `🪪 Para confirmar el pago necesito tu *DNI* (solo los números). Tiene que ser el del titular que va a transferir la seña.`
+export const BAD_DNI = `Mmm, ese DNI no me cierra 🤔 Pasámelo solo con números (7 u 8 dígitos), sin puntos.`
 export const BAD_SLOT = `Ese número de turno no está en la lista 🤔 Elegí uno de los de arriba.`
 export const BAD_COURT = `Ese número de cancha no está en la lista 🤔 Elegí una de las de arriba.`
 export const BAD_BOOKING = `Ese número no está en la lista 🤔 Elegí uno, o escribí *0* para volver.`
@@ -75,6 +84,18 @@ export function noAvailabilityWithSuggestions(dateKey: string, suggestions: Avai
 export function courtsList(courts: CourtOption[], date: string): string {
   const list = courts.map(c => `• ${c.name}`).join('\n')
   return `🎾 Para el *${fmtDate(date)}* tengo estas canchas con lugar:\n\n${list}\n\nDecime cuál preferís.`
+}
+
+/**
+ * Shown when the player gave a date + time but no court: lists the courts that are
+ * free at exactly that time so they just pick one (and we already know the slot).
+ */
+export function courtsAtTimeList(courts: CourtOption[], timeLabel: string, date: string): string {
+  const list = courts.map(c => `• ${c.name}`).join('\n')
+  return (
+    `🎾 Para el *${fmtDate(date)}* a las *${timeLabel}* tengo libre:\n\n${list}\n\n` +
+    `Decime en cuál te la reservo.`
+  )
 }
 
 export function slotsList(slots: SlotOption[], courtName: string, date: string): string {
@@ -124,21 +145,29 @@ export function transferPending(
   transfer: { alias: string; holder: string | null },
   transferAmountCents: number,
   depositMode: 'DEPOSIT' | 'FULL' = 'DEPOSIT',
+  requireDni = false,
 ): string {
   const holderLine = transfer.holder ? `\n👤 Titular: *${transfer.holder}*` : ''
   const whatToPay =
-    depositMode === 'FULL'
-      ? 'transferí el total de la cancha'
-      : 'transferí la seña para reservar'
+    depositMode === 'FULL' ? 'transferí el total de la cancha' : 'transferí la seña para reservar'
+
+  // In DNI mode the amount is round and identity is validated by the payer's DNI, so we
+  // don't ask for exact centavos — we ask them to pay from their OWN account.
+  const guard = requireDni
+    ? `⚠️ Importante: transferí *desde tu propia cuenta* de MercadoPago` +
+      (ctx.playerDni ? ` (a nombre del DNI *${ctx.playerDni}*)` : '') +
+      `. Así confirmo tu pago solo; si transferís desde otra cuenta, lo reviso a mano.`
+    : `⚠️ Transferí el monto *exacto, con los centavos* — así reconozco tu pago al instante y te confirmo solo. ` +
+      `Si transferís otro importe, no voy a poder asociarlo automáticamente.`
+
   return (
     `⏳ *Reserva pre-confirmada — falta el pago*\n\n` +
     `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n` +
     `🎾 ${ctx.selectedCourtName}\n\n` +
     `Para confirmar el turno, ${whatToPay}:\n\n` +
-    `💰 Importe *exacto*: *${fmtExact(transferAmountCents)}*\n` +
+    `💰 Importe: *${fmtExact(transferAmountCents)}*\n` +
     `🏦 Alias: *${transfer.alias}*${holderLine}\n\n` +
-    `⚠️ Transferí el monto *exacto, con los centavos* — así reconozco tu pago al instante y te confirmo solo. ` +
-    `Si transferís otro importe, no voy a poder asociarlo automáticamente.\n\n` +
+    `${guard}\n\n` +
     `⏰ Tenés *30 minutos*. Cuando se acredite te aviso por acá; si no llega a tiempo, el turno queda libre.`
   )
 }

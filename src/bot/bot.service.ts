@@ -8,8 +8,11 @@ import { ConversationSessionService, keepName } from './conversation-session.ser
 import { matchCourt, matchSlot } from './lib/match'
 import { BotState, BookingOption, HandlerResult, SessionContext } from './types'
 import {
+  ADVISOR_HANDOFF,
   ASK_DATE,
+  ASK_DNI,
   ASK_NAME,
+  BAD_DNI,
   ATTACHMENT_NO_PENDING,
   BOOKING_ABORTED,
   BOOKING_FAILED,
@@ -60,11 +63,18 @@ export class BotService {
     }
 
     const state = session.state as BotState
+    const isMenuState = state === BotState.MENU || state === BotState.IDLE
 
-    // "Ya transferí" / "te mando el comprobante" after booking (state is MENU/IDLE):
-    // acknowledge and let the poller confirm the real money — never from a claim.
-    const result =
-      isPaymentClaim(msg) && (state === BotState.MENU || state === BotState.IDLE)
+    // Talk-to-a-human: option 3 from the menu, or a natural-language request. Hands the
+    // conversation over and flags it for the panel. Only honored from the menu/idle so it
+    // doesn't hijack a mid-booking reply.
+    const wantsAdvisor = (state === BotState.MENU && msg === '3') || (isMenuState && isAdvisorRequest(msg))
+
+    const result = wantsAdvisor
+      ? await this.advisorReply(session.id, session.context)
+      : // "Ya transferí" / "te mando el comprobante" after booking: acknowledge and let the
+        // poller confirm the real money — never from a claim.
+        isPaymentClaim(msg) && isMenuState
         ? await this.paymentClaimReply(clubId, waId, session.context)
         : await this.dispatch(state, msg, session.context, clubId, waId)
 
@@ -140,6 +150,8 @@ export class BotService {
         return this.onBookSlot(msg, ctx, clubId, waId)
       case BotState.BOOK_CONFIRM:
         return this.onBookConfirm(msg, ctx, clubId, waId)
+      case BotState.BOOK_DNI:
+        return this.onBookDni(msg, ctx, clubId, waId)
       case BotState.CANCEL_SELECT:
         return this.onCancelSelect(msg, ctx, clubId, waId)
       case BotState.CANCEL_CONFIRM:
@@ -163,9 +175,17 @@ export class BotService {
   private async onMenu(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     if (msg === '1') return { reply: ASK_DATE, state: BotState.BOOK_DATE, ctx }
     if (msg === '2') return this.buildMyBookings(ctx, clubId, waId)
-    if (msg === '3') return this.buildCancelList(ctx, clubId, waId)
+    // '3' (advisor) is handled before dispatch. Cancel is reachable by word so we don't
+    // need the LLM for it.
+    if (/\b(cancelar|anular|dar de baja)\b/i.test(msg)) return this.buildCancelList(ctx, clubId, waId)
     // Natural language → LLM interprets intent
     return this.llmService.handleFallback(BotState.MENU, msg, ctx, clubId, waId)
+  }
+
+  /** Hands the conversation to a human advisor and flags it for the panel. */
+  private async advisorReply(sessionId: string, ctx: SessionContext): Promise<HandlerResult> {
+    await this.sessionService.requestAdvisor(sessionId)
+    return { reply: ADVISOR_HANDOFF, state: BotState.MENU, ctx: keepName(ctx) }
   }
 
   private async onBookDate(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
@@ -191,9 +211,15 @@ export class BotService {
   }
 
   private async onBookName(msg: string, ctx: SessionContext, clubId: string): Promise<HandlerResult> {
-    const name = msg.trim()
-    if (name.length < 2) {
-      return { reply: 'El nombre debe tener al menos 2 caracteres. ¿Cómo te llamás?', state: BotState.BOOK_NAME, ctx }
+    // Accept a correction phrase ("me llamo X") or a bare name; reject anything that
+    // doesn't look like a person's name (digits, time/date phrasings, too long).
+    const name = extractName(msg)
+    if (!name) {
+      return {
+        reply: 'Mmm, eso no parece un nombre 🤔 Decime tu nombre (sin números ni horarios), ¿cómo te llamás?',
+        state: BotState.BOOK_NAME,
+        ctx,
+      }
     }
 
     const nextCtx: SessionContext = { ...ctx, playerName: name }
@@ -241,6 +267,27 @@ export class BotService {
       return this.llmService.handleFallback(BotState.BOOK_COURT, msg, ctx, clubId, waId)
     }
 
+    // "Suggest court at time" flow: the time was already chosen, so resolve that band
+    // on the picked court and go straight to confirmation.
+    if (ctx.selectedBandStart) {
+      const slots = await this.availability.slotsForDate(clubId, ctx.selectedDate!, court.id)
+      const slot = slots.find(s => s.bandStart === ctx.selectedBandStart)
+      if (slot) {
+        const nextCtx: SessionContext = {
+          ...ctx,
+          selectedCourtId: court.id,
+          selectedCourtName: court.name,
+          slotOptions: slots,
+          selectedSlotId: slot.slotId,
+          selectedBandStart: slot.bandStart,
+          selectedSlotLabel: slot.label,
+          selectedSlotPrice: slot.price,
+        }
+        return { reply: confirmBooking(nextCtx), state: BotState.BOOK_CONFIRM, ctx: nextCtx }
+      }
+      // Band no longer free on this court → fall back to the normal slot list below.
+    }
+
     const slots = await this.availability.slotsForDate(clubId, ctx.selectedDate!, court.id)
 
     if (slots.length === 0) {
@@ -275,6 +322,17 @@ export class BotService {
   }
 
   private async onBookConfirm(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
+    // "Mi nombre está mal, me llamo X" → fix the name and re-show the summary.
+    const correctedName = extractNameCorrection(msg)
+    if (correctedName) {
+      const fixed: SessionContext = { ...ctx, playerName: correctedName }
+      return {
+        reply: `¡Listo, lo corregí! 🙌\n\n${confirmBooking(fixed)}`,
+        state: BotState.BOOK_CONFIRM,
+        ctx: fixed,
+      }
+    }
+
     const answer = normalizeYesNo(msg)
 
     if (!answer) {
@@ -292,14 +350,59 @@ export class BotService {
     // player can't actually pay for.
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { transferAlias: true, transferHolder: true, depositMode: true },
+      select: { transferAlias: true, transferHolder: true, depositMode: true, requireDniMatch: true },
     })
     if (!club?.transferAlias) {
       return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
-    // Lock the slot with a pending booking; the unique transfer amount comes back
-    // so we can tell the player exactly how much to send.
+    // Strict mode: we need the player's DNI to validate the transfer's titular.
+    if (club.requireDniMatch && !ctx.playerDni) {
+      return { reply: ASK_DNI, state: BotState.BOOK_DNI, ctx }
+    }
+
+    return this.createPendingBooking(clubId, waId, ctx, {
+      transferAlias: club.transferAlias,
+      transferHolder: club.transferHolder,
+      depositMode: club.depositMode,
+      requireDniMatch: club.requireDniMatch,
+    })
+  }
+
+  private async onBookDni(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
+    const dni = msg.replace(/\D/g, '')
+    if (dni.length < 7 || dni.length > 8) {
+      return { reply: BAD_DNI, state: BotState.BOOK_DNI, ctx }
+    }
+
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: { transferAlias: true, transferHolder: true, depositMode: true, requireDniMatch: true },
+    })
+    if (!club?.transferAlias) {
+      return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    return this.createPendingBooking(clubId, waId, { ...ctx, playerDni: dni }, {
+      transferAlias: club.transferAlias,
+      transferHolder: club.transferHolder,
+      depositMode: club.depositMode,
+      requireDniMatch: club.requireDniMatch,
+    })
+  }
+
+  /** Locks the slot with a pending booking and tells the player exactly how much to transfer. */
+  private async createPendingBooking(
+    clubId: string,
+    waId: string,
+    ctx: SessionContext,
+    club: {
+      transferAlias: string
+      transferHolder: string | null
+      depositMode: 'DEPOSIT' | 'FULL'
+      requireDniMatch: boolean
+    },
+  ): Promise<HandlerResult> {
     let pendingBooking: { id: string; transferAmountCents: number }
     try {
       if (ctx.selectedSlotId) {
@@ -307,6 +410,7 @@ export class BotService {
           slotId: ctx.selectedSlotId,
           playerName: ctx.playerName!,
           playerPhone: waId,
+          playerDni: ctx.playerDni,
         })
       } else {
         pendingBooking = await this.bookingsService.bookBandPending(clubId, {
@@ -315,6 +419,7 @@ export class BotService {
           bandStart: ctx.selectedBandStart!,
           playerName: ctx.playerName!,
           playerPhone: waId,
+          playerDni: ctx.playerDni,
         })
       }
     } catch {
@@ -327,6 +432,7 @@ export class BotService {
         { alias: club.transferAlias, holder: club.transferHolder },
         pendingBooking.transferAmountCents,
         club.depositMode,
+        club.requireDniMatch,
       ),
       state: BotState.MENU,
       ctx: keepName(ctx),
@@ -430,6 +536,49 @@ function parseDateDMY(input: string): string | null {
   if (isBeforeToday) year += 1
 
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+/** True when the player asks to talk to a human advisor (or about tournaments). */
+function isAdvisorRequest(msg: string): boolean {
+  const t = msg
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+  return (
+    /\b(asesor|operador|humano|encargad|torneo|torneos)\b/.test(t) ||
+    /\bcon (una persona|alguien|un humano|un asesor)\b/.test(t) ||
+    /\bhablar con\b/.test(t)
+  )
+}
+
+/** A name: 1–5 words of letters (accents ok), no digits, 2–50 chars. */
+function isNameLike(s: string): boolean {
+  if (s.length < 2 || s.length > 50 || /\d/.test(s)) return false
+  return /^[\p{L}][\p{L}\s'’-]*$/u.test(s) && s.split(/\s+/).length <= 5
+}
+
+function titleCase(s: string): string {
+  return s
+    .toLowerCase()
+    .split(/\s+/)
+    .map(w => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(' ')
+}
+
+/** Extracts a corrected name from "me llamo X" / "mi nombre es X" / "a nombre de X", or null. */
+function extractNameCorrection(msg: string): string | null {
+  const m = msg.match(/(?:me llamo|mi nombre es|a nombre de|me dicen)\s+([\p{L}][\p{L}\s'’-]{1,49}?)(?=[.,!?\n]|$)/iu)
+  if (!m) return null
+  const candidate = m[1].trim()
+  return isNameLike(candidate) ? titleCase(candidate) : null
+}
+
+/** A usable player name from a message: a "me llamo X" phrase or a bare name; else null. */
+function extractName(msg: string): string | null {
+  const corrected = extractNameCorrection(msg)
+  if (corrected) return corrected
+  const name = msg.trim().replace(/[.,!?]+$/, '')
+  return isNameLike(name) ? titleCase(name) : null
 }
 
 /** True when the message reads like "I already paid / here's the receipt". */

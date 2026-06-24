@@ -16,6 +16,31 @@ export interface MpMoneyIn {
   amountCents: number
   dateCreated: Date
   operationType: string
+  /** Account holder name, when MP exposes it (usually null for CVU/alias transfers). */
+  payerName: string | null
+  /** Payer's CUIT/CUIL/DNI number, when MP exposes it. Used to validate the titular. */
+  payerCuit: string | null
+  /** Payer's email, when MP exposes it. */
+  payerEmail: string | null
+  /** Payer's MercadoPago user id, when MP exposes it. */
+  payerMpUserId: string | null
+}
+
+/** Raw payer block MercadoPago may attach to a payment. Only some fields appear for transfers. */
+interface MpPayerRaw {
+  id?: string | number
+  email?: string | null
+  first_name?: string | null
+  last_name?: string | null
+  identification?: { type?: string | null; number?: string | null } | null
+  entity_type?: string | null
+}
+
+/** Builds a display name from an MP payer block, or null when there's nothing usable. */
+function buildPayerName(payer?: MpPayerRaw | null): string | null {
+  if (!payer) return null
+  const full = `${payer.first_name ?? ''} ${payer.last_name ?? ''}`.trim()
+  return full.length > 0 ? full : null
 }
 
 /** Operation types that represent money arriving into the account (an incoming transfer). */
@@ -157,17 +182,37 @@ export class MercadoPagoService {
         transaction_amount: number
         operation_type: string
         date_created: string
+        description?: string | null
+        payer?: MpPayerRaw | null
       }>
     }
 
-    return (data.results ?? [])
-      .filter(p => p.status === 'approved' && MONEY_IN_OPERATION_TYPES.has(p.operation_type))
-      .map(p => ({
-        id: String(p.id),
-        amountCents: Math.round((p.transaction_amount ?? 0) * 100),
-        dateCreated: new Date(p.date_created),
-        operationType: p.operation_type,
-      }))
+    const moneyIn = (data.results ?? []).filter(
+      p => p.status === 'approved' && MONEY_IN_OPERATION_TYPES.has(p.operation_type),
+    )
+
+    // Investigation (MP_DEBUG_PAYER=true): log exactly what payer data MP returns for
+    // incoming transfers on THIS account, to decide whether name-based reconciliation is
+    // feasible. Does not affect matching — reconciliation is still by amount.
+    if (process.env.MP_DEBUG_PAYER === 'true') {
+      for (const p of moneyIn) {
+        this.logger.log(
+          `[MP_DEBUG_PAYER] id=${p.id} op=${p.operation_type} amount=${p.transaction_amount} ` +
+            `payer=${JSON.stringify(p.payer ?? null)} description=${JSON.stringify(p.description ?? null)}`,
+        )
+      }
+    }
+
+    return moneyIn.map(p => ({
+      id: String(p.id),
+      amountCents: Math.round((p.transaction_amount ?? 0) * 100),
+      dateCreated: new Date(p.date_created),
+      operationType: p.operation_type,
+      payerName: buildPayerName(p.payer),
+      payerCuit: p.payer?.identification?.number ?? null,
+      payerEmail: p.payer?.email ?? null,
+      payerMpUserId: p.payer?.id != null ? String(p.payer.id) : null,
+    }))
   }
 
   async getPayment(paymentId: string, token?: string): Promise<MpPayment> {

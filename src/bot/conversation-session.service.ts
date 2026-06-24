@@ -63,6 +63,25 @@ export class ConversationSessionService {
     })
   }
 
+  /**
+   * Player asked for a human advisor: hand the conversation over (HUMAN mode) and flag it so
+   * the panel notifies staff. Emits a conversation event so connected admins see it live.
+   */
+  async requestAdvisor(sessionId: string): Promise<void> {
+    const session = await this.prisma.conversationSession.update({
+      where: { id: sessionId },
+      data: { mode: 'HUMAN', needsAdvisor: true },
+      select: { clubId: true, waId: true, playerName: true },
+    })
+    this.events.emitConversation({
+      type: 'conversation.message',
+      clubId: session.clubId,
+      sessionId,
+      waId: session.waId,
+      playerName: session.playerName,
+    })
+  }
+
   async saveMessage(sessionId: string, role: 'USER' | 'BOT' | 'ADMIN', content: string): Promise<void> {
     await this.prisma.conversationMessage.create({
       data: { sessionId, role, content },
@@ -99,5 +118,8 @@ function safeParseContext(raw: Prisma.JsonValue): SessionContext {
 }
 
 export function keepName(ctx: SessionContext): SessionContext {
-  return ctx.playerName ? { playerName: ctx.playerName } : {}
+  const kept: SessionContext = {}
+  if (ctx.playerName) kept.playerName = ctx.playerName
+  if (ctx.playerDni) kept.playerDni = ctx.playerDni
+  return kept
 }

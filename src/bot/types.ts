@@ -6,6 +6,7 @@ export enum BotState {
   BOOK_COURT = 'BOOK_COURT',
   BOOK_SLOT = 'BOOK_SLOT',
   BOOK_CONFIRM = 'BOOK_CONFIRM',
+  BOOK_DNI = 'BOOK_DNI',
   CANCEL_SELECT = 'CANCEL_SELECT',
   CANCEL_CONFIRM = 'CANCEL_CONFIRM',
 }
@@ -38,6 +39,8 @@ export interface HistoryMessage {
 export interface SessionContext {
   /** Persisted across flows — user doesn't re-enter their name every time. */
   playerName?: string
+  /** DNI captured for payer validation (digits), when the club requires it. Persisted across flows. */
+  playerDni?: string
   /** Recent conversation turns sent to the LLM for context. */
   history?: HistoryMessage[]
   selectedDate?: string

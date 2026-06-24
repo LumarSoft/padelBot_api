@@ -3,7 +3,7 @@ import OpenAI from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
 import { formatTimeRange, toDateKey } from '../availability/lib/datetime'
-import { BotState, HandlerResult, SessionContext } from '../bot/types'
+import { BotState, CourtOption, HandlerResult, SessionContext, SlotOption } from '../bot/types'
 import { matchCourt, matchSlot } from '../bot/lib/match'
 import {
   ASK_DATE,
@@ -12,6 +12,7 @@ import {
   NO_BOOKINGS,
   cancelList,
   confirmBooking,
+  courtsAtTimeList,
   courtsList,
   myBookingsList,
   noAvailabilityWithSuggestions,
@@ -109,14 +110,25 @@ export class LlmService {
       content: m.content,
     }))
 
+    const model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini'
     const completion = await this.openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+      model,
       messages: [{ role: 'system', content: systemPrompt }, ...historyMessages, { role: 'user', content: message }],
       tools: TOOLS,
       tool_choice: 'auto',
       temperature: 0.3,
       max_tokens: 400,
     })
+
+    const { usage } = completion
+    if (usage) {
+      const cost = estimateCost(model, usage.prompt_tokens, usage.completion_tokens)
+      this.logger.log(
+        `LLM usage — model=${model} waId=${waId} ` +
+          `in=${usage.prompt_tokens} out=${usage.completion_tokens} total=${usage.total_tokens} ` +
+          `est_cost=$${cost.toFixed(6)}`,
+      )
+    }
 
     const choice = completion.choices[0]
 
@@ -217,9 +229,63 @@ export class LlmService {
       return { reply: slotsList(slots, matchedCourt.name, args.date), state: BotState.BOOK_SLOT, ctx: ctxWithCourt }
     }
 
+    // No court chosen, but the player gave a time → tell them which courts are free at
+    // that exact time so they confirm in one step instead of picking a court blindly.
+    if (args.timePreference) {
+      const atTime = await this.courtsFreeAtTime(clubId, args.date, args.timePreference, courts)
+
+      if (atTime.length === 1) {
+        const { court, slot } = atTime[0]
+        const ctxSel: SessionContext = {
+          ...nextCtx,
+          selectedCourtId: court.id,
+          selectedCourtName: court.name,
+          slotOptions: [slot],
+          selectedSlotId: slot.slotId,
+          selectedBandStart: slot.bandStart,
+          selectedSlotLabel: slot.label,
+          selectedSlotPrice: slot.price,
+        }
+        if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: ctxSel }
+        return { reply: confirmBooking(ctxSel), state: BotState.BOOK_CONFIRM, ctx: ctxSel }
+      }
+
+      if (atTime.length > 1) {
+        // Remember the chosen time band; when they pick a court, onBookCourt resolves
+        // that band directly and jumps to confirmation.
+        const courtOptions = atTime.map(a => a.court)
+        const { bandStart, label } = atTime[0].slot
+        const ctxMulti: SessionContext = {
+          ...nextCtx,
+          courtOptions,
+          selectedBandStart: bandStart,
+          selectedSlotLabel: label,
+        }
+        if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: ctxMulti }
+        return { reply: courtsAtTimeList(courtOptions, label, args.date), state: BotState.BOOK_COURT, ctx: ctxMulti }
+      }
+      // Nobody free at that time → fall through to the day's court list.
+    }
+
     // Court not matched or not provided → show court list
     if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: nextCtx }
     return { reply: courtsList(courts, args.date), state: BotState.BOOK_COURT, ctx: nextCtx }
+  }
+
+  /** Courts (from `courts`) that have a free slot matching the time phrasing, with that slot. */
+  private async courtsFreeAtTime(
+    clubId: string,
+    dateKey: string,
+    timePreference: string,
+    courts: CourtOption[],
+  ): Promise<{ court: CourtOption; slot: SlotOption }[]> {
+    const result: { court: CourtOption; slot: SlotOption }[] = []
+    for (const court of courts) {
+      const slots = await this.availability.slotsForDate(clubId, dateKey, court.id)
+      const slot = matchSlot(timePreference, slots)
+      if (slot) result.push({ court, slot })
+    }
+    return result
   }
 
   private async handleNavigateMyBookings(ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
@@ -251,6 +317,20 @@ export class LlmService {
 }
 
 // ── Types & pure helpers ─────────────────────────────────────────────────────
+
+/** Prices in USD per 1 M tokens (input / output). Updated June 2025. */
+const MODEL_PRICES: Record<string, { input: number; output: number }> = {
+  'gpt-4o-mini':          { input: 0.15,  output: 0.60  },
+  'gpt-4o':               { input: 2.50,  output: 10.00 },
+  'gpt-4-turbo':          { input: 10.00, output: 30.00 },
+  'gpt-4':                { input: 30.00, output: 60.00 },
+  'gpt-3.5-turbo':        { input: 0.50,  output: 1.50  },
+}
+
+function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
+  const prices = MODEL_PRICES[model] ?? MODEL_PRICES['gpt-4o-mini']
+  return (inputTokens * prices.input + outputTokens * prices.output) / 1_000_000
+}
 
 interface BookingToolArgs {
   date?: string

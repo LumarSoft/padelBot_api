@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
-import { shiftDateKey, todayKey, wallTimeToUtc, weekdayOfKey } from '../availability/lib/datetime'
+import { shiftDateKey, todayKey, toDateKey, wallTimeToUtc, weekdayOfKey } from '../availability/lib/datetime'
 import { findBandInSchedule, generateBands } from '../availability/lib/schedule'
 import { CreateRecurringBookingDto } from './dto/create-recurring-booking.dto'
 import { UpdateRecurringBookingDto } from './dto/update-recurring-booking.dto'
@@ -18,6 +18,7 @@ const recurringBookingSelect = {
   playerPhone: true,
   priceCents: true,
   notes: true,
+  untilDate: true,
   isActive: true,
   createdByUserId: true,
   createdAt: true,
@@ -25,8 +26,10 @@ const recurringBookingSelect = {
   court: { select: { id: true, name: true } },
 } as const
 
-/** Number of upcoming weekly occurrences to book when a recurring booking is created / applied. */
+/** Default number of upcoming weekly occurrences to book when no end date is set. */
 const WEEKS_AHEAD = 8
+/** Safety cap on how many weekly occurrences a single end-dated recurring booking can block. */
+const MAX_WEEKS_AHEAD = 104
 
 @Injectable()
 export class RecurringBookingsService {
@@ -64,20 +67,26 @@ export class RecurringBookingsService {
         playerPhone: dto.playerPhone,
         priceCents: dto.priceCents,
         notes: dto.notes,
+        untilDate: dto.untilDate ? wallTimeToUtc(dto.untilDate, '00:00') : null,
         createdByUserId,
       },
       select: recurringBookingSelect,
     })
 
-    await this.applyForWeeksAhead(clubId, rb.id, {
-      courtId: dto.courtId,
-      dayOfWeek: dto.dayOfWeek,
-      slotStart: dto.slotStart,
-      slotEnd: dto.slotEnd,
-      playerName: dto.playerName,
-      playerPhone: dto.playerPhone,
-      priceCents: dto.priceCents,
-    })
+    await this.applyForWeeksAhead(
+      clubId,
+      rb.id,
+      {
+        courtId: dto.courtId,
+        dayOfWeek: dto.dayOfWeek,
+        slotStart: dto.slotStart,
+        slotEnd: dto.slotEnd,
+        playerName: dto.playerName,
+        playerPhone: dto.playerPhone,
+        priceCents: dto.priceCents,
+      },
+      dto.untilDate,
+    )
 
     return rb
   }
@@ -100,15 +109,20 @@ export class RecurringBookingsService {
     const rb = await this.findOne(clubId, id)
     if (!rb.isActive) throw new BadRequestException('Recurring booking is inactive')
 
-    const applied = await this.applyForWeeksAhead(clubId, id, {
-      courtId: rb.courtId,
-      dayOfWeek: rb.dayOfWeek,
-      slotStart: rb.slotStart,
-      slotEnd: rb.slotEnd,
-      playerName: rb.playerName,
-      playerPhone: rb.playerPhone,
-      priceCents: rb.priceCents,
-    })
+    const applied = await this.applyForWeeksAhead(
+      clubId,
+      id,
+      {
+        courtId: rb.courtId,
+        dayOfWeek: rb.dayOfWeek,
+        slotStart: rb.slotStart,
+        slotEnd: rb.slotEnd,
+        playerName: rb.playerName,
+        playerPhone: rb.playerPhone,
+        priceCents: rb.priceCents,
+      },
+      rb.untilDate ? toDateKey(rb.untilDate) : undefined,
+    )
 
     return { applied }
   }
@@ -129,8 +143,9 @@ export class RecurringBookingsService {
       CreateRecurringBookingDto,
       'courtId' | 'dayOfWeek' | 'slotStart' | 'slotEnd' | 'playerName' | 'playerPhone' | 'priceCents'
     >,
+    untilKey?: string,
   ): Promise<number> {
-    const occurrences = this.nextOccurrences(dto.dayOfWeek, dto.slotStart, dto.slotEnd, WEEKS_AHEAD)
+    const occurrences = this.nextOccurrences(dto.dayOfWeek, dto.slotStart, dto.slotEnd, untilKey)
     if (occurrences.length === 0) return 0
 
     const minStart = occurrences[0].startsAt
@@ -200,7 +215,9 @@ export class RecurringBookingsService {
     const allSlotIds = [...createdIds, ...toBook]
     if (allSlotIds.length === 0) return 0
 
-    // Create a Booking record for each newly-booked slot
+    // Create a Booking record for each newly-booked slot. Fixed (recurring) turns are
+    // CONFIRMED on creation — they are blocked by the club, NOT a pending-payment flow, so
+    // they never show up as a "pago por confirmar" and never expire.
     await this.prisma.$transaction(
       allSlotIds.map(slotId =>
         this.prisma.booking.create({
@@ -210,6 +227,7 @@ export class RecurringBookingsService {
             playerName: dto.playerName,
             playerPhone: dto.playerPhone,
             recurringBookingId,
+            status: 'CONFIRMED',
           },
         }),
       ),
@@ -219,17 +237,18 @@ export class RecurringBookingsService {
   }
 
   /**
-   * Computes the next `count` occurrences of `targetDay` starting from today
-   * (today is included if it matches). Both the weekday matching and the
-   * wall-clock band are anchored to the club timezone, so the stored UTC instants
-   * match slots created via SlotsService.buildBand() and the admin panel,
-   * regardless of the server's timezone.
+   * Computes the upcoming weekly occurrences of `targetDay` starting from today
+   * (today is included if it matches). With `untilKey` ("YYYY-MM-DD") it generates
+   * every weekly occurrence up to and including that club-local day (capped at
+   * MAX_WEEKS_AHEAD as a safety bound); without it, the default rolling window of
+   * WEEKS_AHEAD occurrences. Weekday matching and the wall-clock band are anchored to
+   * the club timezone, so the stored UTC instants match slots created elsewhere.
    */
   private nextOccurrences(
     targetDay: number,
     slotStart: string,
     slotEnd: string,
-    count: number,
+    untilKey?: string,
   ): { startsAt: Date; endsAt: Date }[] {
     const results: { startsAt: Date; endsAt: Date }[] = []
 
@@ -238,7 +257,12 @@ export class RecurringBookingsService {
     const daysUntil = (targetDay - todayDay + 7) % 7
     let cursorKey = shiftDateKey(todayKey(), daysUntil)
 
-    for (let i = 0; i < count; i++) {
+    const maxIterations = untilKey ? MAX_WEEKS_AHEAD : WEEKS_AHEAD
+
+    for (let i = 0; i < maxIterations; i++) {
+      // ISO date keys compare correctly as strings — stop once we pass the end date.
+      if (untilKey && cursorKey > untilKey) break
+
       const startsAt = wallTimeToUtc(cursorKey, slotStart)
       // The 22:30–00:00 band ends at midnight of the following day.
       const endsAt =

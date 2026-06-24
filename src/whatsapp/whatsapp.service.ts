@@ -37,7 +37,19 @@ export class WhatsAppService {
         }),
       })
       if (!response.ok) {
-        this.logger.error(`Graph API error ${response.status}: ${await response.text()}`)
+        const text = await response.text()
+        // Code 190 / 401 = the Meta access token expired or was revoked. The bot still
+        // ran (reply saved in the platform) but WhatsApp delivery failed — surface a
+        // clear, actionable line instead of a raw Graph dump.
+        if (response.status === 401 || text.includes('"code":190')) {
+          this.logger.error(
+            'WhatsApp token expired/invalid (Graph 401/190). The bot processed the message but ' +
+              'could NOT deliver it on WhatsApp. Generate a permanent System User token in Meta and ' +
+              'set WHATSAPP_TOKEN. Temporary tokens expire every ~24h.',
+          )
+        } else {
+          this.logger.error(`Graph API error ${response.status}: ${text}`)
+        }
       }
     } catch (err) {
       this.logger.error('Failed to reach Graph API', err)

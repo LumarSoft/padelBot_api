@@ -19,6 +19,7 @@ import { PaymentsModule } from './payments/payments.module'
 import { ClubsModule } from './clubs/clubs.module'
 import { ConversationsModule } from './conversations/conversations.module'
 import { StatsModule } from './stats/stats.module'
+import { PriceRulesModule } from './price-rules/price-rules.module'
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { StatsModule } from './stats/stats.module'
     ClubsModule,
     ConversationsModule,
     StatsModule,
+    PriceRulesModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

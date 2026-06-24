@@ -25,6 +25,11 @@ model Club {
   /// Default 25 (one of four padel players). Ignored when depositMode = FULL.
   depositPercent Int         @default(25)
 
+  /// When true, the bot asks the player's DNI at booking, the transfer amount is a clean
+  /// round number (no centavos tag), and a transfer auto-confirms only if the payer's DNI
+  /// (from MercadoPago) matches the reservation's. Mismatch/unknown → manual review.
+  requireDniMatch Boolean    @default(false)
+
   /// MercadoPago Connect (OAuth) — each club connects its OWN MP account so the deposit
   /// money lands in the club's account and the poller can reconcile it with that account's
   /// token. Null until the owner connects MercadoPago. Tokens are stored ENCRYPTED at rest.
@@ -42,6 +47,7 @@ model Club {
 
   users                User[]
   courts               Court[]
+  courtPriceRules      CourtPriceRule[]
   slots                Slot[]
   bookings             Booking[]
   recurringBookings    RecurringBooking[]
@@ -75,10 +81,33 @@ model Court {
   club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   slots     Slot[]
   recurringBookings RecurringBooking[]
+  priceRules CourtPriceRule[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([clubId])
+}
+
+/// Per-time-band price exception for a court. When present, it overrides the court's
+/// default `priceCents` for slots starting at `startTime`. `dayOfWeek` null = applies
+/// every day; a day-specific rule (matching weekday) takes precedence over an all-days one.
+model CourtPriceRule {
+  id         String   @id @default(cuid())
+  clubId     String
+  club       Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  courtId    String
+  court      Court    @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  /// 0 = Sunday … 6 = Saturday, or null for every day.
+  dayOfWeek  Int?
+  /// "HH:MM" start of the schedule band this price applies to.
+  startTime  String
+  priceCents Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([courtId, dayOfWeek, startTime])
+  @@index([clubId])
+  @@index([courtId])
 }
 
 enum CourtType {
@@ -145,8 +174,16 @@ model Booking {
   club               Club              @relation(fields: [clubId], references: [id], onDelete: Cascade)
   playerName         String
   playerPhone        String?
+  /// DNI the bot captured at booking (digits only), used to validate the payer's identity
+  /// when the club has requireDniMatch on. Null otherwise.
+  playerDni          String?
   status             BookingStatus     @default(PENDING_PAYMENT)
   notes              String?
+  /// Identity of who actually transferred, captured from MercadoPago at confirmation
+  /// (for owner visibility / audit). Null until/unless a real transfer confirms it.
+  payerCuit          String?
+  payerEmail         String?
+  payerMpUserId      String?
   bookedByUserId     Int?
   bookedByUser       User?             @relation(fields: [bookedByUserId], references: [id])
   recurringBookingId String?
@@ -206,6 +243,9 @@ model ConversationSession {
   expiresAt DateTime
   /// "AI" = bot handles the conversation; "HUMAN" = admin has taken over.
   mode      String   @default("AI")
+  /// True when the player asked to talk to a human advisor and no staff has replied yet.
+  /// Surfaced/notified in the panel; cleared when an admin sends a message or switches mode.
+  needsAdvisor Boolean @default(false)
   /// Cached player name from context so the conversations list can display it without loading context.
   playerName String?
   messages  ConversationMessage[]
@@ -259,6 +299,9 @@ model RecurringBooking {
   playerPhone     String
   priceCents      Int
   notes           String?
+  /// Block weekly occurrences only up to (and including) this club-local day. Null = the
+  /// default rolling window (WEEKS_AHEAD) with no hard end.
+  untilDate       DateTime?
   isActive        Boolean   @default(true)
   createdByUserId Int
   createdByUser   User      @relation(fields: [createdByUserId], references: [id])

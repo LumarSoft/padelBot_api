@@ -11,6 +11,7 @@ export interface TransferConfig {
   transferHolder: string | null
   depositMode: DepositMode
   depositPercent: number
+  requireDniMatch: boolean
 }
 
 export interface ClubProfile {
@@ -61,7 +62,13 @@ export class ClubsService {
   async getTransferConfig(clubId: string): Promise<TransferConfig> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { transferAlias: true, transferHolder: true, depositMode: true, depositPercent: true },
+      select: {
+        transferAlias: true,
+        transferHolder: true,
+        depositMode: true,
+        depositPercent: true,
+        requireDniMatch: true,
+      },
     })
     if (!club) throw new NotFoundException(`Club ${clubId} not found`)
     return club
@@ -75,6 +82,7 @@ export class ClubsService {
         ...(dto.transferHolder !== undefined ? { transferHolder: dto.transferHolder.trim() || null } : {}),
         ...(dto.depositMode !== undefined ? { depositMode: dto.depositMode } : {}),
         ...(dto.depositPercent !== undefined ? { depositPercent: dto.depositPercent } : {}),
+        ...(dto.requireDniMatch !== undefined ? { requireDniMatch: dto.requireDniMatch } : {}),
       },
     })
     return this.getTransferConfig(clubId)

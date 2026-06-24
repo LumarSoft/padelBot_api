@@ -16,6 +16,12 @@ export class CreateBookingDto {
   @MaxLength(20)
   playerPhone?: string
 
+  /** DNI (digits) captured for payer validation when the club requires it. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  playerDni?: string
+
   @IsOptional()
   @IsString()
   @MaxLength(500)

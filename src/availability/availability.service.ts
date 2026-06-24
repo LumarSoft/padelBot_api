@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service'
 import { CourtOption, SlotOption } from '../bot/types'
 import { dayRangeUtc, formatTimeRange, shiftDateKey, toDateKey } from './lib/datetime'
 import { bandDateTimes, generateBands } from './lib/schedule'
+import { resolveBandPriceCents } from './lib/pricing'
 
 /** A date that has at least one bookable band, with how many are free. */
 export interface AvailableDate {
@@ -49,7 +50,12 @@ export class AvailabilityService {
   async slotsForDate(clubId: string, dateKey: string, courtId: string): Promise<SlotOption[]> {
     const court = await this.prisma.court.findFirst({
       where: { id: courtId, clubId },
-      select: { priceCents: true, openTime: true, closeTime: true },
+      select: {
+        priceCents: true,
+        openTime: true,
+        closeTime: true,
+        priceRules: { select: { dayOfWeek: true, startTime: true, priceCents: true } },
+      },
     })
     if (!court) return []
 
@@ -76,7 +82,9 @@ export class AvailabilityService {
           price: found.priceCents,
         })
       } else {
-        options.push({ bandStart: band.start, label: formatTimeRange(startsAt, endsAt), price: court.priceCents })
+        // Not materialized yet — price comes from the court's exceptions or its default.
+        const price = resolveBandPriceCents(court.priceCents, court.priceRules, dateKey, band.start)
+        options.push({ bandStart: band.start, label: formatTimeRange(startsAt, endsAt), price })
       }
     }
     return options

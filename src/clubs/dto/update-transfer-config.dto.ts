@@ -1,4 +1,4 @@
-import { IsEnum, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
+import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
 import { DepositMode } from 'generated/prisma/client'
 
 export class UpdateTransferConfigDto {
@@ -25,4 +25,9 @@ export class UpdateTransferConfigDto {
   @Min(1)
   @Max(100)
   depositPercent?: number
+
+  /** Require the payer's DNI to match the reservation for auto-confirmation. */
+  @IsOptional()
+  @IsBoolean()
+  requireDniMatch?: boolean
 }
