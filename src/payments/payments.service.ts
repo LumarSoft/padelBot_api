@@ -1,10 +1,35 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, Injectable, Logger, UnauthorizedException } from '@nestjs/common'
 import { Cron, CronExpression, Interval } from '@nestjs/schedule'
 import { PrismaService } from '../prisma/prisma.service'
 import { BookingsService } from '../bookings/bookings.service'
 import { ClubsService } from '../clubs/clubs.service'
 import { MercadoPagoService, MpMoneyIn, MpPayment } from '../mercadopago/mercadopago.service'
 import { WhatsAppService } from '../whatsapp/whatsapp.service'
+import { dniFromIdentification, dniMatches } from '../common/identity'
+
+/** One incoming transfer enriched with what the auto-reconciler would do with it. */
+export interface MoneyInDiagnostic {
+  id: string
+  amountCents: number
+  amountPesos: number
+  dateCreated: Date
+  operationType: string
+  payerName: string | null
+  payerCuit: string | null
+  /** DNI derived from the payer's CUIT/CUIL (middle 8 digits), if MP exposed it. */
+  derivedDni: string | null
+  payerMpUserId: string | null
+  payerEmail: string | null
+  /** True when MP gave us anything that identifies the payer (the key production question). */
+  hasPayerIdentity: boolean
+  /** The pending booking this transfer would reconcile against (by exact amount), if any. */
+  pendingMatch: {
+    bookingId: string
+    transferAmountCents: number
+    playerDni: string | null
+    dniMatches: boolean
+  } | null
+}
 
 /** How far back the poller scans for transfers — a bit over the payment window. */
 const POLL_WINDOW_MS = ((Number(process.env.PAYMENT_WINDOW_MIN) || 30) + 5) * 60 * 1000
@@ -84,25 +109,38 @@ export class PaymentsService {
    */
   @Interval(POLL_INTERVAL_MS)
   async pollIncomingTransfers(): Promise<void> {
-    const pendingClubIds = await this.pendingClubIds()
-    if (pendingClubIds.length === 0) return
+    // The whole tick is guarded so a transient failure (DB hiccup, one club's token) never
+    // crashes the scheduler — the next tick simply retries. Per-club errors are already
+    // isolated in the reconcile helpers so one broken club can't block the others.
+    try {
+      const pendingClubIds = await this.pendingClubIds()
+      if (pendingClubIds.length === 0) return
 
-    const since = new Date(Date.now() - POLL_WINDOW_MS)
-    let usedSharedAccount = false
+      const since = new Date(Date.now() - POLL_WINDOW_MS)
+      let usedSharedAccount = false
 
-    for (const clubId of pendingClubIds) {
-      const token = await this.clubsService.getValidMpAccessToken(clubId)
+      for (const clubId of pendingClubIds) {
+        let token: string | null = null
+        try {
+          token = await this.clubsService.getValidMpAccessToken(clubId)
+        } catch (err) {
+          this.logger.error(`Could not resolve MercadoPago token for club ${clubId}`, err)
+          continue
+        }
 
-      if (token) {
-        await this.reconcileClub(clubId, token, since)
-      } else {
-        // No own account → relies on the shared env account; poll it once below.
-        usedSharedAccount = true
+        if (token) {
+          await this.reconcileClub(clubId, token, since)
+        } else {
+          // No own account → relies on the shared env account; poll it once below.
+          usedSharedAccount = true
+        }
       }
-    }
 
-    if (usedSharedAccount && this.mp.isConfigured) {
-      await this.reconcileSharedAccount(since)
+      if (usedSharedAccount && this.mp.isConfigured) {
+        await this.reconcileSharedAccount(since)
+      }
+    } catch (err) {
+      this.logger.error('Incoming-transfer poll failed', err)
     }
   }
 
@@ -166,6 +204,74 @@ export class PaymentsService {
   }
 
   /**
+   * Read-only diagnostic for the production go/no-go decision: lists the club's recent
+   * incoming transfers exactly as the reconciler sees them, exposing what payer identity
+   * MercadoPago actually returns (name / CUIT / derived DNI / MP user id) and whether each
+   * would match a pending booking. Lets an owner do a real transfer and immediately verify
+   * that round-amount + DNI matching is feasible, without touching any booking state.
+   * Reads the club's OWN MercadoPago account if connected, else the shared env account.
+   */
+  async getMoneyInDiagnostics(
+    clubId: string,
+    minutes: number,
+  ): Promise<{
+    account: 'own' | 'shared'
+    windowMinutes: number
+    count: number
+    withIdentity: number
+    movements: MoneyInDiagnostic[]
+  }> {
+    const token = await this.clubsService.getValidMpAccessToken(clubId)
+    if (!token && !this.mp.isConfigured) {
+      throw new BadRequestException(
+        'No MercadoPago account is available: connect the club account or set MERCADOPAGO_ACCESS_TOKEN.',
+      )
+    }
+
+    const since = new Date(Date.now() - minutes * 60 * 1000)
+    const movements = await this.mp.listRecentMoneyIn(since, token ?? undefined)
+
+    const pendings = await this.prisma.booking.findMany({
+      where: { clubId, status: 'PENDING_PAYMENT' },
+      select: { id: true, transferAmountCents: true, playerDni: true },
+    })
+
+    const enriched: MoneyInDiagnostic[] = movements.map(m => {
+      const derivedDni = dniFromIdentification(m.payerCuit)
+      const match = pendings.find(p => p.transferAmountCents === m.amountCents) ?? null
+      return {
+        id: m.id,
+        amountCents: m.amountCents,
+        amountPesos: m.amountCents / 100,
+        dateCreated: m.dateCreated,
+        operationType: m.operationType,
+        payerName: m.payerName,
+        payerCuit: m.payerCuit,
+        derivedDni,
+        payerMpUserId: m.payerMpUserId,
+        payerEmail: m.payerEmail,
+        hasPayerIdentity: !!(m.payerCuit || m.payerMpUserId || m.payerName),
+        pendingMatch: match
+          ? {
+              bookingId: match.id,
+              transferAmountCents: match.transferAmountCents!,
+              playerDni: match.playerDni,
+              dniMatches: dniMatches(match.playerDni, derivedDni),
+            }
+          : null,
+      }
+    })
+
+    return {
+      account: token ? 'own' : 'shared',
+      windowMinutes: minutes,
+      count: enriched.length,
+      withIdentity: enriched.filter(e => e.hasPayerIdentity).length,
+      movements: enriched,
+    }
+  }
+
+  /**
    * Admin manually confirms a transfer (front-desk verified the money landed) and
    * the player is notified. Club-scoped and idempotent.
    */
@@ -185,9 +291,13 @@ export class PaymentsService {
   /** Runs every 5 minutes to cancel bookings whose payment link expired. */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async cleanupExpiredPending(): Promise<void> {
-    const cancelled = await this.bookingsService.findAndCancelExpiredPending()
-    for (const b of cancelled) {
-      await this.sendPaymentExpiredMessage(b.playerPhone, b.clubId)
+    try {
+      const cancelled = await this.bookingsService.findAndCancelExpiredPending()
+      for (const b of cancelled) {
+        await this.sendPaymentExpiredMessage(b.playerPhone, b.clubId)
+      }
+    } catch (err) {
+      this.logger.error('Expired-pending cleanup failed', err)
     }
   }
 

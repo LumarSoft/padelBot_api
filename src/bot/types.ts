@@ -62,3 +62,41 @@ export interface HandlerResult {
   state: BotState
   ctx: SessionContext
 }
+
+// ── WhatsApp interactive (botoneras) ─────────────────────────────────────────
+// A quick-reply button or a list row. Its `id` is the exact text the FSM already
+// accepts (e.g. "1", a court name, "18:00", "si"), so tapping it is equivalent to
+// typing that input — no extra FSM logic, and it avoids paying for an LLM call.
+
+export interface InteractiveButton {
+  /** Fed back to the FSM as the message body when tapped. */
+  id: string
+  /** Visible label (WhatsApp limit: 20 chars). */
+  title: string
+}
+
+export interface InteractiveRow {
+  id: string
+  /** WhatsApp limit: 24 chars. */
+  title: string
+  /** Optional secondary line (WhatsApp limit: 72 chars). */
+  description?: string
+}
+
+export interface InteractiveList {
+  /** Label of the button that opens the list (WhatsApp limit: 20 chars). */
+  button: string
+  rows: InteractiveRow[]
+}
+
+/** Either up to 3 quick-reply buttons, or a single-select list. Never both. */
+export interface Interactive {
+  buttons?: InteractiveButton[]
+  list?: InteractiveList
+}
+
+/** What BotService returns to the transport layer: the text plus optional botonera. */
+export interface BotReply {
+  text: string
+  interactive?: Interactive
+}

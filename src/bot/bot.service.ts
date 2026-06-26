@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, Logger } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { BookingsService } from '../bookings/bookings.service'
 import { AvailabilityService } from '../availability/availability.service'
@@ -6,7 +6,7 @@ import { formatDayMonth, formatTimeRange, todayKey } from '../availability/lib/d
 import { LlmService } from '../llm/llm.service'
 import { ConversationSessionService, keepName } from './conversation-session.service'
 import { matchCourt, matchSlot } from './lib/match'
-import { BotState, BookingOption, HandlerResult, SessionContext } from './types'
+import { BotReply, BotState, BookingOption, HandlerResult, SessionContext } from './types'
 import {
   ADVISOR_HANDOFF,
   ASK_DATE,
@@ -24,7 +24,9 @@ import {
   NO_SLOTS,
   PAYMENT_CLAIM_NO_PENDING,
   PAYMENT_UNAVAILABLE,
+  TECHNICAL_ERROR,
   cancelList,
+  composeBotReply,
   confirmBooking,
   confirmCancel,
   courtsList,
@@ -42,6 +44,8 @@ const MAX_MESSAGE_LENGTH = 1000
 
 @Injectable()
 export class BotService {
+  private readonly logger = new Logger(BotService.name)
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly bookingsService: BookingsService,
@@ -50,7 +54,18 @@ export class BotService {
     private readonly llmService: LlmService,
   ) {}
 
-  async handleMessage(waId: string, clubId: string, body: string): Promise<string | null> {
+  async handleMessage(waId: string, clubId: string, body: string): Promise<BotReply | null> {
+    try {
+      return await this.runMessage(waId, clubId, body)
+    } catch (err) {
+      // Never leave the user "en visto": on any internal failure (DB hiccup, LLM outage…)
+      // send a friendly courtesy reply and keep the conversation alive.
+      this.logger.error(`Failed to handle message from ${waId}`, err)
+      return { text: TECHNICAL_ERROR }
+    }
+  }
+
+  private async runMessage(waId: string, clubId: string, body: string): Promise<BotReply | null> {
     const session = await this.sessionService.getOrCreate(waId, clubId)
     // Cap length so a pathologically long message can't bloat the LLM prompt / cost.
     const msg = body.trim().slice(0, MAX_MESSAGE_LENGTH)
@@ -89,14 +104,26 @@ export class BotService {
 
     await this.sessionService.update(session.id, result.state, { ...result.ctx, history: newHistory })
     await this.sessionService.saveMessage(session.id, 'BOT', result.reply)
-    return result.reply
+    // Pair the reply with the botonera that fits the next step (menu, courts, slots, yes/no…)
+    // and trim the body so options aren't listed twice. Tapping a button feeds its id back
+    // through this same handler, so the FSM is unchanged.
+    return composeBotReply(result.state, result.ctx, result.reply)
   }
 
   /**
    * Reply to an inbound image/document (typically a transfer receipt). We don't read
    * the file — the poller confirms the actual money — so we just reassure the player.
    */
-  async handleAttachment(waId: string, clubId: string): Promise<string | null> {
+  async handleAttachment(waId: string, clubId: string): Promise<BotReply | null> {
+    try {
+      return await this.runAttachment(waId, clubId)
+    } catch (err) {
+      this.logger.error(`Failed to handle attachment from ${waId}`, err)
+      return { text: TECHNICAL_ERROR }
+    }
+  }
+
+  private async runAttachment(waId: string, clubId: string): Promise<BotReply | null> {
     const session = await this.sessionService.getOrCreate(waId, clubId)
     await this.sessionService.saveMessage(session.id, 'USER', '[Imagen / comprobante recibido]')
 
@@ -105,11 +132,11 @@ export class BotService {
     }
 
     const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
-    if (!pending) return ATTACHMENT_NO_PENDING
+    if (!pending) return { text: ATTACHMENT_NO_PENDING }
     const { startsAt, endsAt, court } = pending.slot
     const reply = paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
     await this.sessionService.saveMessage(session.id, 'BOT', reply)
-    return reply
+    return { text: reply }
   }
 
   /** Builds the "we're waiting for your transfer" reply, keeping the FSM state put. */
@@ -402,8 +429,13 @@ export class BotService {
     }
 
     // Strict mode: we need the player's DNI to validate the transfer's titular.
+    // Reuse a DNI this phone already gave us so a returning player is never asked twice.
     if (club.requireDniMatch && !ctx.playerDni) {
-      return { reply: ASK_DNI, state: BotState.BOOK_DNI, ctx }
+      const knownDni = await this.bookingsService.findKnownDniForPhone(clubId, waId)
+      if (!knownDni) {
+        return { reply: ASK_DNI, state: BotState.BOOK_DNI, ctx }
+      }
+      ctx = { ...ctx, playerDni: knownDni }
     }
 
     return this.createPendingBooking(clubId, waId, ctx, {

@@ -664,3 +664,48 @@ Generic transfer-received webhook for an external notification source (e.g. a Pa
 `200 OK` — always (processing is best-effort and idempotent)
 
 `403 Forbidden` — missing/invalid `x-bridge-secret`, or bridge not configured
+
+### GET /payments/diagnostics/money-in
+
+Read-only production go/no-go check. Lists the club's recent incoming transfers exactly as the reconciler sees them, exposing the payer identity MercadoPago returns (name, CUIT, the DNI derived from it, MP user id, email) and whether each movement would match a pending booking. Confirms nothing and changes no booking state. Reads the club's own MercadoPago account when connected, otherwise the shared env account.
+
+**Auth required:** Yes (OWNER only)
+
+**Query params**
+
+| Field   | Type   | Required | Constraints              |
+| ------- | ------ | -------- | ------------------------ |
+| minutes | number | No       | integer 1–1440 (def. 60) |
+
+**Responses**
+
+`200 OK`
+
+```json
+{
+  "account": "own",
+  "windowMinutes": 60,
+  "count": 1,
+  "withIdentity": 1,
+  "movements": [
+    {
+      "id": "123456789",
+      "amountCents": 125000,
+      "amountPesos": 1250,
+      "dateCreated": "2026-06-26T18:20:00.000Z",
+      "operationType": "cvu_in",
+      "payerName": "Juan Perez",
+      "payerCuit": "20304050609",
+      "derivedDni": "30405060",
+      "payerMpUserId": "987654321",
+      "payerEmail": "juan@example.com",
+      "hasPayerIdentity": true,
+      "pendingMatch": { "bookingId": "ckxyz", "transferAmountCents": 125000, "playerDni": "30405060", "dniMatches": true }
+    }
+  ]
+}
+```
+
+`400 Bad Request` — no MercadoPago account available (club not connected and no `MERCADOPAGO_ACCESS_TOKEN`)
+
+`403 Forbidden` — caller is not the club OWNER

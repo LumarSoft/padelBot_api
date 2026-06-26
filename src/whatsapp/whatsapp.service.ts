@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
+import { Interactive } from '../bot/types'
 
 @Injectable()
 export class WhatsAppService {
@@ -19,6 +20,26 @@ export class WhatsAppService {
   }
 
   async sendText(phoneNumberId: string, to: string, body: string): Promise<void> {
+    await this.postMessage(phoneNumberId, to, { type: 'text', text: { body } })
+  }
+
+  /**
+   * Sends a text body together with an interactive botonera (up to 3 quick-reply buttons,
+   * or a single-select list). Tapping an option makes WhatsApp deliver its `id` back as the
+   * next inbound message, which the bot feeds straight into the FSM. Falls back to plain
+   * text when the payload carries no options.
+   */
+  async sendInteractive(phoneNumberId: string, to: string, body: string, interactive: Interactive): Promise<void> {
+    const payload = buildInteractivePayload(body, interactive)
+    if (!payload) {
+      await this.sendText(phoneNumberId, to, body)
+      return
+    }
+    await this.postMessage(phoneNumberId, to, payload)
+  }
+
+  /** Posts a message object to the Graph API, normalizing the recipient and logging failures. */
+  private async postMessage(phoneNumberId: string, to: string, message: Record<string, unknown>): Promise<void> {
     const url = `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}/messages`
     // Argentina mobile wa_ids arrive as 549XXXXXXXXXX but the API requires 54XXXXXXXXXX
     const recipient = to.startsWith('549') && to.length === 13 ? '54' + to.slice(3) : to
@@ -29,12 +50,7 @@ export class WhatsAppService {
           Authorization: `Bearer ${this.token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          to: recipient,
-          type: 'text',
-          text: { body },
-        }),
+        body: JSON.stringify({ messaging_product: 'whatsapp', to: recipient, ...message }),
       })
       if (!response.ok) {
         const text = await response.text()
@@ -100,4 +116,48 @@ export class WhatsAppService {
       return false
     }
   }
+}
+
+/**
+ * Translates our transport-agnostic Interactive into a Graph API `interactive` message
+ * object — a `button` message (≤3 quick replies) or a `list` message. Returns null when
+ * there are no options, so the caller sends plain text instead.
+ */
+function buildInteractivePayload(body: string, interactive: Interactive): Record<string, unknown> | null {
+  if (interactive.buttons?.length) {
+    return {
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: body },
+        action: {
+          buttons: interactive.buttons.map(b => ({ type: 'reply', reply: { id: b.id, title: b.title } })),
+        },
+      },
+    }
+  }
+
+  if (interactive.list?.rows.length) {
+    return {
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        body: { text: body },
+        action: {
+          button: interactive.list.button,
+          sections: [
+            {
+              rows: interactive.list.rows.map(r => ({
+                id: r.id,
+                title: r.title,
+                ...(r.description ? { description: r.description } : {}),
+              })),
+            },
+          ],
+        },
+      },
+    }
+  }
+
+  return null
 }

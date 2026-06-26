@@ -1,6 +1,7 @@
 import { AvailableDate } from '../availability/availability.service'
 import { dayLabelFromKey, dayMonthFromKey, formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
-import { BookingOption, CourtOption, SessionContext, SlotOption } from './types'
+import { BookingOption, BotReply, BotState, CourtOption, SessionContext, SlotOption } from './types'
+import { buildInteractive } from './lib/interactive'
 
 // ── Formatters ─────────────────────────────────────────────────────────────
 
@@ -66,6 +67,8 @@ export const CANCEL_ABORTED = `Perfecto, dejé tu reserva como estaba 👍`
 export const PAYMENT_UNAVAILABLE = `😅 Justo no puedo tomar el pago por acá en este momento. Escribile al club así te ayudan a confirmar la reserva. 🎾`
 export const PAYMENT_CLAIM_NO_PENDING = `Mmm, no me figura ninguna reserva tuya esperando pago 🤔. Si transferiste recién, dame un par de minutos y revisá; si no, escribime *reservar* y armamos el turno. 🎾`
 export const ATTACHMENT_NO_PENDING = `Recibí tu archivo 🙌 pero por acá no puedo abrir imágenes. Si transferiste para una reserva, esperá un toque y te confirmo solo; si necesitás otra cosa, escribime con palabras. 🎾`
+/** Friendly catch-all when something fails internally, so the bot is never left "en visto". */
+export const TECHNICAL_ERROR = `😅 Uy, tuvimos un inconveniente técnico de mi lado. Probá de nuevo en un ratito, por favor. Si sigue sin andar, escribile al club y te ayudan. 🎾`
 
 // ── Dynamic builders ────────────────────────────────────────────────────────
 
@@ -173,12 +176,15 @@ export function transferPending(
     : `⚠️ Transferí el monto *exacto, con los centavos* — así reconozco tu pago al instante y te confirmo solo. ` +
       `Si transferís otro importe, no voy a poder asociarlo automáticamente.`
 
+  // In DNI mode the amount is a clean round number → show it without the ",00".
+  const amount = requireDni ? fmtPrice(transferAmountCents) : fmtExact(transferAmountCents)
+
   return (
     `⏳ *Reserva pre-confirmada — falta el pago*\n\n` +
     `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n` +
     `🎾 ${ctx.selectedCourtName}\n\n` +
     `Para confirmar el turno, ${whatToPay}:\n\n` +
-    `💰 Importe: *${fmtExact(transferAmountCents)}*\n` +
+    `💰 Importe: *${amount}*\n` +
     `🏦 Alias: *${transfer.alias}*${holderLine}\n\n` +
     `${guard}\n\n` +
     `⏰ Tenés *30 minutos*. Cuando se acredite te aviso por acá; si no llega a tiempo, el turno queda libre.`
@@ -201,4 +207,57 @@ export function paymentClaimAck(
     `¡Gracias! 🙌 Tu transferencia${amountLine} me llega sola — no hace falta que mandes el comprobante.\n\n` +
     `Apenas se acredite (suele ser un par de minutos) te confirmo *${courtName} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}* por acá. 🎾`
   )
+}
+
+// ── Reply composition (text + botonera) ──────────────────────────────────────
+// When the bot sends a botonera, the options are already visible as buttons/rows, so the
+// body must NOT re-list them. These concise bodies replace the enumerated text in that case;
+// when no botonera fits (e.g. >10 options) the full enumerated text is sent instead.
+
+/** First line of the MENU block — used to detect a genuine menu presentation. */
+const MENU_PROMPT_MARKER = '¿Qué querés hacer?'
+/** Concise menu body shown above the 3 menu buttons (no enumerated 1/2/3 list). */
+const MENU_CONCISE = `¿Qué querés hacer? Tocá una opción 👇\n\nO escribime con tus palabras (ej: *"un turno el sábado a la tarde"*).`
+/** Concise cancel body shown above the bookings list. */
+const CANCEL_CONCISE = `❌ ¿Cuál reserva querés cancelar? Elegila abajo 👇`
+
+function courtsPrompt(ctx: SessionContext): string {
+  return `🎾 Para el *${fmtDate(ctx.selectedDate!)}* tengo estas canchas con lugar 👇`
+}
+
+function slotsPrompt(ctx: SessionContext): string {
+  return `⏰ Horarios libres en *${ctx.selectedCourtName}* el *${fmtDate(ctx.selectedDate!)}* 👇`
+}
+
+/** The body to send when a botonera is attached: a concise prompt instead of the listed options. */
+function conciseBody(state: BotState, ctx: SessionContext, text: string): string {
+  switch (state) {
+    case BotState.IDLE:
+    case BotState.MENU:
+      return text.replace(MENU, MENU_CONCISE)
+    case BotState.BOOK_COURT:
+      return courtsPrompt(ctx)
+    case BotState.BOOK_SLOT:
+      return slotsPrompt(ctx)
+    case BotState.CANCEL_SELECT:
+      return CANCEL_CONCISE
+    default:
+      // BOOK_CONFIRM / CANCEL_CONFIRM bodies are summaries, not option lists — keep them.
+      return text
+  }
+}
+
+/**
+ * Pairs the bot's text with the botonera that fits the step. When a botonera is attached the
+ * body is made concise so the options aren't duplicated above the buttons. Menu buttons are
+ * only attached to an actual menu presentation — a payment/advisor/terminal message that
+ * merely lands on the MENU state keeps its plain text.
+ */
+export function composeBotReply(state: BotState, ctx: SessionContext, text: string): BotReply {
+  let interactive = buildInteractive(state, ctx)
+  if ((state === BotState.MENU || state === BotState.IDLE) && !text.includes(MENU_PROMPT_MARKER)) {
+    interactive = undefined
+  }
+  if (!interactive) return { text }
+  return { text: conciseBody(state, ctx, text), interactive }
 }

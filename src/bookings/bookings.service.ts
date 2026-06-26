@@ -61,6 +61,8 @@ type BookingForEvent = {
 
 /** Default seña percentage (one of four padel players) when a club has none set. */
 const DEFAULT_DEPOSIT_PERCENT = 25
+/** Rounds a cents amount to whole pesos — the clean amount a known payer transfers. */
+const roundToWholePesos = (cents: number): number => Math.round(cents / 100) * 100
 /** Minutes a player has to transfer before the pending booking auto-cancels (env-tunable). */
 const PAYMENT_WINDOW_MS = (Number(process.env.PAYMENT_WINDOW_MIN) || 30) * 60 * 1000
 
@@ -135,12 +137,10 @@ export class BookingsService {
       throw new ConflictException(`Slot ${dto.slotId} is not available`)
     }
 
-    const [, booking] = await this.prisma.$transaction([
-      this.prisma.slot.update({
-        where: { id: dto.slotId },
-        data: { status: SlotStatus.BOOKED },
-      }),
-      this.prisma.booking.create({
+    const booking = await this.prisma.$transaction(async tx => {
+      // Atomic check-and-lock: only the writer that flips AVAILABLE→BOOKED proceeds.
+      await this.lockSlotOrThrow(tx, dto.slotId, clubId)
+      return tx.booking.create({
         data: {
           slotId: dto.slotId,
           clubId,
@@ -150,11 +150,42 @@ export class BookingsService {
           bookedByUserId: bookedByUserId ?? null,
         },
         select: bookingSelect,
-      }),
-    ])
+      })
+    })
 
     this.emitBookingChange('created', booking)
     return booking
+  }
+
+  /**
+   * Atomically flips a slot AVAILABLE→BOOKED. The conditional `updateMany` is a single
+   * SQL `UPDATE ... WHERE status='AVAILABLE'`, so exactly one of two concurrent bookers
+   * can win — the loser gets a clean ConflictException instead of a silent double-booking.
+   */
+  private async lockSlotOrThrow(tx: Prisma.TransactionClient, slotId: string, clubId: string): Promise<void> {
+    const { count } = await tx.slot.updateMany({
+      where: { id: slotId, clubId, status: SlotStatus.AVAILABLE },
+      data: { status: SlotStatus.BOOKED },
+    })
+    if (count !== 1) throw new ConflictException(`Slot ${slotId} is not available`)
+  }
+
+  /**
+   * Materializes a brand-new BOOKED slot for an open band. The unique index on
+   * (courtId, startsAt) makes the insert the atomic guard: if a concurrent writer
+   * created the same band first, P2002 is mapped to a clean ConflictException.
+   */
+  private async createBookedSlot(
+    tx: Prisma.TransactionClient,
+    data: { clubId: string; courtId: string; startsAt: Date; endsAt: Date; priceCents: number },
+  ): Promise<string> {
+    try {
+      const slot = await tx.slot.create({ data: { ...data, status: SlotStatus.BOOKED }, select: { id: true } })
+      return slot.id
+    } catch (error) {
+      if (isUniqueConstraintError(error)) throw new ConflictException('Slot is not available')
+      throw error
+    }
   }
 
   /**
@@ -194,34 +225,16 @@ export class BookingsService {
 
       let slotId: string
       if (existing) {
-        if (existing.status !== SlotStatus.AVAILABLE) {
-          throw new ConflictException('Slot is not available')
-        }
-        await tx.slot.update({ where: { id: existing.id }, data: { status: SlotStatus.BOOKED } })
+        await this.lockSlotOrThrow(tx, existing.id, clubId)
         slotId = existing.id
       } else {
-        try {
-          const slot = await tx.slot.create({
-            data: {
-              clubId,
-              courtId: input.courtId,
-              startsAt,
-              endsAt,
-              priceCents: bandPriceCents,
-              status: SlotStatus.BOOKED,
-            },
-            select: { id: true },
-          })
-          slotId = slot.id
-        } catch (error) {
-          // Another writer (admin panel or a concurrent bot turn) materialized
-          // this exact slot between our lookup and insert. The unique index on
-          // (courtId, startsAt) rejects the duplicate — the band is taken now.
-          if (isUniqueConstraintError(error)) {
-            throw new ConflictException('Slot is not available')
-          }
-          throw error
-        }
+        slotId = await this.createBookedSlot(tx, {
+          clubId,
+          courtId: input.courtId,
+          startsAt,
+          endsAt,
+          priceCents: bandPriceCents,
+        })
       }
 
       return tx.booking.create({
@@ -280,21 +293,13 @@ export class BookingsService {
       throw new ConflictException(`Slot ${dto.newSlotId} is not available`)
     }
 
-    const [, , updated] = await this.prisma.$transaction([
-      this.prisma.slot.update({
-        where: { id: booking.slotId },
-        data: { status: SlotStatus.AVAILABLE },
-      }),
-      this.prisma.slot.update({
-        where: { id: dto.newSlotId },
-        data: { status: SlotStatus.BOOKED },
-      }),
-      this.prisma.booking.update({
-        where: { id },
-        data: { slotId: dto.newSlotId },
-        select: bookingSelect,
-      }),
-    ])
+    const updated = await this.prisma.$transaction(async tx => {
+      await tx.slot.update({ where: { id: booking.slotId }, data: { status: SlotStatus.AVAILABLE } })
+      // Atomic lock on the target slot: if another reschedule/booking took it first, the
+      // whole transaction (including the release above) rolls back cleanly.
+      await this.lockSlotOrThrow(tx, dto.newSlotId, clubId)
+      return tx.booking.update({ where: { id }, data: { slotId: dto.newSlotId }, select: bookingSelect })
+    })
 
     this.emitBookingChange('rescheduled', updated)
     return updated
@@ -315,16 +320,13 @@ export class BookingsService {
     if (slot.status !== SlotStatus.AVAILABLE) throw new ConflictException(`Slot ${dto.slotId} is not available`)
 
     const { depositCents, requireDniMatch } = await this.resolvePaymentPlan(clubId, slot.priceCents)
+    const known = await this.findKnownPayerIdentity(clubId, dto.playerPhone)
     const paymentExpiresAt = new Date(Date.now() + PAYMENT_WINDOW_MS)
 
     const booking = await this.prisma.$transaction(async tx => {
-      const fresh = await tx.slot.findFirst({ where: { id: dto.slotId, clubId }, select: { status: true } })
-      if (!fresh || fresh.status !== SlotStatus.AVAILABLE)
-        throw new ConflictException(`Slot ${dto.slotId} is not available`)
-
-      await tx.slot.update({ where: { id: dto.slotId }, data: { status: SlotStatus.BOOKED } })
-      // Strict DNI mode uses a clean round amount; otherwise the centavos tag disambiguates.
-      const transferAmountCents = requireDniMatch ? depositCents : await this.allocateTransferAmount(tx, depositCents)
+      // Atomic check-and-lock — the loser of a concurrent race gets a clean conflict.
+      await this.lockSlotOrThrow(tx, dto.slotId, clubId)
+      const transferAmountCents = await this.resolvePendingTransferAmount(tx, depositCents, requireDniMatch, known)
 
       return tx.booking.create({
         data: {
@@ -333,6 +335,8 @@ export class BookingsService {
           playerName: dto.playerName,
           playerPhone: dto.playerPhone ?? null,
           playerDni: dto.playerDni ?? null,
+          // Stamp the expected payer so a colliding round amount reconciles to the right booking.
+          payerMpUserId: known.mpUserId,
           notes: dto.notes,
           status: 'PENDING_PAYMENT',
           depositCents,
@@ -368,6 +372,7 @@ export class BookingsService {
 
     const bandPriceCents = resolveBandPriceCents(court.priceCents, court.priceRules, input.dateKey, band.start)
     const { depositCents, requireDniMatch } = await this.resolvePaymentPlan(clubId, bandPriceCents)
+    const known = await this.findKnownPayerIdentity(clubId, input.playerPhone)
     const paymentExpiresAt = new Date(Date.now() + PAYMENT_WINDOW_MS)
 
     const booking = await this.prisma.$transaction(async tx => {
@@ -378,30 +383,19 @@ export class BookingsService {
 
       let slotId: string
       if (existing) {
-        if (existing.status !== SlotStatus.AVAILABLE) throw new ConflictException('Slot is not available')
-        await tx.slot.update({ where: { id: existing.id }, data: { status: SlotStatus.BOOKED } })
+        await this.lockSlotOrThrow(tx, existing.id, clubId)
         slotId = existing.id
       } else {
-        try {
-          const slot = await tx.slot.create({
-            data: {
-              clubId,
-              courtId: input.courtId,
-              startsAt,
-              endsAt,
-              priceCents: bandPriceCents,
-              status: SlotStatus.BOOKED,
-            },
-            select: { id: true },
-          })
-          slotId = slot.id
-        } catch (error) {
-          if (isUniqueConstraintError(error)) throw new ConflictException('Slot is not available')
-          throw error
-        }
+        slotId = await this.createBookedSlot(tx, {
+          clubId,
+          courtId: input.courtId,
+          startsAt,
+          endsAt,
+          priceCents: bandPriceCents,
+        })
       }
 
-      const transferAmountCents = requireDniMatch ? depositCents : await this.allocateTransferAmount(tx, depositCents)
+      const transferAmountCents = await this.resolvePendingTransferAmount(tx, depositCents, requireDniMatch, known)
 
       return tx.booking.create({
         data: {
@@ -410,6 +404,8 @@ export class BookingsService {
           playerName: input.playerName,
           playerPhone: input.playerPhone ?? null,
           playerDni: input.playerDni ?? null,
+          // Stamp the expected payer so a colliding round amount reconciles to the right booking.
+          payerMpUserId: known.mpUserId,
           notes: input.notes,
           status: 'PENDING_PAYMENT',
           depositCents,
@@ -442,6 +438,43 @@ export class BookingsService {
         ? priceCents
         : Math.ceil((priceCents * (club?.depositPercent ?? DEFAULT_DEPOSIT_PERCENT)) / 100)
     return { depositCents, requireDniMatch: club?.requireDniMatch ?? false }
+  }
+
+  /**
+   * The MercadoPago identity this phone used on its most recent CONFIRMED transfer in this
+   * club, if any. A "known" payer (paid at least once) can transfer a clean ROUND amount
+   * and be reconciled by their stable `payer.id` — no centavos tag, no DNI prompt. We read
+   * only CONFIRMED bookings so an unpaid/expected stamp never feeds back as if verified.
+   */
+  private async findKnownPayerIdentity(
+    clubId: string,
+    playerPhone?: string | null,
+  ): Promise<{ mpUserId: string | null; cuit: string | null }> {
+    if (!playerPhone) return { mpUserId: null, cuit: null }
+    const prev = await this.prisma.booking.findFirst({
+      where: { clubId, playerPhone, status: 'CONFIRMED', payerMpUserId: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      select: { payerMpUserId: true, payerCuit: true },
+    })
+    return { mpUserId: prev?.payerMpUserId ?? null, cuit: prev?.payerCuit ?? null }
+  }
+
+  /**
+   * The amount a new pending booking asks for. A KNOWN payer (or a strict-DNI club) gets a
+   * clean ROUND amount — reconciliation disambiguates by who paid (payer.id / DNI), so no
+   * centavos tag is needed. A first-time payer gets the unique centavos-tagged amount, which
+   * both guarantees a unique match and lets that first confirmation teach us their identity.
+   */
+  private async resolvePendingTransferAmount(
+    tx: Prisma.TransactionClient,
+    depositCents: number,
+    requireDniMatch: boolean,
+    known: { mpUserId: string | null },
+  ): Promise<number> {
+    // DNI mode (or a known payer): a clean ROUND amount — the payer's identity disambiguates,
+    // so no centavos tag is needed. Only a brand-new payer in no-DNI mode gets the tag.
+    if (requireDniMatch || known.mpUserId) return roundToWholePesos(depositCents)
+    return this.allocateTransferAmount(tx, depositCents)
   }
 
   /**
@@ -531,6 +564,15 @@ export class BookingsService {
     clubId?: string,
     payer?: PayerInfo,
   ): Promise<string | null> {
+    // Single-use transfer: a given MercadoPago movement can confirm at most ONE booking.
+    // Without this, two same-amount bookings could each be confirmed by the same transfer
+    // on successive poll ticks (the poller re-scans recent movements every tick).
+    const alreadyUsed = await this.prisma.booking.findFirst({
+      where: { mpPaymentId: paymentRef },
+      select: { id: true },
+    })
+    if (alreadyUsed) return null
+
     const candidates = await this.prisma.booking.findMany({
       where: {
         ...(clubId ? { clubId } : {}),
@@ -539,7 +581,7 @@ export class BookingsService {
         createdAt: { lte: paidAt },
         paymentExpiresAt: { gte: paidAt },
       },
-      select: { id: true, playerDni: true },
+      select: { id: true, playerDni: true, payerMpUserId: true },
     })
 
     if (candidates.length === 0) return null
@@ -567,23 +609,66 @@ export class BookingsService {
       return confirmed ? matched[0].id : null
     }
 
-    // Non-strict: the unique transfer amount is the identifier, so confirm only on a
-    // single match (never auto-confirm an ambiguous transfer).
-    if (candidates.length !== 1) {
+    // Default mode: a unique centavos-tagged amount yields a single candidate (first-time
+    // payer) → confirm directly. When a clean ROUND amount is shared by several known
+    // payers, the incoming payer's identity (MercadoPago id, or DNI from the CUIT) picks
+    // the right one. Only confirm on an unambiguous result — never auto-confirm otherwise.
+    const chosen = this.disambiguateByPayer(candidates, payer)
+    if (!chosen) {
       this.logger.warn(
         `Transfer of ${amountCents} cents matched ${candidates.length} pending bookings (ref ${paymentRef}) — needs manual review`,
       )
       return null
     }
 
-    const confirmed = await this.confirmPayment(candidates[0].id, paymentRef, payer)
-    return confirmed ? candidates[0].id : null
+    const confirmed = await this.confirmPayment(chosen.id, paymentRef, payer)
+    return confirmed ? chosen.id : null
+  }
+
+  /**
+   * Picks the single pending booking an incoming transfer belongs to, returning null when it
+   * stays ambiguous (left for manual review). Two kinds of pending booking coexist:
+   *  - First-time payer: a unique centavos-tagged amount and NO expected identity — the amount
+   *    itself is the identifier, so it matches on amount alone.
+   *  - Known payer: a clean ROUND amount (shared with other known payers) plus a stamped
+   *    expected identity — since a round amount is not unique, it confirms ONLY when the
+   *    incoming payer matches (MercadoPago id, then DNI). This guards against a stranger's
+   *    same-round-amount transfer ever confirming someone else's booking.
+   */
+  private disambiguateByPayer<T extends { playerDni: string | null; payerMpUserId: string | null }>(
+    candidates: T[],
+    payer?: PayerInfo,
+  ): T | null {
+    const payerMpUserId = payer?.mpUserId ?? null
+    const payerDni = dniFromIdentification(payer?.cuit)
+    const identityMatches = (c: T): boolean =>
+      (payerMpUserId !== null && c.payerMpUserId === payerMpUserId) || dniMatches(c.playerDni, payerDni)
+
+    const eligible = candidates.filter(c => {
+      const expectsIdentity = c.payerMpUserId !== null || c.playerDni !== null
+      return expectsIdentity ? identityMatches(c) : true
+    })
+    return eligible.length === 1 ? eligible[0] : null
   }
 
   /** Whether the club requires DNI-matched auto-confirmation. */
   private async clubRequiresDniMatch(clubId: string): Promise<boolean> {
     const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { requireDniMatch: true } })
     return club?.requireDniMatch ?? false
+  }
+
+  /**
+   * The DNI this phone used on its most recent booking in this club, if any. Lets the
+   * bot pre-fill the DNI in requireDniMatch mode so a returning player is never asked
+   * for it twice — the round transfer amount stays clean and the UX stays frictionless.
+   */
+  async findKnownDniForPhone(clubId: string, playerPhone: string): Promise<string | null> {
+    const booking = await this.prisma.booking.findFirst({
+      where: { clubId, playerPhone, playerDni: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      select: { playerDni: true },
+    })
+    return booking?.playerDni ?? null
   }
 
   /**
