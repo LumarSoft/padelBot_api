@@ -100,3 +100,10 @@ export interface BotReply {
   text: string
   interactive?: Interactive
 }
+
+/** An inbound image/document (typically a transfer receipt) the transport layer forwards. */
+export interface InboundMedia {
+  /** Meta media id, resolved to bytes via WhatsAppMediaService when needed. */
+  mediaId: string
+  mimeType: string | null
+}

@@ -10,6 +10,7 @@ import { dniFromIdentification, dniMatches } from '../common/identity'
 import { formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { BookingAction, BookingEventsService } from '../events/booking-events.service'
+import { ReceiptStorageService } from '../storage/receipt-storage.service'
 
 /** Booking a schedule band that may not have a materialized Slot row yet. */
 export interface BookBandInput {
@@ -38,6 +39,7 @@ const bookingSelect = {
   depositCents: true,
   transferAmountCents: true,
   paymentExpiresAt: true,
+  receiptUploadedAt: true,
   createdAt: true,
   updatedAt: true,
   slot: {
@@ -50,6 +52,8 @@ const bookingSelect = {
       court: { select: { id: true, name: true } },
     },
   },
+  // Count of receipt images so the panel knows to render the thumbnail / "review now" badge.
+  _count: { select: { receipts: true } },
 } as const
 
 /** Shape needed to build an event summary — satisfied by any `bookingSelect` row. */
@@ -57,6 +61,14 @@ type BookingForEvent = {
   clubId: string
   playerName: string
   slot: { startsAt: Date; endsAt: Date; court: { name: string } }
+}
+
+/** Replaces the internal `_count.receipts` with a clean `hasReceipt` boolean for the client. */
+function withReceiptFlag<T extends { _count: { receipts: number } }>(
+  booking: T,
+): Omit<T, '_count'> & { hasReceipt: boolean } {
+  const { _count, ...rest } = booking
+  return { ...rest, hasReceipt: _count.receipts > 0 }
 }
 
 /** Default seña percentage (one of four padel players) when a club has none set. */
@@ -89,10 +101,11 @@ export class BookingsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: BookingEventsService,
+    private readonly receiptStorage: ReceiptStorageService,
   ) {}
 
-  findAll(clubId: string, query: QueryBookingsDto) {
-    return this.prisma.booking.findMany({
+  async findAll(clubId: string, query: QueryBookingsDto) {
+    const bookings = await this.prisma.booking.findMany({
       where: {
         clubId,
         ...(query.status ? { status: query.status } : {}),
@@ -116,6 +129,7 @@ export class BookingsService {
       select: bookingSelect,
       orderBy: { createdAt: 'desc' },
     })
+    return bookings.map(withReceiptFlag)
   }
 
   async findOne(clubId: string, id: string) {
@@ -124,7 +138,7 @@ export class BookingsService {
       select: bookingSelect,
     })
     if (!booking) throw new NotFoundException(`Booking ${id} not found`)
-    return booking
+    return withReceiptFlag(booking)
   }
 
   async book(clubId: string, dto: CreateBookingDto, bookedByUserId?: number) {
@@ -319,14 +333,14 @@ export class BookingsService {
     if (!slot) throw new NotFoundException(`Slot ${dto.slotId} not found`)
     if (slot.status !== SlotStatus.AVAILABLE) throw new ConflictException(`Slot ${dto.slotId} is not available`)
 
-    const { depositCents, requireDniMatch } = await this.resolvePaymentPlan(clubId, slot.priceCents)
+    const { depositCents, roundAmount } = await this.resolvePaymentPlan(clubId, slot.priceCents)
     const known = await this.findKnownPayerIdentity(clubId, dto.playerPhone)
     const paymentExpiresAt = new Date(Date.now() + PAYMENT_WINDOW_MS)
 
     const booking = await this.prisma.$transaction(async tx => {
       // Atomic check-and-lock — the loser of a concurrent race gets a clean conflict.
       await this.lockSlotOrThrow(tx, dto.slotId, clubId)
-      const transferAmountCents = await this.resolvePendingTransferAmount(tx, depositCents, requireDniMatch, known)
+      const transferAmountCents = await this.resolvePendingTransferAmount(tx, depositCents, roundAmount, known)
 
       return tx.booking.create({
         data: {
@@ -371,7 +385,7 @@ export class BookingsService {
     if (startsAt.getTime() <= Date.now()) throw new ConflictException('Cannot book a slot in the past')
 
     const bandPriceCents = resolveBandPriceCents(court.priceCents, court.priceRules, input.dateKey, band.start)
-    const { depositCents, requireDniMatch } = await this.resolvePaymentPlan(clubId, bandPriceCents)
+    const { depositCents, roundAmount } = await this.resolvePaymentPlan(clubId, bandPriceCents)
     const known = await this.findKnownPayerIdentity(clubId, input.playerPhone)
     const paymentExpiresAt = new Date(Date.now() + PAYMENT_WINDOW_MS)
 
@@ -395,7 +409,7 @@ export class BookingsService {
         })
       }
 
-      const transferAmountCents = await this.resolvePendingTransferAmount(tx, depositCents, requireDniMatch, known)
+      const transferAmountCents = await this.resolvePendingTransferAmount(tx, depositCents, roundAmount, known)
 
       return tx.booking.create({
         data: {
@@ -422,22 +436,27 @@ export class BookingsService {
   /**
    * Resolves the club's payment policy for a booking: how much the player must transfer
    * (the full court price when depositMode = FULL, else a percentage of it as the seña —
-   * default 25%, one of four padel players; a 0-priced court yields 0) and whether the
-   * club requires DNI-matched confirmation (which also means a clean round amount).
+   * default 25%, one of four padel players; a 0-priced court yields 0), whether the club
+   * requires DNI-matched confirmation, and whether the transfer amount should be a clean
+   * round number. The amount is rounded (no centavos tag) when the deposit isn't reconciled
+   * by a unique amount — i.e. in DNI mode (payer identity disambiguates) or in RECEIPT mode
+   * (an admin verifies the receipt photo by hand, so the centavos trick is unnecessary).
    */
   private async resolvePaymentPlan(
     clubId: string,
     priceCents: number,
-  ): Promise<{ depositCents: number; requireDniMatch: boolean }> {
+  ): Promise<{ depositCents: number; requireDniMatch: boolean; roundAmount: boolean }> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { depositMode: true, depositPercent: true, requireDniMatch: true },
+      select: { depositMode: true, depositPercent: true, requireDniMatch: true, paymentVerificationMode: true },
     })
     const depositCents =
       club?.depositMode === 'FULL'
         ? priceCents
         : Math.ceil((priceCents * (club?.depositPercent ?? DEFAULT_DEPOSIT_PERCENT)) / 100)
-    return { depositCents, requireDniMatch: club?.requireDniMatch ?? false }
+    const requireDniMatch = club?.requireDniMatch ?? false
+    const roundAmount = requireDniMatch || club?.paymentVerificationMode === 'RECEIPT'
+    return { depositCents, requireDniMatch, roundAmount }
   }
 
   /**
@@ -468,12 +487,13 @@ export class BookingsService {
   private async resolvePendingTransferAmount(
     tx: Prisma.TransactionClient,
     depositCents: number,
-    requireDniMatch: boolean,
+    roundAmount: boolean,
     known: { mpUserId: string | null },
   ): Promise<number> {
-    // DNI mode (or a known payer): a clean ROUND amount — the payer's identity disambiguates,
-    // so no centavos tag is needed. Only a brand-new payer in no-DNI mode gets the tag.
-    if (requireDniMatch || known.mpUserId) return roundToWholePesos(depositCents)
+    // Round-amount modes (DNI / RECEIPT) or a known payer: a clean ROUND amount — the payer's
+    // identity or a manual review disambiguates, so no centavos tag is needed. Only a brand-new
+    // payer in default auto mode gets the unique centavos tag.
+    if (roundAmount || known.mpUserId) return roundToWholePesos(depositCents)
     return this.allocateTransferAmount(tx, depositCents)
   }
 
@@ -530,6 +550,9 @@ export class BookingsService {
     })
     if (count === 0) return false
 
+    // The receipt screenshot (if any) is no longer needed once the payment is confirmed.
+    await this.purgeReceipts(bookingId)
+
     const booking = await this.prisma.booking.findUnique({
       where: { id: bookingId },
       select: {
@@ -576,6 +599,8 @@ export class BookingsService {
     const candidates = await this.prisma.booking.findMany({
       where: {
         ...(clubId ? { clubId } : {}),
+        // Never auto-confirm a RECEIPT-mode booking — those are verified by hand from the panel.
+        club: { paymentVerificationMode: 'AUTO' },
         status: 'PENDING_PAYMENT',
         transferAmountCents: amountCents,
         createdAt: { lte: paidAt },
@@ -688,6 +713,82 @@ export class BookingsService {
     })
   }
 
+  // ── Receipt-photo flow (RECEIPT verification mode) ──────────────────────────
+
+  /**
+   * Records a transfer-receipt image for a pending booking (RECEIPT mode): persists the
+   * PaymentReceipt row, stamps `receiptUploadedAt` (which both prioritizes the booking in the
+   * panel and stops it from auto-expiring while awaiting review), and emits a `payment.receipt`
+   * event so connected admins are alerted live. The bytes are already in storage; only metadata
+   * is stored here.
+   */
+  async attachReceipt(
+    clubId: string,
+    bookingId: string,
+    file: { storageKey: string; url: string; mimeType: string; sizeBytes: number; waMediaId?: string | null },
+  ): Promise<void> {
+    const booking = await this.prisma.booking.findFirst({
+      where: { id: bookingId, clubId },
+      select: {
+        id: true,
+        playerName: true,
+        slot: { select: { startsAt: true, endsAt: true, court: { select: { name: true } } } },
+      },
+    })
+    if (!booking) throw new NotFoundException(`Booking ${bookingId} not found`)
+
+    await this.prisma.$transaction([
+      this.prisma.paymentReceipt.create({
+        data: {
+          bookingId,
+          clubId,
+          storageKey: file.storageKey,
+          url: file.url,
+          mimeType: file.mimeType,
+          sizeBytes: file.sizeBytes,
+          waMediaId: file.waMediaId ?? null,
+        },
+      }),
+      this.prisma.booking.update({ where: { id: bookingId }, data: { receiptUploadedAt: new Date() } }),
+    ])
+
+    const { startsAt, endsAt, court } = booking.slot
+    this.events.emitReceipt({
+      type: 'payment.receipt',
+      clubId,
+      bookingId,
+      summary: `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`,
+    })
+  }
+
+  /** The most recent receipt for a booking (club-scoped) — used to serve the image to the panel. */
+  async getLatestReceipt(clubId: string, bookingId: string) {
+    const receipt = await this.prisma.paymentReceipt.findFirst({
+      where: { bookingId, clubId },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, url: true, storageKey: true, mimeType: true },
+    })
+    if (!receipt) throw new NotFoundException('Receipt not found')
+    return receipt
+  }
+
+  /**
+   * Deletes a booking's receipt images from storage and the DB. Called once the payment is
+   * resolved (confirmed/rejected/expired) — the screenshot is no longer needed. Best-effort:
+   * a storage failure never blocks the booking transition.
+   */
+  private async purgeReceipts(bookingId: string): Promise<void> {
+    const receipts = await this.prisma.paymentReceipt.findMany({
+      where: { bookingId },
+      select: { id: true, url: true, storageKey: true },
+    })
+    if (receipts.length === 0) return
+    for (const r of receipts) {
+      await this.receiptStorage.delete(r)
+    }
+    await this.prisma.paymentReceipt.deleteMany({ where: { bookingId } })
+  }
+
   /**
    * Manual confirmation from the admin panel (front-desk verified the money landed).
    * Club-scoped and idempotent. Returns the booking id when it flips a pending
@@ -745,6 +846,9 @@ export class BookingsService {
       this.prisma.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED' } }),
     ])
 
+    // Drop the receipt screenshot (if any) — the booking is no longer pending.
+    await this.purgeReceipts(bookingId)
+
     this.emitBookingChange('cancelled', booking)
     return { playerPhone: booking.playerPhone, clubId: booking.clubId }
   }
@@ -755,7 +859,9 @@ export class BookingsService {
    */
   async findAndCancelExpiredPending(): Promise<CancelledPendingInfo[]> {
     const expired = await this.prisma.booking.findMany({
-      where: { status: 'PENDING_PAYMENT', paymentExpiresAt: { lt: new Date() } },
+      // A booking whose receipt photo already arrived is NOT auto-cancelled: the player paid
+      // and is waiting on the admin's manual review, which may take longer than the window.
+      where: { status: 'PENDING_PAYMENT', paymentExpiresAt: { lt: new Date() }, receiptUploadedAt: null },
       select: {
         id: true,
         slotId: true,

@@ -421,6 +421,16 @@ Manually rejects a `PENDING_PAYMENT` booking (transfer never arrived). Cancels t
 
 `404 Not Found` — booking not found in the caller's club
 
+### GET /bookings/:id/receipt
+
+Streams the latest transfer-receipt image for a booking (RECEIPT verification mode). The bytes are read from object storage server-side; the raw storage URL is never exposed. Club-scoped. Intended to be loaded by an `<img>` tag through the panel's same-origin BFF proxy.
+
+**Auth required:** Yes
+
+`200 OK` — the image bytes, with the stored `Content-Type` (e.g. `image/jpeg`) and `Cache-Control: private, max-age=60`.
+
+`404 Not Found` — no receipt for this booking, or booking not in the caller's club
+
 ## Recurring Bookings (Turnos Fijos)
 
 Admin-only recurring reservations. When created, the pattern is automatically applied to all existing matching `AVAILABLE` slots. The pattern can be re-applied manually via the `apply` action.
@@ -556,13 +566,19 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 
 **Request body**
 
-| Field          | Type   | Required | Constraints   |
-| -------------- | ------ | -------- | ------------- |
-| transferAlias  | string | No       | max 120 chars |
-| transferHolder | string | No       | max 120 chars |
+| Field                   | Type   | Required | Constraints                        |
+| ----------------------- | ------ | -------- | ---------------------------------- |
+| transferAlias           | string | No       | max 120 chars                      |
+| transferHolder          | string | No       | max 120 chars                      |
+| depositMode             | enum   | No       | `DEPOSIT` \| `FULL`                |
+| depositPercent          | int    | No       | 1–100 (used when `DEPOSIT`)        |
+| requireDniMatch         | bool   | No       | only relevant in `AUTO` mode       |
+| paymentVerificationMode | enum   | No       | `AUTO` \| `RECEIPT`                |
+
+`AUTO` reconciles the deposit automatically via MercadoPago; `RECEIPT` makes the bot ask the player for a receipt photo that an admin verifies manually from the panel (the poller skips RECEIPT clubs).
 
 ```json
-{ "transferAlias": "padel.club.mp", "transferHolder": "Padel Club SRL" }
+{ "transferAlias": "padel.club.mp", "transferHolder": "Padel Club SRL", "paymentVerificationMode": "RECEIPT" }
 ```
 
 `200 OK` — the updated transfer config

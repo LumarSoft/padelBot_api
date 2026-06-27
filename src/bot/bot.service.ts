@@ -6,7 +6,9 @@ import { formatDayMonth, formatTimeRange, todayKey } from '../availability/lib/d
 import { LlmService } from '../llm/llm.service'
 import { ConversationSessionService, keepName } from './conversation-session.service'
 import { matchCourt, matchSlot } from './lib/match'
-import { BotReply, BotState, BookingOption, HandlerResult, SessionContext } from './types'
+import { WhatsAppMediaService } from '../whatsapp/whatsapp-media.service'
+import { ReceiptStorageService } from '../storage/receipt-storage.service'
+import { BotReply, BotState, BookingOption, HandlerResult, InboundMedia, SessionContext } from './types'
 import {
   ADVISOR_HANDOFF,
   ASK_DATE,
@@ -24,6 +26,9 @@ import {
   NO_SLOTS,
   PAYMENT_CLAIM_NO_PENDING,
   PAYMENT_UNAVAILABLE,
+  RECEIPT_ATTACHMENT_FAILED,
+  RECEIPT_ATTACHMENT_NO_PENDING,
+  RECEIPT_CLAIM_ASK_PHOTO,
   TECHNICAL_ERROR,
   cancelList,
   composeBotReply,
@@ -33,6 +38,7 @@ import {
   myBookingsList,
   noAvailabilityWithSuggestions,
   paymentClaimAck,
+  receiptReceivedAck,
   slotsList,
   thanksReply,
   transferPending,
@@ -52,6 +58,8 @@ export class BotService {
     private readonly availability: AvailabilityService,
     private readonly sessionService: ConversationSessionService,
     private readonly llmService: LlmService,
+    private readonly media: WhatsAppMediaService,
+    private readonly receiptStorage: ReceiptStorageService,
   ) {}
 
   async handleMessage(waId: string, clubId: string, body: string): Promise<BotReply | null> {
@@ -111,19 +119,20 @@ export class BotService {
   }
 
   /**
-   * Reply to an inbound image/document (typically a transfer receipt). We don't read
-   * the file — the poller confirms the actual money — so we just reassure the player.
+   * Reply to an inbound image/document (typically a transfer receipt). In RECEIPT mode the
+   * club verifies the receipt by hand, so we download and store the image and flag it for the
+   * admin. In AUTO mode the poller confirms the actual money, so we just reassure the player.
    */
-  async handleAttachment(waId: string, clubId: string): Promise<BotReply | null> {
+  async handleAttachment(waId: string, clubId: string, media: InboundMedia | null): Promise<BotReply | null> {
     try {
-      return await this.runAttachment(waId, clubId)
+      return await this.runAttachment(waId, clubId, media)
     } catch (err) {
       this.logger.error(`Failed to handle attachment from ${waId}`, err)
       return { text: TECHNICAL_ERROR }
     }
   }
 
-  private async runAttachment(waId: string, clubId: string): Promise<BotReply | null> {
+  private async runAttachment(waId: string, clubId: string, media: InboundMedia | null): Promise<BotReply | null> {
     const session = await this.sessionService.getOrCreate(waId, clubId)
     await this.sessionService.saveMessage(session.id, 'USER', '[Imagen / comprobante recibido]')
 
@@ -131,12 +140,64 @@ export class BotService {
       return null
     }
 
-    const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
-    if (!pending) return { text: ATTACHMENT_NO_PENDING }
-    const { startsAt, endsAt, court } = pending.slot
-    const reply = paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+    const mode = await this.paymentVerificationMode(clubId)
+    const reply =
+      mode === 'RECEIPT'
+        ? await this.storeReceipt(waId, clubId, media)
+        : await this.acknowledgeReceiptClaim(clubId, waId)
+
     await this.sessionService.saveMessage(session.id, 'BOT', reply)
     return { text: reply }
+  }
+
+  /** AUTO mode: the poller confirms the money, so we only reassure the player. */
+  private async acknowledgeReceiptClaim(clubId: string, waId: string): Promise<string> {
+    const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
+    if (!pending) return ATTACHMENT_NO_PENDING
+    const { startsAt, endsAt, court } = pending.slot
+    return paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+  }
+
+  /**
+   * RECEIPT mode: download the image from Meta, store it, attach it to the player's pending
+   * booking and flag it for the admin to verify. Returns the player-facing acknowledgement.
+   */
+  private async storeReceipt(waId: string, clubId: string, media: InboundMedia | null): Promise<string> {
+    const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
+    if (!pending) return RECEIPT_ATTACHMENT_NO_PENDING
+    if (!media) return RECEIPT_ATTACHMENT_FAILED
+
+    const downloaded = await this.media.download(media.mediaId)
+    if (!downloaded) return RECEIPT_ATTACHMENT_FAILED
+
+    const mimeType = downloaded.mimeType || media.mimeType || 'image/jpeg'
+    const key = `receipts/${pending.id}/${Date.now()}-${media.mediaId}${extensionFor(mimeType)}`
+
+    try {
+      const stored = await this.receiptStorage.upload(key, downloaded.bytes, mimeType)
+      await this.bookingsService.attachReceipt(clubId, pending.id, {
+        storageKey: stored.key,
+        url: stored.url,
+        mimeType,
+        sizeBytes: downloaded.bytes.length,
+        waMediaId: media.mediaId,
+      })
+    } catch (err) {
+      this.logger.error(`Failed to store receipt for booking ${pending.id}`, err)
+      return RECEIPT_ATTACHMENT_FAILED
+    }
+
+    const { startsAt, endsAt, court } = pending.slot
+    return receiptReceivedAck(court.name, startsAt, endsAt)
+  }
+
+  /** The club's payment verification mode (AUTO reconciliation vs manual receipt review). */
+  private async paymentVerificationMode(clubId: string): Promise<'AUTO' | 'RECEIPT'> {
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: { paymentVerificationMode: true },
+    })
+    return club?.paymentVerificationMode ?? 'AUTO'
   }
 
   /** Builds the "we're waiting for your transfer" reply, keeping the FSM state put. */
@@ -144,11 +205,13 @@ export class BotService {
     const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
     if (!pending) return { reply: PAYMENT_CLAIM_NO_PENDING, state: BotState.MENU, ctx: keepName(ctx) }
     const { startsAt, endsAt, court } = pending.slot
-    return {
-      reply: paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents),
-      state: BotState.MENU,
-      ctx: keepName(ctx),
-    }
+    // In RECEIPT mode a text "ya transferí" isn't enough — ask for the receipt photo.
+    const mode = await this.paymentVerificationMode(clubId)
+    const reply =
+      mode === 'RECEIPT'
+        ? RECEIPT_CLAIM_ASK_PHOTO
+        : paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+    return { reply, state: BotState.MENU, ctx: keepName(ctx) }
   }
 
   // ── Dispatcher ─────────────────────────────────────────────────────────────
@@ -422,15 +485,22 @@ export class BotService {
     // player can't actually pay for.
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { transferAlias: true, transferHolder: true, depositMode: true, requireDniMatch: true },
+      select: {
+        transferAlias: true,
+        transferHolder: true,
+        depositMode: true,
+        requireDniMatch: true,
+        paymentVerificationMode: true,
+      },
     })
     if (!club?.transferAlias) {
       return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
-    // Strict mode: we need the player's DNI to validate the transfer's titular.
+    // Strict (AUTO) mode: we need the player's DNI to validate the transfer's titular. The DNI
+    // is irrelevant in RECEIPT mode (an admin verifies the photo by hand), so we skip it there.
     // Reuse a DNI this phone already gave us so a returning player is never asked twice.
-    if (club.requireDniMatch && !ctx.playerDni) {
+    if (club.requireDniMatch && club.paymentVerificationMode !== 'RECEIPT' && !ctx.playerDni) {
       const knownDni = await this.bookingsService.findKnownDniForPhone(clubId, waId)
       if (!knownDni) {
         return { reply: ASK_DNI, state: BotState.BOOK_DNI, ctx }
@@ -443,6 +513,7 @@ export class BotService {
       transferHolder: club.transferHolder,
       depositMode: club.depositMode,
       requireDniMatch: club.requireDniMatch,
+      paymentVerificationMode: club.paymentVerificationMode,
     })
   }
 
@@ -454,7 +525,13 @@ export class BotService {
 
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { transferAlias: true, transferHolder: true, depositMode: true, requireDniMatch: true },
+      select: {
+        transferAlias: true,
+        transferHolder: true,
+        depositMode: true,
+        requireDniMatch: true,
+        paymentVerificationMode: true,
+      },
     })
     if (!club?.transferAlias) {
       return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
@@ -469,6 +546,7 @@ export class BotService {
         transferHolder: club.transferHolder,
         depositMode: club.depositMode,
         requireDniMatch: club.requireDniMatch,
+        paymentVerificationMode: club.paymentVerificationMode,
       },
     )
   }
@@ -483,6 +561,7 @@ export class BotService {
       transferHolder: string | null
       depositMode: 'DEPOSIT' | 'FULL'
       requireDniMatch: boolean
+      paymentVerificationMode: 'AUTO' | 'RECEIPT'
     },
   ): Promise<HandlerResult> {
     let pendingBooking: { id: string; transferAmountCents: number }
@@ -515,6 +594,7 @@ export class BotService {
         pendingBooking.transferAmountCents,
         club.depositMode,
         club.requireDniMatch,
+        club.paymentVerificationMode,
       ),
       state: BotState.MENU,
       ctx: keepName(ctx),
@@ -618,6 +698,14 @@ function parseDateDMY(input: string): string | null {
   if (isBeforeToday) year += 1
 
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+/** A file extension for a stored receipt, derived from its mime type (defaults to .jpg). */
+function extensionFor(mimeType: string): string {
+  if (mimeType.includes('png')) return '.png'
+  if (mimeType.includes('webp')) return '.webp'
+  if (mimeType.includes('pdf')) return '.pdf'
+  return '.jpg'
 }
 
 /** True when the player asks to talk to a human advisor (or about tournaments). */

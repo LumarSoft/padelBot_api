@@ -67,6 +67,12 @@ export const CANCEL_ABORTED = `Perfecto, dejé tu reserva como estaba 👍`
 export const PAYMENT_UNAVAILABLE = `😅 Justo no puedo tomar el pago por acá en este momento. Escribile al club así te ayudan a confirmar la reserva. 🎾`
 export const PAYMENT_CLAIM_NO_PENDING = `Mmm, no me figura ninguna reserva tuya esperando pago 🤔. Si transferiste recién, dame un par de minutos y revisá; si no, escribime *reservar* y armamos el turno. 🎾`
 export const ATTACHMENT_NO_PENDING = `Recibí tu archivo 🙌 pero por acá no puedo abrir imágenes. Si transferiste para una reserva, esperá un toque y te confirmo solo; si necesitás otra cosa, escribime con palabras. 🎾`
+/** RECEIPT mode: we got an image but the player has no pending booking to attach it to. */
+export const RECEIPT_ATTACHMENT_NO_PENDING = `Recibí tu imagen 🙌 pero no me figura ninguna reserva tuya esperando pago. Si querés reservar, escribime *reservar* y lo armamos. 🎾`
+/** RECEIPT mode: we couldn't download/store the receipt image. */
+export const RECEIPT_ATTACHMENT_FAILED = `Uy, no pude guardar tu comprobante 😅. ¿Me lo reenviás como *foto* (imagen), por favor? Si sigue sin andar, escribile al club y lo confirman. 🎾`
+/** RECEIPT mode: player says they paid via text — we need the actual photo. */
+export const RECEIPT_CLAIM_ASK_PHOTO = `¡Genial! 🙌 Para confirmar tu reserva necesito que me mandes una *foto del comprobante* de la transferencia por acá. Apenas la reciba, el club la verifica y te confirmo el turno. 🎾`
 /** Friendly catch-all when something fails internally, so the bot is never left "en visto". */
 export const TECHNICAL_ERROR = `😅 Uy, tuvimos un inconveniente técnico de mi lado. Probá de nuevo en un ratito, por favor. Si sigue sin andar, escribile al club y te ayudan. 🎾`
 
@@ -163,9 +169,26 @@ export function transferPending(
   transferAmountCents: number,
   depositMode: 'DEPOSIT' | 'FULL' = 'DEPOSIT',
   requireDni = false,
+  verificationMode: 'AUTO' | 'RECEIPT' = 'AUTO',
 ): string {
   const holderLine = transfer.holder ? `\n👤 Titular: *${transfer.holder}*` : ''
   const whatToPay = depositMode === 'FULL' ? 'transferí el total de la cancha' : 'transferí la seña para reservar'
+
+  // RECEIPT mode: an admin verifies the receipt photo, so the amount is round and the player
+  // must SEND the receipt. No centavos / own-account guard applies here.
+  if (verificationMode === 'RECEIPT') {
+    return (
+      `⏳ *Reserva pre-confirmada — falta el pago*\n\n` +
+      `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n` +
+      `🎾 ${ctx.selectedCourtName}\n\n` +
+      `Para confirmar el turno, ${whatToPay}:\n\n` +
+      `💰 Importe: *${fmtPrice(transferAmountCents)}*\n` +
+      `🏦 Alias: *${transfer.alias}*${holderLine}\n\n` +
+      `📸 *Importante:* cuando transfieras, mandame una *foto del comprobante* por acá. ` +
+      `El club la verifica y te confirmo la reserva.\n\n` +
+      `⏰ Tenés *30 minutos* para enviar el comprobante; si no llega a tiempo, el turno queda libre.`
+    )
+  }
 
   // In DNI mode the amount is round and identity is validated by the payer's DNI, so we
   // don't ask for exact centavos — we ask them to pay from their OWN account.
@@ -188,6 +211,18 @@ export function transferPending(
     `🏦 Alias: *${transfer.alias}*${holderLine}\n\n` +
     `${guard}\n\n` +
     `⏰ Tenés *30 minutos*. Cuando se acredite te aviso por acá; si no llega a tiempo, el turno queda libre.`
+  )
+}
+
+/**
+ * RECEIPT mode acknowledgement: the player sent the receipt photo and we stored it. We never
+ * auto-confirm — an admin verifies the image — so we tell them it's being checked.
+ */
+export function receiptReceivedAck(courtName: string, startsAt: Date, endsAt: Date): string {
+  return (
+    `🧾 *¡Recibí tu comprobante!* Lo estamos verificando.\n\n` +
+    `Apenas el club lo confirme te aviso por acá y te queda asegurada *${courtName} · ` +
+    `${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}*. 🎾`
   )
 }
 

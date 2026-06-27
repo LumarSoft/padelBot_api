@@ -144,10 +144,14 @@ export class PaymentsService {
     }
   }
 
-  /** Distinct clubs that currently have at least one pending-payment booking. */
+  /**
+   * Distinct clubs that currently have at least one pending-payment booking AND reconcile
+   * automatically via MercadoPago. Clubs in RECEIPT mode verify receipts by hand, so they are
+   * excluded — the poller never hits MercadoPago for them.
+   */
   private async pendingClubIds(): Promise<string[]> {
     const rows = await this.prisma.booking.findMany({
-      where: { status: 'PENDING_PAYMENT' },
+      where: { status: 'PENDING_PAYMENT', club: { paymentVerificationMode: 'AUTO' } },
       select: { clubId: true },
       distinct: ['clubId'],
     })

@@ -13,7 +13,7 @@ import {
 import { Request } from 'express'
 import { SkipThrottle } from '@nestjs/throttler'
 import { BotService } from '../bot/bot.service'
-import { BotReply } from '../bot/types'
+import { BotReply, InboundMedia } from '../bot/types'
 import { TECHNICAL_ERROR } from '../bot/messages'
 import { KeyedSerialQueue } from '../common/keyed-serial-queue'
 import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
@@ -108,8 +108,10 @@ export class WhatsAppController {
             if (!body) continue
             await this.inbound.enqueue(waId, () => this.processMessage(phoneNumberId, waId, body))
           } else if (message?.type === 'image' || message?.type === 'document') {
-            // Likely a transfer receipt — acknowledge it (the poller confirms the money).
-            await this.inbound.enqueue(waId, () => this.processAttachment(phoneNumberId, waId))
+            // Likely a transfer receipt. In RECEIPT mode the bot downloads and stores it for
+            // the admin to verify; in AUTO mode it just acknowledges (the poller confirms).
+            const media = extractMedia(message)
+            await this.inbound.enqueue(waId, () => this.processAttachment(phoneNumberId, waId, media))
           }
         }
       }
@@ -130,12 +132,12 @@ export class WhatsAppController {
     }
   }
 
-  private async processAttachment(phoneNumberId: string, waId: string): Promise<void> {
+  private async processAttachment(phoneNumberId: string, waId: string, media: InboundMedia | null): Promise<void> {
     try {
       const clubId = await this.resolveClubId(phoneNumberId)
       if (!clubId) return
 
-      const reply = await this.botService.handleAttachment(waId, clubId)
+      const reply = await this.botService.handleAttachment(waId, clubId, media)
       await this.deliver(phoneNumberId, waId, reply)
     } catch (err) {
       this.logger.error(`Failed to process attachment from ${waId}`, err)
@@ -179,4 +181,12 @@ function extractInteractiveReply(message: any): string | undefined {
   if (interactive?.type === 'button_reply') return interactive?.button_reply?.id
   if (interactive?.type === 'list_reply') return interactive?.list_reply?.id
   return undefined
+}
+
+/** Pulls the Meta media id + mime type out of an inbound image/document message. */
+function extractMedia(message: any): InboundMedia | null {
+  const node = message?.type === 'image' ? message?.image : message?.document
+  const mediaId: string | undefined = node?.id
+  if (!mediaId) return null
+  return { mediaId, mimeType: node?.mime_type ?? null }
 }
