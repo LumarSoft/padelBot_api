@@ -2,21 +2,18 @@ import { Injectable, Logger } from '@nestjs/common'
 import OpenAI from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
-import { formatTimeRange, toDateKey } from '../availability/lib/datetime'
-import { BotState, CourtOption, HandlerResult, SessionContext, SlotOption } from '../bot/types'
+import { BotState, HandlerResult, SessionContext } from '../bot/types'
 import { matchCourt, matchSlot } from '../bot/lib/match'
+import { availabilityResult, bandsToSlotOptions, courtsFromBands, resolveBand } from '../bot/lib/booking-flow'
 import {
   ASK_DATE,
   ASK_NAME,
   MENU,
-  NO_BOOKINGS,
-  cancelList,
-  confirmBooking,
-  courtsAtTimeList,
-  courtsList,
-  myBookingsList,
+  courtBusyAtTime,
+  courtFullToday,
   noAvailabilityWithSuggestions,
   slotsList,
+  timeNotAvailable,
 } from '../bot/messages'
 import { buildSystemPrompt, formatCurrentDate } from './system.prompt'
 import { TOOLS } from './tools'
@@ -31,6 +28,10 @@ export class LlmService {
   private readonly openai: OpenAI
   /** waId → recent LLM-call timestamps (sliding window), for per-user rate limiting. */
   private readonly llmCalls = new Map<string, number[]>()
+  /** Running OpenAI consumption since the process started (logged after every call). */
+  private totalCalls = 0
+  private totalTokens = 0
+  private totalCostUsd = 0
 
   constructor(
     private readonly prisma: PrismaService,
@@ -123,10 +124,13 @@ export class LlmService {
     const { usage } = completion
     if (usage) {
       const cost = estimateCost(model, usage.prompt_tokens, usage.completion_tokens)
+      this.totalCalls++
+      this.totalTokens += usage.total_tokens
+      this.totalCostUsd += cost
       this.logger.log(
-        `LLM usage — model=${model} waId=${waId} ` +
-          `in=${usage.prompt_tokens} out=${usage.completion_tokens} total=${usage.total_tokens} ` +
-          `est_cost=$${cost.toFixed(6)}`,
+        `🤖 OpenAI — model=${model} waId=${waId} ` +
+          `in=${usage.prompt_tokens} out=${usage.completion_tokens} total=${usage.total_tokens} costo=$${cost.toFixed(6)} ` +
+          `| acumulado: ${this.totalCalls} llamadas · ${this.totalTokens} tokens · $${this.totalCostUsd.toFixed(4)}`,
       )
     }
 
@@ -136,7 +140,7 @@ export class LlmService {
       const call = choice.message.tool_calls[0]
       if (call.type === 'function') {
         this.logger.log(`LLM tool call: ${call.function.name} — args: ${call.function.arguments}`)
-        return this.dispatchToolCall(call.function.name, call.function.arguments, ctx, clubId, waId)
+        return this.dispatchToolCall(call.function.name, call.function.arguments, ctx, clubId)
       }
     }
 
@@ -155,16 +159,11 @@ export class LlmService {
     argsJson: string,
     ctx: SessionContext,
     clubId: string,
-    waId: string,
   ): Promise<HandlerResult> {
     const args = JSON.parse(argsJson) as BookingToolArgs
     switch (name) {
       case 'navigate_booking':
         return this.handleNavigateBooking(args, ctx, clubId)
-      case 'navigate_my_bookings':
-        return this.handleNavigateMyBookings(ctx, clubId, waId)
-      case 'navigate_cancel':
-        return this.handleNavigateCancel(ctx, clubId, waId)
       default:
         return Promise.resolve({ reply: MENU, state: BotState.MENU, ctx })
     }
@@ -182,137 +181,96 @@ export class LlmService {
       return { reply: ASK_DATE, state: BotState.BOOK_DATE, ctx }
     }
 
-    const courts = await this.availability.courtsForDate(clubId, args.date)
-    if (courts.length === 0) {
+    const bands = await this.availability.availableBandsForDate(clubId, args.date)
+    if (bands.length === 0) {
       // Proactively offer the nearest days with availability instead of dead-ending.
       const suggestions = await this.availability.nextAvailableDates(clubId, args.date, { excludeDateKey: args.date })
       return { reply: noAvailabilityWithSuggestions(args.date, suggestions), state: BotState.BOOK_DATE, ctx }
     }
 
-    const nextCtx: SessionContext = { ...ctx, selectedDate: args.date, courtOptions: courts }
     const needsName = !ctx.playerName
+    const base: SessionContext = {
+      ...ctx,
+      selectedDate: args.date,
+      dayAvailability: bands,
+      slotOptions: bandsToSlotOptions(bands),
+    }
 
-    // Try to match court name from LLM extraction
-    const matchedCourt = args.courtName ? matchCourt(args.courtName, courts) : undefined
-
+    // Explicit court mentioned → keep it time-first, but narrowed to that one court.
+    const matchedCourt = args.courtName ? matchCourt(args.courtName, courtsFromBands(bands)) : undefined
     if (matchedCourt) {
-      const slots = await this.availability.slotsForDate(clubId, args.date, matchedCourt.id)
+      const courtBands = bands
+        .filter(b => b.courts.some(c => c.id === matchedCourt.id))
+        .map(b => ({ ...b, courts: b.courts.filter(c => c.id === matchedCourt.id) }))
 
-      if (slots.length === 0) {
-        const fallbackMsg = `😕 No hay turnos disponibles en *${matchedCourt.name}* para esa fecha. Elegí otra cancha:\n\n${courtsList(courts, args.date)}`
-        return { reply: fallbackMsg, state: BotState.BOOK_COURT, ctx: nextCtx }
+      if (courtBands.length === 0) {
+        // The requested court is fully booked today → say so plainly (don't silently switch
+        // courts) and show what's free across the club.
+        if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: base }
+        return { reply: courtFullToday(matchedCourt.name, bands, args.date), state: BotState.BOOK_SLOT, ctx: base }
       }
 
-      const ctxWithCourt: SessionContext = {
-        ...nextCtx,
+      const courtCtx: SessionContext = {
+        ...base,
+        dayAvailability: courtBands,
+        slotOptions: bandsToSlotOptions(courtBands),
         selectedCourtId: matchedCourt.id,
         selectedCourtName: matchedCourt.name,
-        slotOptions: slots,
       }
 
-      // Try to match time preference
-      const matchedSlot = args.timePreference ? matchSlot(args.timePreference, slots) : undefined
-
+      const matchedSlot = args.timePreference ? matchSlot(args.timePreference, courtCtx.slotOptions!) : undefined
       if (matchedSlot) {
-        const ctxWithSlot: SessionContext = {
-          ...ctxWithCourt,
-          selectedSlotId: matchedSlot.slotId,
-          selectedBandStart: matchedSlot.bandStart,
-          selectedSlotLabel: matchedSlot.label,
-          selectedSlotPrice: matchedSlot.price,
+        if (needsName) {
+          return {
+            reply: ASK_NAME,
+            state: BotState.BOOK_NAME,
+            ctx: { ...courtCtx, selectedBandStart: matchedSlot.bandStart, selectedSlotLabel: matchedSlot.label },
+          }
         }
-        if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: ctxWithSlot }
-        return { reply: confirmBooking(ctxWithSlot), state: BotState.BOOK_CONFIRM, ctx: ctxWithSlot }
+        return resolveBand(courtCtx, matchedSlot.bandStart)
       }
 
-      if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: ctxWithCourt }
-      return { reply: slotsList(slots, matchedCourt.name, args.date), state: BotState.BOOK_SLOT, ctx: ctxWithCourt }
+      // The player asked for this court at a time that's taken there → tell them it's busy at
+      // that time (instead of assuming another court) and show its other free turns.
+      if (args.timePreference) {
+        if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: courtCtx }
+        return {
+          reply: courtBusyAtTime(matchedCourt.name, courtCtx.slotOptions!, args.date),
+          state: BotState.BOOK_SLOT,
+          ctx: courtCtx,
+        }
+      }
+
+      if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: courtCtx }
+      return {
+        reply: slotsList(courtCtx.slotOptions!, matchedCourt.name, args.date),
+        state: BotState.BOOK_SLOT,
+        ctx: courtCtx,
+      }
     }
 
-    // No court chosen, but the player gave a time → tell them which courts are free at
-    // that exact time so they confirm in one step instead of picking a court blindly.
+    // No court, but a time was given → assign a court (or ask if several are free).
     if (args.timePreference) {
-      const atTime = await this.courtsFreeAtTime(clubId, args.date, args.timePreference, courts)
-
-      if (atTime.length === 1) {
-        const { court, slot } = atTime[0]
-        const ctxSel: SessionContext = {
-          ...nextCtx,
-          selectedCourtId: court.id,
-          selectedCourtName: court.name,
-          slotOptions: [slot],
-          selectedSlotId: slot.slotId,
-          selectedBandStart: slot.bandStart,
-          selectedSlotLabel: slot.label,
-          selectedSlotPrice: slot.price,
+      const matchedSlot = matchSlot(args.timePreference, base.slotOptions!)
+      if (matchedSlot) {
+        if (needsName) {
+          const band = bands.find(b => b.bandStart === matchedSlot.bandStart)!
+          return {
+            reply: ASK_NAME,
+            state: BotState.BOOK_NAME,
+            ctx: { ...base, selectedBandStart: matchedSlot.bandStart, selectedSlotLabel: band.label },
+          }
         }
-        if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: ctxSel }
-        return { reply: confirmBooking(ctxSel), state: BotState.BOOK_CONFIRM, ctx: ctxSel }
+        return resolveBand(base, matchedSlot.bandStart)
       }
-
-      if (atTime.length > 1) {
-        // Remember the chosen time band; when they pick a court, onBookCourt resolves
-        // that band directly and jumps to confirmation.
-        const courtOptions = atTime.map(a => a.court)
-        const { bandStart, label } = atTime[0].slot
-        const ctxMulti: SessionContext = {
-          ...nextCtx,
-          courtOptions,
-          selectedBandStart: bandStart,
-          selectedSlotLabel: label,
-        }
-        if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: ctxMulti }
-        return { reply: courtsAtTimeList(courtOptions, label, args.date), state: BotState.BOOK_COURT, ctx: ctxMulti }
-      }
-      // Nobody free at that time → fall through to the day's court list.
+      // Time not free → show what is.
+      if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: base }
+      return { reply: timeNotAvailable(bands, args.date), state: BotState.BOOK_SLOT, ctx: base }
     }
 
-    // Court not matched or not provided → show court list
-    if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: nextCtx }
-    return { reply: courtsList(courts, args.date), state: BotState.BOOK_COURT, ctx: nextCtx }
-  }
-
-  /** Courts (from `courts`) that have a free slot matching the time phrasing, with that slot. */
-  private async courtsFreeAtTime(
-    clubId: string,
-    dateKey: string,
-    timePreference: string,
-    courts: CourtOption[],
-  ): Promise<{ court: CourtOption; slot: SlotOption }[]> {
-    const result: { court: CourtOption; slot: SlotOption }[] = []
-    for (const court of courts) {
-      const slots = await this.availability.slotsForDate(clubId, dateKey, court.id)
-      const slot = matchSlot(timePreference, slots)
-      if (slot) result.push({ court, slot })
-    }
-    return result
-  }
-
-  private async handleNavigateMyBookings(ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    const bookings = await this.fetchUserBookings(clubId, waId)
-    if (bookings.length === 0) return { reply: NO_BOOKINGS, state: BotState.MENU, ctx }
-    const options = bookings.map(b => ({ id: b.id, label: buildBookingLabel(b) }))
-    return { reply: myBookingsList(options), state: BotState.MENU, ctx }
-  }
-
-  private async handleNavigateCancel(ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    const bookings = await this.fetchUserBookings(clubId, waId)
-    if (bookings.length === 0) return { reply: NO_BOOKINGS, state: BotState.MENU, ctx }
-    const options = bookings.map(b => ({ id: b.id, label: buildBookingLabel(b) }))
-    return { reply: cancelList(options), state: BotState.CANCEL_SELECT, ctx: { ...ctx, bookingOptions: options } }
-  }
-
-  // ── DB helpers ─────────────────────────────────────────────────────────────
-
-  private fetchUserBookings(clubId: string, waId: string) {
-    return this.prisma.booking.findMany({
-      where: { clubId, playerPhone: waId, status: 'CONFIRMED' },
-      select: {
-        id: true,
-        slot: { select: { startsAt: true, endsAt: true, court: { select: { name: true } } } },
-      },
-      orderBy: { slot: { startsAt: 'asc' } },
-    })
+    // No court, no time → show the day's availability grouped by court.
+    if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: base }
+    return availabilityResult(ctx, bands, args.date)
   }
 }
 
@@ -336,10 +294,4 @@ interface BookingToolArgs {
   date?: string
   courtName?: string
   timePreference?: string
-}
-
-function buildBookingLabel(b: { slot: { startsAt: Date; endsAt: Date; court: { name: string } } }): string {
-  const { startsAt, endsAt } = b.slot
-  const [, m, d] = toDateKey(startsAt).split('-')
-  return `${d}/${m} · ${b.slot.court.name} · ${formatTimeRange(startsAt, endsAt)}`
 }

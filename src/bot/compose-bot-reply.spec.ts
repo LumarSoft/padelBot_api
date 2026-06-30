@@ -1,17 +1,16 @@
-import { composeBotReply, welcome, confirmBooking, courtsList } from './messages'
-import { BotState, SessionContext } from './types'
+import { composeBotReply, welcome, confirmBooking, dayAvailabilityList, courtsAtTimeList } from './messages'
+import { BandOption, BotState, SessionContext } from './types'
 
 /**
  * The body must never duplicate options that are already shown as buttons/rows, and menu
  * buttons must only appear on an actual menu (not on every message that ends on MENU state).
  */
 describe('composeBotReply', () => {
-  it('shows menu buttons and a concise body (no enumerated 1/2/3 list) on the menu', () => {
+  it('shows the menu button and a concise body (no enumerated list) on the menu', () => {
     const r = composeBotReply(BotState.MENU, {}, welcome('Mateo'))
-    expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['1', '2', '3'])
+    expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['1'])
     expect(r.text).toContain('Tocá una opción')
     expect(r.text).not.toContain('1️⃣')
-    expect(r.text).not.toContain('Ver o cancelar mis reservas')
     // the greeting prefix is preserved
     expect(r.text).toContain('Mateo')
   })
@@ -23,28 +22,54 @@ describe('composeBotReply', () => {
     expect(r.text).toBe(paymentText)
   })
 
-  it('replaces the enumerated court list with a concise prompt when buttons are shown', () => {
+  it('shows time-band buttons and a concise prompt for the day availability (no court step)', () => {
+    const bands: BandOption[] = [
+      { bandStart: '18:00', label: '18:00 - 19:30', courts: [{ id: 'a', name: 'Cancha 1', price: 1200000 }] },
+      { bandStart: '19:30', label: '19:30 - 21:00', courts: [{ id: 'b', name: 'Cancha 2', price: 1000000 }] },
+    ]
     const ctx: SessionContext = {
       selectedDate: '2026-06-27',
+      dayAvailability: bands,
+      slotOptions: bands.map(b => ({ bandStart: b.bandStart, label: b.label, price: b.courts[0].price })),
+    }
+    const full = dayAvailabilityList(bands, ctx.selectedDate!)
+    const r = composeBotReply(BotState.BOOK_SLOT, ctx, full)
+    // Buttons are the time bands (id = band start), not courts.
+    expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['18:00', '19:30'])
+    // The grouped list is replaced by a concise prompt that mentions assigning a court.
+    expect(r.text).not.toContain('*Cancha 1*')
+    expect(r.text).toContain('horario')
+  })
+
+  it('offers court buttons (plus "Cualquiera") when a chosen time is free on several courts', () => {
+    const bands: BandOption[] = [
+      {
+        bandStart: '18:00',
+        label: '18:00 - 19:30',
+        courts: [
+          { id: 'a', name: 'Cancha 1', price: 1200000 },
+          { id: 'b', name: 'Cancha 2', price: 1000000 },
+        ],
+      },
+    ]
+    const ctx: SessionContext = {
+      selectedDate: '2026-06-27',
+      selectedBandStart: '18:00',
+      selectedSlotLabel: '18:00 - 19:30',
+      dayAvailability: bands,
       courtOptions: [
         { id: 'a', name: 'Cancha 1' },
         { id: 'b', name: 'Cancha 2' },
       ],
     }
-    const full = courtsList(ctx.courtOptions!, ctx.selectedDate!)
+    const full = courtsAtTimeList(
+      bands[0].courts.map(c => ({ name: c.name, price: c.price })),
+      '18:00 - 19:30',
+      ctx.selectedDate!,
+    )
     const r = composeBotReply(BotState.BOOK_COURT, ctx, full)
-    expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['Cancha 1', 'Cancha 2'])
+    expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['Cancha 1', 'Cancha 2', 'cualquiera'])
     expect(r.text).not.toContain('• Cancha 1')
-    expect(r.text).toContain('canchas con lugar')
-  })
-
-  it('keeps the full court list when there are too many courts for a botonera', () => {
-    const courtOptions = Array.from({ length: 11 }, (_, i) => ({ id: String(i), name: `Cancha ${i}` }))
-    const ctx: SessionContext = { selectedDate: '2026-06-27', courtOptions }
-    const full = courtsList(courtOptions, ctx.selectedDate!)
-    const r = composeBotReply(BotState.BOOK_COURT, ctx, full)
-    expect(r.interactive).toBeUndefined()
-    expect(r.text).toBe(full) // full enumerated list preserved
   })
 
   it('keeps the booking summary text intact and adds yes/no buttons on confirm', () => {

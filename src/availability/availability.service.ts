@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
-import { CourtOption, SlotOption } from '../bot/types'
+import { BandOption, SlotOption } from '../bot/types'
 import { dayRangeUtc, formatTimeRange, shiftDateKey, toDateKey } from './lib/datetime'
 import { bandDateTimes, generateBands } from './lib/schedule'
 import { resolveBandPriceCents } from './lib/pricing'
@@ -22,28 +22,30 @@ export interface AvailableDate {
 export class AvailabilityService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Courts that have at least one free band on the given club-local day. */
-  async courtsForDate(clubId: string, dateKey: string): Promise<CourtOption[]> {
+  /**
+   * The day's free bands across every court, each carrying the courts that are free at it.
+   * This is the single, fresh source for the time-first booking flow: a band only appears
+   * with the courts that are actually AVAILABLE right now, so the bot never offers a time on
+   * a court that is already booked/blocked. Bands are sorted by start time.
+   */
+  async availableBandsForDate(clubId: string, dateKey: string): Promise<BandOption[]> {
     const courts = await this.prisma.court.findMany({
       where: { clubId },
-      select: { id: true, name: true, priceCents: true, openTime: true, closeTime: true },
+      select: { id: true, name: true },
       orderBy: { name: 'asc' },
     })
     if (courts.length === 0) return []
 
-    const occupied = await this.occupiedStartsByCourt(clubId, dateKey)
-    const now = new Date()
-
-    return courts
-      .filter(court => {
-        const bands = generateBands(court.openTime, court.closeTime)
-        const taken = occupied.get(court.id) ?? new Set<string>()
-        return bands.some(band => {
-          const { startsAt } = bandDateTimes(dateKey, band)
-          return startsAt > now && !taken.has(startsAt.toISOString())
-        })
-      })
-      .map(c => ({ id: c.id, name: c.name }))
+    const byBand = new Map<string, BandOption>()
+    for (const court of courts) {
+      const slots = await this.slotsForDate(clubId, dateKey, court.id)
+      for (const s of slots) {
+        const entry = byBand.get(s.bandStart) ?? { bandStart: s.bandStart, label: s.label, courts: [] }
+        entry.courts.push({ id: court.id, name: court.name, slotId: s.slotId, price: s.price })
+        byBand.set(s.bandStart, entry)
+      }
+    }
+    return [...byBand.values()].sort((a, b) => a.bandStart.localeCompare(b.bandStart))
   }
 
   /** Free bands on the given club-local day for a court (open-by-default). */
@@ -60,11 +62,20 @@ export class AvailabilityService {
     if (!court) return []
 
     const { gte, lt } = dayRangeUtc(dateKey)
+    // Fetch every slot that overlaps the day (including one crossing in from the
+    // previous day), not just those starting inside it, so overlap detection is complete.
     const existing = await this.prisma.slot.findMany({
-      where: { clubId, courtId, startsAt: { gte, lt } },
+      where: { clubId, courtId, startsAt: { lt }, endsAt: { gt: gte } },
       select: { id: true, startsAt: true, endsAt: true, priceCents: true, status: true },
     })
-    const byStart = new Map(existing.map(s => [s.startsAt.toISOString(), s]))
+    // Occupancy is by interval overlap, not exact start: a BOOKED/BLOCKED slot that is
+    // off the band grid (e.g. created at a slightly different instant, or after the court's
+    // openTime changed) still hides every band it overlaps. AVAILABLE slots are matched by
+    // exact start only, to reuse their materialized id/price for the offered band.
+    const occupied = existing.filter(s => s.status !== 'AVAILABLE')
+    const availableByStart = new Map(
+      existing.filter(s => s.status === 'AVAILABLE').map(s => [s.startsAt.toISOString(), s]),
+    )
     const now = new Date()
 
     const options: SlotOption[] = []
@@ -72,9 +83,12 @@ export class AvailabilityService {
       const { startsAt, endsAt } = bandDateTimes(dateKey, band)
       if (startsAt <= now) continue
 
-      const found = byStart.get(startsAt.toISOString())
+      // Half-open overlap: [startsAt, endsAt) — a slot merely touching the edge doesn't block.
+      const blocked = occupied.some(s => s.startsAt < endsAt && s.endsAt > startsAt)
+      if (blocked) continue
+
+      const found = availableByStart.get(startsAt.toISOString())
       if (found) {
-        if (found.status !== 'AVAILABLE') continue
         options.push({
           bandStart: band.start,
           slotId: found.id,
@@ -136,21 +150,5 @@ export class AvailabilityService {
       if (free > 0) results.push({ dateKey: key, count: free })
     }
     return results
-  }
-
-  /** Map of courtId → set of ISO start instants that are BOOKED or BLOCKED that day. */
-  private async occupiedStartsByCourt(clubId: string, dateKey: string): Promise<Map<string, Set<string>>> {
-    const { gte, lt } = dayRangeUtc(dateKey)
-    const rows = await this.prisma.slot.findMany({
-      where: { clubId, status: { in: ['BOOKED', 'BLOCKED'] }, startsAt: { gte, lt } },
-      select: { courtId: true, startsAt: true },
-    })
-    const map = new Map<string, Set<string>>()
-    for (const r of rows) {
-      const set = map.get(r.courtId) ?? new Set<string>()
-      set.add(r.startsAt.toISOString())
-      map.set(r.courtId, set)
-    }
-    return map
   }
 }

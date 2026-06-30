@@ -2,15 +2,22 @@ import { Injectable, Logger } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { BookingsService } from '../bookings/bookings.service'
 import { AvailabilityService } from '../availability/availability.service'
-import { formatDayMonth, formatTimeRange, todayKey } from '../availability/lib/datetime'
+import { todayKey } from '../availability/lib/datetime'
 import { LlmService } from '../llm/llm.service'
 import { ConversationSessionService, keepName } from './conversation-session.service'
 import { matchCourt, matchSlot } from './lib/match'
+import {
+  assignCheapestForBand,
+  availabilityResult,
+  isAnyCourt,
+  mentionsTime,
+  resolveBand,
+  resolveCourtAtBand,
+} from './lib/booking-flow'
 import { WhatsAppMediaService } from '../whatsapp/whatsapp-media.service'
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
-import { BotReply, BotState, BookingOption, HandlerResult, InboundMedia, SessionContext } from './types'
+import { BotReply, BotState, HandlerResult, InboundMedia, SessionContext } from './types'
 import {
-  ADVISOR_HANDOFF,
   ASK_DATE,
   ASK_DNI,
   ASK_NAME,
@@ -18,29 +25,22 @@ import {
   ATTACHMENT_NO_PENDING,
   BOOKING_ABORTED,
   BOOKING_FAILED,
-  CANCEL_ABORTED,
-  CANCEL_CONFIRMED,
-  CANCEL_FAILED,
-  MENU,
-  NO_BOOKINGS,
-  NO_SLOTS,
   PAYMENT_CLAIM_NO_PENDING,
   PAYMENT_UNAVAILABLE,
   RECEIPT_ATTACHMENT_FAILED,
   RECEIPT_ATTACHMENT_NO_PENDING,
   RECEIPT_CLAIM_ASK_PHOTO,
   TECHNICAL_ERROR,
-  cancelList,
   composeBotReply,
   confirmBooking,
-  confirmCancel,
-  courtsList,
-  myBookingsList,
+  courtsAtTimeList,
+  dayAvailabilityList,
   noAvailabilityWithSuggestions,
   paymentClaimAck,
   receiptReceivedAck,
   slotsList,
   thanksReply,
+  timeNotAvailable,
   transferPending,
   welcome,
 } from './messages'
@@ -78,27 +78,32 @@ export class BotService {
     // Cap length so a pathologically long message can't bloat the LLM prompt / cost.
     const msg = body.trim().slice(0, MAX_MESSAGE_LENGTH)
 
+    this.logger.log(`📥 IN  ${waId} [${session.state}]: ${logSnippet(msg)}`)
+
+    // "/reset" command: wipe the whole chat and start fresh. Handled before persisting the
+    // message (so "/reset" itself isn't kept) and before the HUMAN guard so it always works.
+    if (msg.toLowerCase() === '/reset') {
+      await this.sessionService.reset(session.id)
+      this.logger.log(`♻️  ${waId}: chat reseteado (/reset)`)
+      return { text: '🧹 Listo, borré la conversación. Empezamos de cero — escribime *hola* cuando quieras. 🎾' }
+    }
+
     // Always persist the incoming message for admin visibility.
     await this.sessionService.saveMessage(session.id, 'USER', msg)
 
     // In HUMAN mode the admin handles the reply — bot stays silent.
     if (session.mode === 'HUMAN') {
+      this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
       return null
     }
 
     const state = session.state as BotState
     const isMenuState = state === BotState.MENU || state === BotState.IDLE
 
-    // Talk-to-a-human: option 3 from the menu, or a natural-language request. Hands the
-    // conversation over and flags it for the panel. Only honored from the menu/idle so it
-    // doesn't hijack a mid-booking reply.
-    const wantsAdvisor = (state === BotState.MENU && msg === '3') || (isMenuState && isAdvisorRequest(msg))
-
-    const result = wantsAdvisor
-      ? await this.advisorReply(session.id, session.context)
-      : // "Ya transferí" / "te mando el comprobante" after booking: acknowledge and let the
-        // poller confirm the real money — never from a claim.
-        isPaymentClaim(msg) && isMenuState
+    // "Ya transferí" / "te mando el comprobante" after booking: acknowledge and let the
+    // poller confirm the real money — never from a claim.
+    const result =
+      isPaymentClaim(msg) && isMenuState
         ? await this.paymentClaimReply(clubId, waId, session.context)
         : await this.dispatch(state, msg, session.context, clubId, waId)
 
@@ -112,6 +117,8 @@ export class BotService {
 
     await this.sessionService.update(session.id, result.state, { ...result.ctx, history: newHistory })
     await this.sessionService.saveMessage(session.id, 'BOT', result.reply)
+    // The actual WhatsApp send is logged at the transport layer (WhatsAppService), which also
+    // captures system messages (payment notifications) — so we don't log the reply twice here.
     // Pair the reply with the botonera that fits the next step (menu, courts, slots, yes/no…)
     // and trim the body so options aren't listed twice. Tapping a button feeds its id back
     // through this same handler, so the FSM is unchanged.
@@ -134,9 +141,11 @@ export class BotService {
 
   private async runAttachment(waId: string, clubId: string, media: InboundMedia | null): Promise<BotReply | null> {
     const session = await this.sessionService.getOrCreate(waId, clubId)
+    this.logger.log(`📥 IN  ${waId}: [imagen/comprobante ${media?.mimeType ?? 'desconocido'}]`)
     await this.sessionService.saveMessage(session.id, 'USER', '[Imagen / comprobante recibido]')
 
     if (session.mode === 'HUMAN') {
+      this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
       return null
     }
 
@@ -243,10 +252,6 @@ export class BotService {
         return this.onBookConfirm(msg, ctx, clubId, waId)
       case BotState.BOOK_DNI:
         return this.onBookDni(msg, ctx, clubId, waId)
-      case BotState.CANCEL_SELECT:
-        return this.onCancelSelect(msg, ctx, clubId, waId)
-      case BotState.CANCEL_CONFIRM:
-        return this.onCancelConfirm(msg, ctx, clubId)
       default:
         return Promise.resolve({ reply: welcome(ctx.playerName), state: BotState.MENU, ctx })
     }
@@ -309,18 +314,8 @@ export class BotService {
 
   private async onMenu(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     if (msg === '1') return { reply: ASK_DATE, state: BotState.BOOK_DATE, ctx }
-    if (msg === '2') return this.buildMyBookings(ctx, clubId, waId)
-    // '3' (advisor) is handled before dispatch. Cancel is reachable by word so we don't
-    // need the LLM for it.
-    if (/\b(cancelar|anular|dar de baja)\b/i.test(msg)) return this.buildCancelList(ctx, clubId, waId)
     // Natural language → LLM interprets intent
     return this.fallback(BotState.MENU, msg, ctx, clubId, waId)
-  }
-
-  /** Hands the conversation to a human advisor and flags it for the panel. */
-  private async advisorReply(sessionId: string, ctx: SessionContext): Promise<HandlerResult> {
-    await this.sessionService.requestAdvisor(sessionId)
-    return { reply: ADVISOR_HANDOFF, state: BotState.MENU, ctx: keepName(ctx) }
   }
 
   private async onBookDate(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
@@ -330,19 +325,21 @@ export class BotService {
       return this.fallback(BotState.BOOK_DATE, msg, ctx, clubId, waId)
     }
 
-    const courts = await this.availability.courtsForDate(clubId, date)
-    if (courts.length === 0) {
+    const bands = await this.availability.availableBandsForDate(clubId, date)
+    if (bands.length === 0) {
       // Don't dead-end: offer the nearest days that do have availability and
       // stay in BOOK_DATE so the player can just reply with one of them.
       const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
       return { reply: noAvailabilityWithSuggestions(date, suggestions), state: BotState.BOOK_DATE, ctx }
     }
 
-    const nextCtx: SessionContext = { ...ctx, selectedDate: date, courtOptions: courts }
+    // Need the name first; remember the date so we don't re-ask it.
+    if (!ctx.playerName) {
+      return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: { ...ctx, selectedDate: date } }
+    }
 
-    if (!ctx.playerName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: nextCtx }
-
-    return { reply: courtsList(courts, date), state: BotState.BOOK_COURT, ctx: nextCtx }
+    // Show the day's availability grouped by court; the player picks a time, no court step.
+    return availabilityResult(ctx, bands, date)
   }
 
   private async onBookName(msg: string, ctx: SessionContext, clubId: string): Promise<HandlerResult> {
@@ -359,12 +356,17 @@ export class BotService {
 
     const nextCtx: SessionContext = { ...ctx, playerName: name }
 
-    // LLM may have pre-filled slot → skip straight to confirmation
+    // LLM/flow may have pre-filled a full slot → straight to confirmation.
     if (nextCtx.selectedSlotId && nextCtx.selectedCourtId) {
       return { reply: confirmBooking(nextCtx), state: BotState.BOOK_CONFIRM, ctx: nextCtx }
     }
 
-    // LLM may have pre-filled court + slots → skip to slot selection
+    // A time was already chosen (deferred until we had the name) → resolve it now.
+    if (nextCtx.selectedBandStart && nextCtx.dayAvailability?.length) {
+      return resolveBand(nextCtx, nextCtx.selectedBandStart)
+    }
+
+    // Explicit-court path (player named a court) → show that court's free times.
     if (nextCtx.selectedCourtId && nextCtx.slotOptions?.length) {
       return {
         reply: slotsList(nextCtx.slotOptions, nextCtx.selectedCourtName!, nextCtx.selectedDate!),
@@ -373,9 +375,10 @@ export class BotService {
       }
     }
 
-    // Normal flow → show courts
-    const courts = nextCtx.courtOptions ?? (await this.availability.courtsForDate(clubId, nextCtx.selectedDate!))
-    if (courts.length === 0) {
+    // Normal flow → show the day's availability (recomputing only if we don't have it yet).
+    const bands =
+      nextCtx.dayAvailability ?? (await this.availability.availableBandsForDate(clubId, nextCtx.selectedDate!))
+    if (bands.length === 0) {
       const suggestions = await this.availability.nextAvailableDates(clubId, nextCtx.selectedDate!, {
         excludeDateKey: nextCtx.selectedDate,
       })
@@ -385,75 +388,56 @@ export class BotService {
         ctx: nextCtx,
       }
     }
-
-    return {
-      reply: courtsList(courts, nextCtx.selectedDate!),
-      state: BotState.BOOK_COURT,
-      ctx: { ...nextCtx, courtOptions: courts },
-    }
+    return availabilityResult(nextCtx, bands, nextCtx.selectedDate!)
   }
 
+  /** Only reached when a chosen time is free on several courts — the player picks one (or "cualquiera"). */
   private async onBookCourt(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    const courts = ctx.courtOptions ?? []
-    const court = matchCourt(msg, courts)
-
-    if (!court) {
-      // Couldn't pin a court by name → let the LLM resolve looser phrasings.
+    if (!ctx.selectedBandStart) {
+      // No time chosen yet (shouldn't happen in the time-first flow) → defer to the LLM.
       return this.fallback(BotState.BOOK_COURT, msg, ctx, clubId, waId)
     }
 
-    // "Suggest court at time" flow: the time was already chosen, so resolve that band
-    // on the picked court and go straight to confirmation.
-    if (ctx.selectedBandStart) {
-      const slots = await this.availability.slotsForDate(clubId, ctx.selectedDate!, court.id)
-      const slot = slots.find(s => s.bandStart === ctx.selectedBandStart)
-      if (slot) {
-        const nextCtx: SessionContext = {
-          ...ctx,
-          selectedCourtId: court.id,
-          selectedCourtName: court.name,
-          slotOptions: slots,
-          selectedSlotId: slot.slotId,
-          selectedBandStart: slot.bandStart,
-          selectedSlotLabel: slot.label,
-          selectedSlotPrice: slot.price,
-        }
-        return { reply: confirmBooking(nextCtx), state: BotState.BOOK_CONFIRM, ctx: nextCtx }
-      }
-      // Band no longer free on this court → fall back to the normal slot list below.
+    // "Cualquiera / la que sea" → assign the cheapest free court for that time.
+    if (isAnyCourt(msg)) {
+      return assignCheapestForBand(ctx, ctx.selectedBandStart)
     }
 
-    const slots = await this.availability.slotsForDate(clubId, ctx.selectedDate!, court.id)
-
-    if (slots.length === 0) {
-      return { reply: NO_SLOTS, state: BotState.MENU, ctx: keepName(ctx) }
+    const court = matchCourt(msg, ctx.courtOptions ?? [])
+    if (!court) {
+      // Looser phrasing → let the LLM resolve it.
+      return this.fallback(BotState.BOOK_COURT, msg, ctx, clubId, waId)
     }
 
-    return {
-      reply: slotsList(slots, court.name, ctx.selectedDate!),
-      state: BotState.BOOK_SLOT,
-      ctx: { ...ctx, selectedCourtId: court.id, selectedCourtName: court.name, slotOptions: slots },
+    const resolved = resolveCourtAtBand(ctx, court)
+    if (resolved) return resolved
+
+    // The band is no longer free on that court → re-derive the day's availability fresh.
+    const bands = await this.availability.availableBandsForDate(clubId, ctx.selectedDate!)
+    if (bands.length === 0) {
+      const suggestions = await this.availability.nextAvailableDates(clubId, ctx.selectedDate!, {
+        excludeDateKey: ctx.selectedDate,
+      })
+      return { reply: noAvailabilityWithSuggestions(ctx.selectedDate!, suggestions), state: BotState.BOOK_DATE, ctx }
     }
+    return availabilityResult(ctx, bands, ctx.selectedDate!)
   }
 
   private async onBookSlot(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    const slots = ctx.slotOptions ?? []
-    const slot = matchSlot(msg, slots)
+    const slot = matchSlot(msg, ctx.slotOptions ?? [])
 
-    if (!slot) {
-      // Non-time phrasings ("el último", "el primero") → LLM resolves.
-      return this.fallback(BotState.BOOK_SLOT, msg, ctx, clubId, waId)
+    if (slot) {
+      // A real free band → auto-assign a court, or ask which one if several are free.
+      return resolveBand(ctx, slot.bandStart)
     }
 
-    const nextCtx: SessionContext = {
-      ...ctx,
-      selectedSlotId: slot.slotId,
-      selectedBandStart: slot.bandStart,
-      selectedSlotLabel: slot.label,
-      selectedSlotPrice: slot.price,
+    // A specific hour that isn't in the list → it's just not free; show what is.
+    if (mentionsTime(msg) && ctx.dayAvailability?.length) {
+      return { reply: timeNotAvailable(ctx.dayAvailability, ctx.selectedDate!), state: BotState.BOOK_SLOT, ctx }
     }
 
-    return { reply: confirmBooking(nextCtx), state: BotState.BOOK_CONFIRM, ctx: nextCtx }
+    // Non-time phrasings ("el último", "el más temprano", a court name) → LLM resolves.
+    return this.fallback(BotState.BOOK_SLOT, msg, ctx, clubId, waId)
   }
 
   private async onBookConfirm(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
@@ -600,79 +584,15 @@ export class BotService {
       ctx: keepName(ctx),
     }
   }
-
-  private async onCancelSelect(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    if (msg === '0') return { reply: MENU, state: BotState.MENU, ctx: keepName(ctx) }
-
-    const options = ctx.bookingOptions ?? []
-    const idx = parseInt(msg, 10) - 1
-
-    if (isNaN(idx) || idx < 0 || idx >= options.length) {
-      // Could be a description like "el del sábado" → LLM resolves
-      return this.fallback(BotState.CANCEL_SELECT, msg, ctx, clubId, waId)
-    }
-
-    const booking = options[idx]
-    return {
-      reply: confirmCancel(booking.label),
-      state: BotState.CANCEL_CONFIRM,
-      ctx: { ...ctx, selectedBookingId: booking.id, selectedBookingLabel: booking.label },
-    }
-  }
-
-  private async onCancelConfirm(msg: string, ctx: SessionContext, clubId: string): Promise<HandlerResult> {
-    const answer = normalizeYesNo(msg)
-
-    if (!answer) {
-      return {
-        reply: `Perdón, no te entendí del todo 🤔\n\n${confirmCancel(ctx.selectedBookingLabel!)}`,
-        state: BotState.CANCEL_CONFIRM,
-        ctx,
-      }
-    }
-    if (answer === 'n') {
-      return { reply: CANCEL_ABORTED, state: BotState.MENU, ctx: keepName(ctx) }
-    }
-
-    try {
-      await this.bookingsService.cancel(clubId, ctx.selectedBookingId!)
-      return { reply: CANCEL_CONFIRMED, state: BotState.MENU, ctx: keepName(ctx) }
-    } catch {
-      return { reply: CANCEL_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
-    }
-  }
-
-  // ── Transient view builders ────────────────────────────────────────────────
-
-  private async buildMyBookings(ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    const bookings = await this.findUserBookings(clubId, waId)
-    if (bookings.length === 0) return { reply: NO_BOOKINGS, state: BotState.MENU, ctx }
-    const options = bookings.map(b => ({ id: b.id, label: bookingLabel(b) }))
-    return { reply: myBookingsList(options), state: BotState.MENU, ctx }
-  }
-
-  private async buildCancelList(ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    const bookings = await this.findUserBookings(clubId, waId)
-    if (bookings.length === 0) return { reply: NO_BOOKINGS, state: BotState.MENU, ctx }
-    const options: BookingOption[] = bookings.map(b => ({ id: b.id, label: bookingLabel(b) }))
-    return { reply: cancelList(options), state: BotState.CANCEL_SELECT, ctx: { ...ctx, bookingOptions: options } }
-  }
-
-  // ── DB queries ─────────────────────────────────────────────────────────────
-
-  private findUserBookings(clubId: string, waId: string) {
-    return this.prisma.booking.findMany({
-      where: { clubId, playerPhone: waId, status: 'CONFIRMED' },
-      select: {
-        id: true,
-        slot: { select: { startsAt: true, endsAt: true, court: { select: { name: true } } } },
-      },
-      orderBy: { slot: { startsAt: 'asc' } },
-    })
-  }
 }
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
+
+/** One-line, length-capped version of a message for clean console logs. */
+function logSnippet(text: string, max = 140): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + '…'
+}
 
 /**
  * Parses "DD/MM" or "D/M" into "YYYY-MM-DD".
@@ -708,19 +628,6 @@ function extensionFor(mimeType: string): string {
   return '.jpg'
 }
 
-/** True when the player asks to talk to a human advisor (or about tournaments). */
-function isAdvisorRequest(msg: string): boolean {
-  const t = msg
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-  return (
-    /\b(asesor|operador|humano|encargad|torneo|torneos)\b/.test(t) ||
-    /\bcon (una persona|alguien|un humano|un asesor)\b/.test(t) ||
-    /\bhablar con\b/.test(t)
-  )
-}
-
 /** A name: 1–5 words of letters (accents ok), no digits, 2–50 chars. */
 function isNameLike(s: string): boolean {
   if (s.length < 2 || s.length > 50 || /\d/.test(s)) return false
@@ -751,14 +658,21 @@ function extractName(msg: string): string | null {
   return isNameLike(name) ? titleCase(name) : null
 }
 
-/** True when the message reads like "I already paid / here's the receipt". */
+/**
+ * True when the message reads like "I already paid / here's the receipt" — including the
+ * receipt-photo intent ("foto", "comprobante", "captura"). In RECEIPT mode these are routed
+ * to a deterministic "send me the photo" reply, so the LLM never wrongly claims the bot can't
+ * receive images.
+ */
 function isPaymentClaim(msg: string): boolean {
   // NFD + strip diacritics so "depósito"/"aboné" match the accent-free stems below.
   const normalized = msg
     .toLowerCase()
     .normalize('NFD')
     .replace(/\p{Diacritic}/gu, '')
-  return /\b(transfer|comprobante|deposit|ya pag|ya abon|ya envi|ya hice|ya mand)/.test(normalized)
+  return /\b(transfer|comprobante|deposit|foto|imagen|captura|pantallazo|screenshot|adjunt|ya pag|ya abon|ya envi|ya hice|ya mand|te (lo |la )?(mando|envio|paso|adjunto))/.test(
+    normalized,
+  )
 }
 
 /**
@@ -770,14 +684,25 @@ function stepPrompt(state: BotState, ctx: SessionContext): string | null {
   switch (state) {
     case BotState.BOOK_DATE:
       return ASK_DATE
-    case BotState.BOOK_COURT:
-      return ctx.courtOptions?.length && ctx.selectedDate ? courtsList(ctx.courtOptions, ctx.selectedDate) : null
-    case BotState.BOOK_SLOT:
-      return ctx.slotOptions?.length && ctx.selectedCourtName && ctx.selectedDate
-        ? slotsList(ctx.slotOptions, ctx.selectedCourtName, ctx.selectedDate)
+    case BotState.BOOK_COURT: {
+      // The "free on several courts at this time" step → re-show that list.
+      if (!ctx.selectedBandStart || !ctx.selectedDate) return null
+      const band = ctx.dayAvailability?.find(b => b.bandStart === ctx.selectedBandStart)
+      return band
+        ? courtsAtTimeList(
+            band.courts.map(c => ({ name: c.name, price: c.price })),
+            band.label,
+            ctx.selectedDate,
+          )
         : null
-    case BotState.CANCEL_SELECT:
-      return ctx.bookingOptions?.length ? cancelList(ctx.bookingOptions) : null
+    }
+    case BotState.BOOK_SLOT:
+      if (!ctx.selectedDate) return null
+      // Explicit single court → its slot list; otherwise the day's availability.
+      if (ctx.selectedCourtName && ctx.slotOptions?.length) {
+        return slotsList(ctx.slotOptions, ctx.selectedCourtName, ctx.selectedDate)
+      }
+      return ctx.dayAvailability?.length ? dayAvailabilityList(ctx.dayAvailability, ctx.selectedDate) : null
     default:
       return null
   }
@@ -880,9 +805,4 @@ function normalizeYesNo(msg: string): 's' | 'n' | null {
   if (hasNoWord && !hasYesWord) return 'n'
   if (hasYesWord && !hasNoWord) return 's'
   return null
-}
-
-function bookingLabel(b: { slot: { startsAt: Date; endsAt: Date; court: { name: string } } }): string {
-  const dateStr = formatDayMonth(b.slot.startsAt)
-  return `${dateStr} · ${b.slot.court.name} · ${formatTimeRange(b.slot.startsAt, b.slot.endsAt)}`
 }

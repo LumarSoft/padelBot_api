@@ -64,22 +64,31 @@ export class ConversationSessionService {
   }
 
   /**
-   * Player asked for a human advisor: hand the conversation over (HUMAN mode) and flag it so
-   * the panel notifies staff. Emits a conversation event so connected admins see it live.
+   * Wipes the chat for the `/reset` command: deletes every stored message and returns the
+   * session to a clean IDLE state (no name/context). Emits a conversation event so the panel
+   * thread refreshes to empty.
    */
-  async requestAdvisor(sessionId: string): Promise<void> {
-    const session = await this.prisma.conversationSession.update({
+  async reset(sessionId: string): Promise<void> {
+    const session = await this.prisma.conversationSession.findUnique({
       where: { id: sessionId },
-      data: { mode: 'HUMAN', needsAdvisor: true },
-      select: { clubId: true, waId: true, playerName: true },
+      select: { clubId: true, waId: true },
     })
-    this.events.emitConversation({
-      type: 'conversation.message',
-      clubId: session.clubId,
-      sessionId,
-      waId: session.waId,
-      playerName: session.playerName,
+
+    await this.prisma.conversationMessage.deleteMany({ where: { sessionId } })
+    await this.prisma.conversationSession.update({
+      where: { id: sessionId },
+      data: { state: BotState.IDLE, context: {}, playerName: null, expiresAt: newExpiry() },
     })
+
+    if (session) {
+      this.events.emitConversation({
+        type: 'conversation.message',
+        clubId: session.clubId,
+        sessionId,
+        waId: session.waId,
+        playerName: null,
+      })
+    }
   }
 
   async saveMessage(sessionId: string, role: 'USER' | 'BOT' | 'ADMIN', content: string): Promise<void> {

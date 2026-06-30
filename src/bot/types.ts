@@ -7,8 +7,6 @@ export enum BotState {
   BOOK_SLOT = 'BOOK_SLOT',
   BOOK_CONFIRM = 'BOOK_CONFIRM',
   BOOK_DNI = 'BOOK_DNI',
-  CANCEL_SELECT = 'CANCEL_SELECT',
-  CANCEL_CONFIRM = 'CANCEL_CONFIRM',
 }
 
 export interface CourtOption {
@@ -25,9 +23,20 @@ export interface SlotOption {
   slotId?: string
 }
 
-export interface BookingOption {
+/** One court that is free at a given band, with its price for that band. */
+export interface BandCourt {
   id: string
+  name: string
+  /** Present only when a real Slot row already exists (AVAILABLE) for this band. */
+  slotId?: string
+  price: number
+}
+
+/** A free time band on a day, plus every court that is free at it. The unit the player picks. */
+export interface BandOption {
+  bandStart: string
   label: string
+  courts: BandCourt[]
 }
 
 export interface HistoryMessage {
@@ -47,14 +56,13 @@ export interface SessionContext {
   courtOptions?: CourtOption[]
   selectedCourtId?: string
   selectedCourtName?: string
+  /** The day's free bands across all courts — drives the time-first availability step. */
+  dayAvailability?: BandOption[]
   slotOptions?: SlotOption[]
   selectedSlotId?: string
   selectedBandStart?: string
   selectedSlotLabel?: string
   selectedSlotPrice?: number
-  bookingOptions?: BookingOption[]
-  selectedBookingId?: string
-  selectedBookingLabel?: string
 }
 
 export interface HandlerResult {

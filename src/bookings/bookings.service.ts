@@ -561,7 +561,17 @@ export class BookingsService {
         slot: { select: { startsAt: true, endsAt: true, court: { select: { name: true } } } },
       },
     })
-    if (booking) this.emitBookingChange('created', booking)
+    if (booking) {
+      const { startsAt, endsAt, court } = booking.slot
+      // A dedicated "payment confirmed" event (not a generic booking.changed) so the panel can
+      // ring the cash alert on every confirmation — automatic (poller) or manual.
+      this.events.emitPaymentConfirmed({
+        type: 'payment.confirmed',
+        clubId: booking.clubId,
+        summary: `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`,
+        source: paymentRef ? 'AUTO' : 'MANUAL',
+      })
+    }
 
     return true
   }
@@ -797,10 +807,21 @@ export class BookingsService {
   async confirmPaymentManual(clubId: string, bookingId: string): Promise<string | null> {
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, clubId },
-      select: { id: true, status: true },
+      select: {
+        id: true,
+        status: true,
+        _count: { select: { receipts: true } },
+        club: { select: { paymentVerificationMode: true } },
+      },
     })
     if (!booking) throw new NotFoundException(`Booking ${bookingId} not found`)
     if (booking.status !== 'PENDING_PAYMENT') return null
+
+    // In RECEIPT mode the whole point is that an admin verifies the player's receipt image, so
+    // confirming without one would defeat the check — require a receipt before confirming.
+    if (booking.club.paymentVerificationMode === 'RECEIPT' && booking._count.receipts === 0) {
+      throw new BadRequestException('No se puede confirmar la reserva sin un comprobante adjunto')
+    }
 
     const confirmed = await this.confirmPayment(bookingId, null)
     return confirmed ? bookingId : null
