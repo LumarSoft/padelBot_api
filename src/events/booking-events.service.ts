@@ -18,7 +18,28 @@ export interface ConversationEvent {
   playerName: string | null
 }
 
-export type AppEvent = BookingEvent | ConversationEvent
+/** A player sent a transfer receipt (RECEIPT mode) — the panel must alert staff to review it. */
+export interface PaymentReceiptEvent {
+  type: 'payment.receipt'
+  clubId: string
+  bookingId: string
+  summary: string
+}
+
+/**
+ * A pending booking's payment was just confirmed (the money landed) — either reconciled
+ * automatically by the MercadoPago poller or confirmed by hand in the panel. The panel rings
+ * the cash alert on this, so staff always hear when a payment comes in, on any screen.
+ */
+export interface PaymentConfirmedEvent {
+  type: 'payment.confirmed'
+  clubId: string
+  summary: string
+  /** "AUTO" = reconciled by the poller; "MANUAL" = an admin confirmed it. */
+  source: 'AUTO' | 'MANUAL'
+}
+
+export type AppEvent = BookingEvent | ConversationEvent | PaymentReceiptEvent | PaymentConfirmedEvent
 
 @Injectable()
 export class BookingEventsService {
@@ -30,6 +51,14 @@ export class BookingEventsService {
   }
 
   emitConversation(event: ConversationEvent): void {
+    this.publish(event)
+  }
+
+  emitReceipt(event: PaymentReceiptEvent): void {
+    this.publish(event)
+  }
+
+  emitPaymentConfirmed(event: PaymentConfirmedEvent): void {
     this.publish(event)
   }
 

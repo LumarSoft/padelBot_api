@@ -4,7 +4,7 @@ import { CryptoService } from '../common/crypto/crypto.service'
 import { MercadoPagoService } from '../mercadopago/mercadopago.service'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
 import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
-import { DepositMode } from 'generated/prisma/client'
+import { DepositMode, PaymentVerificationMode } from 'generated/prisma/client'
 
 export interface TransferConfig {
   transferAlias: string | null
@@ -12,6 +12,7 @@ export interface TransferConfig {
   depositMode: DepositMode
   depositPercent: number
   requireDniMatch: boolean
+  paymentVerificationMode: PaymentVerificationMode
 }
 
 export interface ClubProfile {
@@ -68,6 +69,7 @@ export class ClubsService {
         depositMode: true,
         depositPercent: true,
         requireDniMatch: true,
+        paymentVerificationMode: true,
       },
     })
     if (!club) throw new NotFoundException(`Club ${clubId} not found`)
@@ -83,6 +85,7 @@ export class ClubsService {
         ...(dto.depositMode !== undefined ? { depositMode: dto.depositMode } : {}),
         ...(dto.depositPercent !== undefined ? { depositPercent: dto.depositPercent } : {}),
         ...(dto.requireDniMatch !== undefined ? { requireDniMatch: dto.requireDniMatch } : {}),
+        ...(dto.paymentVerificationMode !== undefined ? { paymentVerificationMode: dto.paymentVerificationMode } : {}),
       },
     })
     return this.getTransferConfig(clubId)

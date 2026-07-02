@@ -52,6 +52,9 @@ export class WhatsAppService {
         },
         body: JSON.stringify({ messaging_product: 'whatsapp', to: recipient, ...message }),
       })
+      if (response.ok) {
+        this.logger.log(`✅ WA enviado a ${recipient}: ${describeOutbound(message)}`)
+      }
       if (!response.ok) {
         const text = await response.text()
         // Code 190 / 401 = the Meta access token expired or was revoked. The bot still
@@ -116,6 +119,16 @@ export class WhatsAppService {
       return false
     }
   }
+}
+
+/** A one-line, length-capped summary of an outbound message object, for clean send logs. */
+function describeOutbound(message: Record<string, unknown>): string {
+  const text =
+    (message.text as { body?: string } | undefined)?.body ??
+    (message.interactive as { body?: { text?: string } } | undefined)?.body?.text ??
+    `[${String(message.type ?? 'mensaje')}]`
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  return oneLine.length <= 140 ? oneLine : oneLine.slice(0, 139) + '…'
 }
 
 /**

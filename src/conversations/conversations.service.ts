@@ -46,17 +46,54 @@ export class ConversationsService {
   async getMessages(clubId: string, sessionId: string) {
     const session = await this.prisma.conversationSession.findFirst({
       where: { id: sessionId, clubId },
-      select: { id: true, waId: true, playerName: true, mode: true, state: true },
+      select: { id: true, waId: true, playerName: true, mode: true, state: true, needsAdvisor: true, createdAt: true },
     })
     if (!session) throw new NotFoundException('Conversación no encontrada')
 
-    const messages = await this.prisma.conversationMessage.findMany({
-      where: { sessionId },
-      orderBy: { createdAt: 'asc' },
-      select: { id: true, role: true, content: true, createdAt: true },
-    })
+    const [messages, profile] = await Promise.all([
+      this.prisma.conversationMessage.findMany({
+        where: { sessionId },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true, role: true, content: true, createdAt: true },
+      }),
+      this.buildPlayerProfile(clubId, session.waId),
+    ])
 
-    return { session, messages }
+    return { session: { ...session, ...profile }, messages }
+  }
+
+  /**
+   * Aggregates a player's booking history (matched by their WhatsApp phone) so the panel can
+   * show who they are at a glance: total confirmed reservations, how many are still upcoming,
+   * the next one, and the DNI the bot last captured.
+   */
+  private async buildPlayerProfile(clubId: string, waId: string) {
+    const now = new Date()
+    const [bookingsConfirmed, bookingsUpcoming, nextBooking, lastWithDni] = await Promise.all([
+      this.prisma.booking.count({ where: { clubId, playerPhone: waId, status: 'CONFIRMED' } }),
+      this.prisma.booking.count({
+        where: { clubId, playerPhone: waId, status: 'CONFIRMED', slot: { startsAt: { gte: now } } },
+      }),
+      this.prisma.booking.findFirst({
+        where: { clubId, playerPhone: waId, status: 'CONFIRMED', slot: { startsAt: { gte: now } } },
+        orderBy: { slot: { startsAt: 'asc' } },
+        select: { slot: { select: { startsAt: true, court: { select: { name: true } } } } },
+      }),
+      this.prisma.booking.findFirst({
+        where: { clubId, playerPhone: waId, playerDni: { not: null } },
+        orderBy: { createdAt: 'desc' },
+        select: { playerDni: true },
+      }),
+    ])
+
+    return {
+      bookingsConfirmed,
+      bookingsUpcoming,
+      nextBooking: nextBooking
+        ? { startsAt: nextBooking.slot.startsAt, courtName: nextBooking.slot.court.name }
+        : null,
+      playerDni: lastWithDni?.playerDni ?? null,
+    }
   }
 
   async setMode(clubId: string, sessionId: string, mode: 'AI' | 'HUMAN') {

@@ -8,17 +8,13 @@ import { BotState, SessionContext } from '../types'
 describe('buildInteractive', () => {
   const ctx = (over: Partial<SessionContext> = {}): SessionContext => ({ ...over })
 
-  it('offers the 3 menu actions with ids 1/2/3 on the menu', () => {
+  it('offers the single menu action with id 1 on the menu', () => {
     const i = buildInteractive(BotState.MENU, ctx())
-    expect(i?.buttons?.map(b => b.id)).toEqual(['1', '2', '3'])
+    expect(i?.buttons?.map(b => b.id)).toEqual(['1'])
   })
 
   it('offers yes/no buttons (ids si/no) on the booking summary', () => {
     expect(buildInteractive(BotState.BOOK_CONFIRM, ctx())?.buttons?.map(b => b.id)).toEqual(['si', 'no'])
-  })
-
-  it('offers yes/no buttons (ids si/no) on the cancel confirmation', () => {
-    expect(buildInteractive(BotState.CANCEL_CONFIRM, ctx())?.buttons?.map(b => b.id)).toEqual(['si', 'no'])
   })
 
   it('uses buttons for ≤3 courts, with the court name as id', () => {
@@ -54,16 +50,6 @@ describe('buildInteractive', () => {
     }))
     const i = buildInteractive(BotState.BOOK_SLOT, ctx({ slotOptions }))
     expect(i?.list?.rows.map(r => r.id)).toEqual(['09:00', '10:30', '12:00', '13:30'])
-  })
-
-  it('numbers cancel options and appends a Volver row (id 0)', () => {
-    const bookingOptions = [
-      { id: 'x', label: '25/06 · Cancha 1 · 18:00 - 19:30' },
-      { id: 'y', label: '26/06 · Cancha 2 · 20:00 - 21:30' },
-    ]
-    const rows = buildInteractive(BotState.CANCEL_SELECT, ctx({ bookingOptions }))?.list?.rows
-    expect(rows?.map(r => r.id)).toEqual(['1', '2', '0'])
-    expect(rows?.[2].title).toBe('Volver')
   })
 
   it('gives no botonera on free-text steps (name, dni)', () => {

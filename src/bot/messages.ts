@@ -1,6 +1,6 @@
 import { AvailableDate } from '../availability/availability.service'
 import { dayLabelFromKey, dayMonthFromKey, formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
-import { BookingOption, BotReply, BotState, CourtOption, SessionContext, SlotOption } from './types'
+import { BandOption, BotReply, BotState, SessionContext, SlotOption } from './types'
 import { buildInteractive } from './lib/interactive'
 
 // ── Formatters ─────────────────────────────────────────────────────────────
@@ -23,9 +23,7 @@ function fmtExact(cents: number): string {
 
 export const MENU =
   '¿Qué querés hacer?\n\n' +
-  '1️⃣ Reservar un turno\n' +
-  '2️⃣ Ver o cancelar mis reservas\n' +
-  '3️⃣ Hablar con un asesor\n\n' +
+  '1️⃣ Reservar un turno\n\n' +
   'Respondé con el número, o escribime con tus palabras (ej: *"un turno el sábado a la tarde"*).'
 
 /**
@@ -45,9 +43,6 @@ export function thanksReply(name?: string): string {
 
 export const WELCOME = welcome()
 
-export const ADVISOR_HANDOFF =
-  '🙌 Dale, te derivo con un asesor del club. En un ratito te escriben por acá. ' +
-  'Dejá tu consulta (un torneo, una duda, lo que necesites) y la van a ver. 🎾'
 export const BAD_OPTION = `Mmm, no entendí esa opción 🤔\n\n${MENU}`
 export const ASK_DATE = `📅 ¿Para qué día lo querés? Decime la fecha (ej: *25/06*) o algo como *"mañana"* o *"el sábado"*.`
 export const BAD_DATE = `No me quedó clara la fecha 🤔 Probá con el día y mes (ej: *25/06*) o algo como *"el sábado"*.`
@@ -57,16 +52,17 @@ export const BAD_DNI = `Mmm, ese DNI no me cierra 🤔 Pasámelo solo con númer
 export const BAD_SLOT = `Ese número de turno no está en la lista 🤔 Elegí uno de los de arriba.`
 export const BAD_COURT = `Ese número de cancha no está en la lista 🤔 Elegí una de las de arriba.`
 export const BAD_BOOKING = `Ese número no está en la lista 🤔 Elegí uno, o escribí *0* para volver.`
-export const NO_SLOTS = `😕 Justo en esa cancha no me quedan turnos para ese día. Decime otra fecha y la chequeo. 🎾`
-export const NO_BOOKINGS = `📭 No te encuentro reservas confirmadas por ahora.\n\n${MENU}`
 export const BOOKING_ABORTED = `Listo, no reservé nada 👍 Cuando quieras lo vemos.\n\n${MENU}`
 export const BOOKING_FAILED = `😕 Uy, no pude confirmar la reserva — puede que alguien haya tomado ese turno justo recién. Probemos con otro.\n\n${MENU}`
-export const CANCEL_CONFIRMED = `✅ Listo, cancelé tu reserva. ¡Cualquier cosa avisame!`
-export const CANCEL_FAILED = `😕 No pude cancelar la reserva. Probá de nuevo en un ratito o escribime.\n\n${MENU}`
-export const CANCEL_ABORTED = `Perfecto, dejé tu reserva como estaba 👍`
 export const PAYMENT_UNAVAILABLE = `😅 Justo no puedo tomar el pago por acá en este momento. Escribile al club así te ayudan a confirmar la reserva. 🎾`
 export const PAYMENT_CLAIM_NO_PENDING = `Mmm, no me figura ninguna reserva tuya esperando pago 🤔. Si transferiste recién, dame un par de minutos y revisá; si no, escribime *reservar* y armamos el turno. 🎾`
 export const ATTACHMENT_NO_PENDING = `Recibí tu archivo 🙌 pero por acá no puedo abrir imágenes. Si transferiste para una reserva, esperá un toque y te confirmo solo; si necesitás otra cosa, escribime con palabras. 🎾`
+/** RECEIPT mode: we got an image but the player has no pending booking to attach it to. */
+export const RECEIPT_ATTACHMENT_NO_PENDING = `Recibí tu imagen 🙌 pero no me figura ninguna reserva tuya esperando pago. Si querés reservar, escribime *reservar* y lo armamos. 🎾`
+/** RECEIPT mode: we couldn't download/store the receipt image. */
+export const RECEIPT_ATTACHMENT_FAILED = `Uy, no pude guardar tu comprobante 😅. ¿Me lo reenviás como *foto* (imagen), por favor? Si sigue sin andar, escribile al club y lo confirman. 🎾`
+/** RECEIPT mode: player says they paid via text — we need the actual photo. */
+export const RECEIPT_CLAIM_ASK_PHOTO = `¡Genial! 🙌 Para confirmar tu reserva necesito que me mandes una *foto del comprobante* de la transferencia por acá. Apenas la reciba, el club la verifica y te confirmo el turno. 🎾`
 /** Friendly catch-all when something fails internally, so the bot is never left "en visto". */
 export const TECHNICAL_ERROR = `😅 Uy, tuvimos un inconveniente técnico de mi lado. Probá de nuevo en un ratito, por favor. Si sigue sin andar, escribile al club y te ayudan. 🎾`
 
@@ -99,25 +95,66 @@ export function noAvailabilityWithSuggestions(dateKey: string, suggestions: Avai
   )
 }
 
-export function courtsList(courts: CourtOption[], date: string): string {
-  const list = courts.map(c => `• ${c.name}`).join('\n')
-  return `🎾 Para el *${fmtDate(date)}* tengo estas canchas con lugar:\n\n${list}\n\nDecime cuál preferís.`
+/**
+ * The day's availability, grouped by court so the player sees every court with its free times
+ * at a glance. They reply with a time (no need to pick a court first) and the bot assigns one.
+ */
+export function dayAvailabilityList(bands: BandOption[], date: string): string {
+  // Invert band→courts into court→times, preserving the time order (bands are already sorted).
+  const byCourt = new Map<string, { name: string; times: string[] }>()
+  for (const band of bands) {
+    for (const c of band.courts) {
+      const entry = byCourt.get(c.id) ?? { name: c.name, times: [] }
+      entry.times.push(band.label)
+      byCourt.set(c.id, entry)
+    }
+  }
+  const groups = [...byCourt.values()]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(g => `*${g.name}*\n${g.times.map(t => `• ${t}`).join('\n')}`)
+    .join('\n\n')
+  return (
+    `🎾 Para el *${fmtDate(date)}* tengo estos turnos libres:\n\n${groups}\n\n` +
+    `Decime el horario que querés (ej: *las 18*) y te asigno la cancha. 🎾`
+  )
+}
+
+/** Like dayAvailabilityList but framed as "that time isn't free, here's what is". */
+export function timeNotAvailable(bands: BandOption[], date: string): string {
+  return `😕 Para esa hora no me queda lugar.\n\n${dayAvailabilityList(bands, date)}`
 }
 
 /**
- * Shown when the player gave a date + time but no court: lists the courts that are
- * free at exactly that time so they just pick one (and we already know the slot).
+ * Shown when the player's chosen time is free on more than one court: lists those courts with
+ * their price so they pick one — or reply "cualquiera" and the bot assigns the cheapest.
  */
-export function courtsAtTimeList(courts: CourtOption[], timeLabel: string, date: string): string {
-  const list = courts.map(c => `• ${c.name}`).join('\n')
+export function courtsAtTimeList(courts: { name: string; price: number }[], timeLabel: string, date: string): string {
+  const list = courts.map(c => `• ${c.name} — ${fmtPrice(c.price)}`).join('\n')
   return (
-    `🎾 Para el *${fmtDate(date)}* a las *${timeLabel}* tengo libre:\n\n${list}\n\n` + `Decime en cuál te la reservo.`
+    `🎾 Para el *${fmtDate(date)}* a las *${timeLabel}* tengo libre:\n\n${list}\n\n` +
+    `¿Cuál preferís? O decime *"cualquiera"* y te asigno una. 🎾`
   )
 }
 
 export function slotsList(slots: SlotOption[], courtName: string, date: string): string {
   const list = slots.map(s => `• ${s.label} — ${fmtPrice(s.price)}`).join('\n')
   return `⏰ Estos son los horarios libres en *${courtName}* el *${fmtDate(date)}*:\n\n${list}\n\nDecime cuál te queda bien (ej: *las 18*).`
+}
+
+/**
+ * The player asked for a specific court that has no free turns that day. We say so plainly (we
+ * don't silently switch courts) and then show what IS free across the club.
+ */
+export function courtFullToday(courtName: string, bands: BandOption[], date: string): string {
+  return `😕 *${courtName}* no tiene turnos libres para el *${fmtDate(date)}*.\n\n${dayAvailabilityList(bands, date)}`
+}
+
+/**
+ * The player asked for a specific court at a time that's already taken there. We tell them that
+ * court is busy at that time (instead of assuming another court) and show its other free turns.
+ */
+export function courtBusyAtTime(courtName: string, slots: SlotOption[], date: string): string {
+  return `😕 En *${courtName}* esa hora ya está ocupada.\n\n${slotsList(slots, courtName, date)}`
 }
 
 export function confirmBooking(ctx: SessionContext): string {
@@ -141,31 +178,32 @@ export function bookingConfirmed(ctx: SessionContext): string {
   )
 }
 
-export function myBookingsList(options: BookingOption[]): string {
-  const list = options.map(o => `• ${o.label}`).join('\n')
-  return `📋 *Tus reservas confirmadas:*\n\n${list}\n\n${MENU}`
-}
-
-export function cancelList(options: BookingOption[]): string {
-  // Numbered on purpose: cancelling is destructive, so a precise pick beats
-  // free-text matching here.
-  const list = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')
-  return `❌ ¿Cuál reserva querés cancelar?\n\n${list}\n\nDecime el número, o *0* para volver.`
-}
-
-export function confirmCancel(label: string): string {
-  return `Me estás pidiendo cancelar la reserva *${label}*. ¿Te la doy de baja? Confirmame y la cancelo, o avisame si preferís dejarla.`
-}
-
 export function transferPending(
   ctx: SessionContext,
   transfer: { alias: string; holder: string | null },
   transferAmountCents: number,
   depositMode: 'DEPOSIT' | 'FULL' = 'DEPOSIT',
   requireDni = false,
+  verificationMode: 'AUTO' | 'RECEIPT' = 'AUTO',
 ): string {
   const holderLine = transfer.holder ? `\n👤 Titular: *${transfer.holder}*` : ''
   const whatToPay = depositMode === 'FULL' ? 'transferí el total de la cancha' : 'transferí la seña para reservar'
+
+  // RECEIPT mode: an admin verifies the receipt photo, so the amount is round and the player
+  // must SEND the receipt. No centavos / own-account guard applies here.
+  if (verificationMode === 'RECEIPT') {
+    return (
+      `⏳ *Reserva pre-confirmada — falta el pago*\n\n` +
+      `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n` +
+      `🎾 ${ctx.selectedCourtName}\n\n` +
+      `Para confirmar el turno, ${whatToPay}:\n\n` +
+      `💰 Importe: *${fmtPrice(transferAmountCents)}*\n` +
+      `🏦 Alias: *${transfer.alias}*${holderLine}\n\n` +
+      `📸 *Importante:* cuando transfieras, mandame una *foto del comprobante* por acá. ` +
+      `El club la verifica y te confirmo la reserva.\n\n` +
+      `⏰ Tenés *30 minutos* para enviar el comprobante; si no llega a tiempo, el turno queda libre.`
+    )
+  }
 
   // In DNI mode the amount is round and identity is validated by the payer's DNI, so we
   // don't ask for exact centavos — we ask them to pay from their OWN account.
@@ -188,6 +226,18 @@ export function transferPending(
     `🏦 Alias: *${transfer.alias}*${holderLine}\n\n` +
     `${guard}\n\n` +
     `⏰ Tenés *30 minutos*. Cuando se acredite te aviso por acá; si no llega a tiempo, el turno queda libre.`
+  )
+}
+
+/**
+ * RECEIPT mode acknowledgement: the player sent the receipt photo and we stored it. We never
+ * auto-confirm — an admin verifies the image — so we tell them it's being checked.
+ */
+export function receiptReceivedAck(courtName: string, startsAt: Date, endsAt: Date): string {
+  return (
+    `🧾 *¡Recibí tu comprobante!* Lo estamos verificando.\n\n` +
+    `Apenas el club lo confirme te aviso por acá y te queda asegurada *${courtName} · ` +
+    `${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}*. 🎾`
   )
 }
 
@@ -216,17 +266,23 @@ export function paymentClaimAck(
 
 /** First line of the MENU block — used to detect a genuine menu presentation. */
 const MENU_PROMPT_MARKER = '¿Qué querés hacer?'
-/** Concise menu body shown above the 3 menu buttons (no enumerated 1/2/3 list). */
+/** Concise menu body shown above the menu button (no enumerated list). */
 const MENU_CONCISE = `¿Qué querés hacer? Tocá una opción 👇\n\nO escribime con tus palabras (ej: *"un turno el sábado a la tarde"*).`
-/** Concise cancel body shown above the bookings list. */
-const CANCEL_CONCISE = `❌ ¿Cuál reserva querés cancelar? Elegila abajo 👇`
 
 function courtsPrompt(ctx: SessionContext): string {
+  // Reached only when a chosen time is free on several courts → "pick a court for that time".
+  if (ctx.selectedSlotLabel) {
+    return `🎾 A las *${ctx.selectedSlotLabel}* del *${fmtDate(ctx.selectedDate!)}*, ¿en qué cancha? 👇`
+  }
   return `🎾 Para el *${fmtDate(ctx.selectedDate!)}* tengo estas canchas con lugar 👇`
 }
 
 function slotsPrompt(ctx: SessionContext): string {
-  return `⏰ Horarios libres en *${ctx.selectedCourtName}* el *${fmtDate(ctx.selectedDate!)}* 👇`
+  // With the time-first flow there's usually no single court yet — keep the prompt generic.
+  if (ctx.selectedCourtName) {
+    return `⏰ Horarios libres en *${ctx.selectedCourtName}* el *${fmtDate(ctx.selectedDate!)}* 👇`
+  }
+  return `⏰ Elegí un horario para el *${fmtDate(ctx.selectedDate!)}* y te asigno la cancha 👇`
 }
 
 /** The body to send when a botonera is attached: a concise prompt instead of the listed options. */
@@ -239,10 +295,8 @@ function conciseBody(state: BotState, ctx: SessionContext, text: string): string
       return courtsPrompt(ctx)
     case BotState.BOOK_SLOT:
       return slotsPrompt(ctx)
-    case BotState.CANCEL_SELECT:
-      return CANCEL_CONCISE
     default:
-      // BOOK_CONFIRM / CANCEL_CONFIRM bodies are summaries, not option lists — keep them.
+      // BOOK_CONFIRM body is a summary, not an option list — keep it.
       return text
   }
 }

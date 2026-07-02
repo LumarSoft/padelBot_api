@@ -6,6 +6,7 @@ import { AppController } from './app.controller'
 import { AppService } from './app.service'
 import { PrismaModule } from './prisma/prisma.module'
 import { CryptoModule } from './common/crypto/crypto.module'
+import { StorageModule } from './storage/storage.module'
 import { AuthModule } from './auth/auth.module'
 import { CourtsModule } from './courts/courts.module'
 import { SlotsModule } from './slots/slots.module'
@@ -30,6 +31,7 @@ import { PriceRulesModule } from './price-rules/price-rules.module'
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: Number(process.env.THROTTLE_LIMIT) || 120 }]),
     PrismaModule,
     CryptoModule,
+    StorageModule,
     AuthModule,
     CourtsModule,
     SlotsModule,

@@ -35,20 +35,4 @@ export const TOOLS: ChatCompletionTool[] = [
       },
     },
   },
-  {
-    type: 'function',
-    function: {
-      name: 'navigate_my_bookings',
-      description: 'Usá esta función cuando el jugador quiera ver, consultar o listar sus reservas confirmadas.',
-      parameters: { type: 'object', properties: {} },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'navigate_cancel',
-      description: 'Usá esta función cuando el jugador quiera cancelar o anular una reserva.',
-      parameters: { type: 'object', properties: {} },
-    },
-  },
 ]

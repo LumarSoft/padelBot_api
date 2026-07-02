@@ -30,6 +30,12 @@ model Club {
   /// (from MercadoPago) matches the reservation's. Mismatch/unknown → manual review.
   requireDniMatch Boolean    @default(false)
 
+  /// How the club verifies the player's deposit:
+  /// AUTO    = the poller reconciles the transfer against MercadoPago automatically.
+  /// RECEIPT = the bot asks the player to send a photo of the transfer receipt and an
+  ///           admin verifies it manually from the panel (no MercadoPago reconciliation).
+  paymentVerificationMode PaymentVerificationMode @default(AUTO)
+
   /// MercadoPago Connect (OAuth) — each club connects its OWN MP account so the deposit
   /// money lands in the club's account and the poller can reconcile it with that account's
   /// token. Null until the owner connects MercadoPago. Tokens are stored ENCRYPTED at rest.
@@ -53,6 +59,7 @@ model Club {
   recurringBookings    RecurringBooking[]
   whatsappLines        WhatsAppLine[]
   conversationSessions ConversationSession[]
+  paymentReceipts      PaymentReceipt[]
 }
 
 enum Role {
@@ -64,6 +71,13 @@ enum Role {
 enum DepositMode {
   DEPOSIT
   FULL
+}
+
+/// How a club verifies the deposit transfer: automatically via MercadoPago, or by a
+/// receipt photo the player sends, reviewed manually by an admin in the panel.
+enum PaymentVerificationMode {
+  AUTO
+  RECEIPT
 }
 
 /// A physical court the club offers slots on.
@@ -199,6 +213,11 @@ model Booking {
   mpPaymentId        String?
   /// When the pending payment link expires; null for admin-created bookings.
   paymentExpiresAt   DateTime?
+  /// When the player sent a transfer receipt photo (RECEIPT verification mode). Null until
+  /// a receipt arrives. Drives the panel's "review now" priority and stops the pending from
+  /// auto-expiring while it awaits an admin's manual review.
+  receiptUploadedAt  DateTime?
+  receipts           PaymentReceipt[]
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
@@ -208,6 +227,30 @@ model Booking {
   @@index([clubId, status])
   @@index([status, paymentExpiresAt])
   @@index([status, transferAmountCents])
+}
+
+/// A transfer-receipt image a player sent for a booking in RECEIPT verification mode.
+/// The bytes live in object storage (Vercel Blob); only the storage key/URL and metadata
+/// are persisted here. Cascade-deleted with the booking; also pruned when the booking is
+/// confirmed/rejected (the image is no longer needed once the payment is resolved).
+model PaymentReceipt {
+  id         String   @id @default(cuid())
+  bookingId  String
+  booking    Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  clubId     String
+  club       Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Storage backend key/pathname used to fetch or delete the blob.
+  storageKey String
+  /// Fully-qualified blob URL (server-side only — never exposed to the browser).
+  url        String   @db.Text
+  mimeType   String
+  sizeBytes  Int
+  /// Meta media id the image came from (audit / dedup).
+  waMediaId  String?
+  createdAt  DateTime @default(now())
+
+  @@index([bookingId])
+  @@index([clubId])
 }
 
 /// Maps a Meta WhatsApp Business phone number ID to a club (tenant).

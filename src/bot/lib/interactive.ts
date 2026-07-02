@@ -15,13 +15,9 @@ const ROW_DESC_MAX = 72
 
 const truncate = (s: string, max: number): string => (s.length <= max ? s : s.slice(0, max - 1).trimEnd() + '…')
 
-/** The three main actions — ids match what `onMenu` / advisor handling already expect. */
+/** The single main action — id matches what `onMenu` already expects. */
 const MENU_BUTTONS: Interactive = {
-  buttons: [
-    { id: '1', title: 'Reservar' },
-    { id: '2', title: 'Mis reservas' },
-    { id: '3', title: 'Hablar con asesor' },
-  ],
+  buttons: [{ id: '1', title: 'Reservar' }],
 }
 
 /** Yes/No for the booking summary — ids feed `normalizeYesNo`. */
@@ -29,14 +25,6 @@ const CONFIRM_BOOKING_BUTTONS: Interactive = {
   buttons: [
     { id: 'si', title: '✅ Confirmar' },
     { id: 'no', title: '✖️ Mejor no' },
-  ],
-}
-
-/** Yes/No for a cancellation — "Sí" means cancel; ids still feed `normalizeYesNo`. */
-const CONFIRM_CANCEL_BUTTONS: Interactive = {
-  buttons: [
-    { id: 'si', title: 'Sí, cancelar' },
-    { id: 'no', title: 'No, dejarla' },
   ],
 }
 
@@ -67,10 +55,10 @@ function chooseInteractive(options: InteractiveRow[], listButton: string): Inter
 function courtsInteractive(ctx: SessionContext): Interactive | undefined {
   const courts = ctx.courtOptions ?? []
   // id = court name → matchCourt resolves it; exact-match wins over substrings.
-  return chooseInteractive(
-    courts.map(c => ({ id: c.name, title: c.name })),
-    'Ver canchas',
-  )
+  const options = courts.map(c => ({ id: c.name, title: c.name }))
+  // In the "free on several courts at this time" step, offer a one-tap "Cualquiera".
+  if (ctx.selectedBandStart) options.push({ id: 'cualquiera', title: 'Cualquiera' })
+  return chooseInteractive(options, 'Ver canchas')
 }
 
 function slotsInteractive(ctx: SessionContext): Interactive | undefined {
@@ -84,15 +72,6 @@ function slotsInteractive(ctx: SessionContext): Interactive | undefined {
     })),
     'Ver horarios',
   )
-}
-
-function cancelInteractive(ctx: SessionContext): Interactive | undefined {
-  const options = ctx.bookingOptions ?? []
-  if (options.length === 0 || options.length > MAX_ROWS - 1) return undefined
-  // id = 1-based index (+ "0" to go back) → onCancelSelect handles both.
-  const rows: InteractiveRow[] = options.map((o, i) => ({ id: String(i + 1), title: truncate(o.label, ROW_TITLE_MAX) }))
-  rows.push({ id: '0', title: 'Volver' })
-  return { list: { button: 'Elegir reserva', rows } }
 }
 
 /** The botonera for the step the player will see next, or undefined to send plain text. */
@@ -110,10 +89,6 @@ export function buildInteractive(state: BotState, ctx: SessionContext): Interact
       return slotsInteractive(ctx)
     case BotState.BOOK_CONFIRM:
       return CONFIRM_BOOKING_BUTTONS
-    case BotState.CANCEL_SELECT:
-      return cancelInteractive(ctx)
-    case BotState.CANCEL_CONFIRM:
-      return CONFIRM_CANCEL_BUTTONS
     default:
       // BOOK_NAME, BOOK_DNI → free-text answers, no botonera.
       return undefined

@@ -46,6 +46,9 @@ lerna-debug.log*
 .temp
 .tmp
 
+# Locally-stored receipt images (RECEIPT_STORAGE_DRIVER=local)
+/storage
+
 # Runtime data
 pids
 *.pid

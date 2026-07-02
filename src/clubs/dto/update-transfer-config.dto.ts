@@ -1,5 +1,5 @@
 import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
-import { DepositMode } from 'generated/prisma/client'
+import { DepositMode, PaymentVerificationMode } from 'generated/prisma/client'
 
 export class UpdateTransferConfigDto {
   /** MercadoPago alias/CVU players transfer the deposit to. Empty string clears it. */
@@ -30,4 +30,9 @@ export class UpdateTransferConfigDto {
   @IsOptional()
   @IsBoolean()
   requireDniMatch?: boolean
+
+  /** AUTO = reconcile via MercadoPago; RECEIPT = player sends a receipt photo verified by hand. */
+  @IsOptional()
+  @IsEnum(PaymentVerificationMode)
+  paymentVerificationMode?: PaymentVerificationMode
 }
