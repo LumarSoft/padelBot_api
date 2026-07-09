@@ -7,6 +7,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Res,
   StreamableFile,
@@ -21,6 +22,7 @@ import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import { CreateBookingDto } from './dto/create-booking.dto'
 import { RescheduleBookingDto } from './dto/reschedule-booking.dto'
 import { QueryBookingsDto } from './dto/query-bookings.dto'
+import { SetBookingProductsDto } from './dto/set-booking-products.dto'
 
 @Controller('bookings')
 @UseGuards(JwtAuthGuard)
@@ -72,5 +74,10 @@ export class BookingsController {
   @Patch(':id/reschedule')
   reschedule(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: RescheduleBookingDto) {
     return this.bookingsService.reschedule(user.clubId, id, dto)
+  }
+
+  @Put(':id/products')
+  setProducts(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: SetBookingProductsDto) {
+    return this.bookingsService.setBookingProducts(user.clubId, id, dto)
   }
 }

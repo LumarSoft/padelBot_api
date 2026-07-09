@@ -22,6 +22,7 @@ import { ConversationsModule } from './conversations/conversations.module'
 import { StatsModule } from './stats/stats.module'
 import { PriceRulesModule } from './price-rules/price-rules.module'
 import { NotificationsModule } from './notifications/notifications.module'
+import { ProductsModule } from './products/products.module'
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { NotificationsModule } from './notifications/notifications.module'
     StatsModule,
     PriceRulesModule,
     NotificationsModule,
+    ProductsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

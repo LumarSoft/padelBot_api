@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service'
 import { CreateBookingDto } from './dto/create-booking.dto'
 import { RescheduleBookingDto } from './dto/reschedule-booking.dto'
 import { QueryBookingsDto } from './dto/query-bookings.dto'
+import { SetBookingProductsDto } from './dto/set-booking-products.dto'
 import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { bandDateTimes, findBandInSchedule, generateBands } from '../availability/lib/schedule'
 import { resolveBandPriceCents } from '../availability/lib/pricing'
@@ -55,6 +56,14 @@ const bookingSelect = {
   },
   // Count of receipt images so the panel knows to render the thumbnail / "review now" badge.
   _count: { select: { receipts: true } },
+  bookingProducts: {
+    select: {
+      id: true,
+      quantity: true,
+      unitPriceCents: true,
+      product: { select: { id: true, name: true, category: true } },
+    },
+  },
 } as const
 
 /** Shape needed to build an event summary — satisfied by any `bookingSelect` row. */
@@ -147,12 +156,14 @@ export class BookingsService {
   async book(clubId: string, dto: CreateBookingDto, bookedByUserId?: number) {
     const slot = await this.prisma.slot.findFirst({
       where: { id: dto.slotId, clubId },
-      select: { id: true, status: true },
+      select: { id: true, status: true, priceCents: true },
     })
     if (!slot) throw new NotFoundException(`Slot ${dto.slotId} not found`)
     if (slot.status !== SlotStatus.AVAILABLE) {
       throw new ConflictException(`Slot ${dto.slotId} is not available`)
     }
+
+    const { depositCents } = await this.resolvePaymentPlan(clubId, slot.priceCents)
 
     const booking = await this.prisma.$transaction(async tx => {
       // Atomic check-and-lock: only the writer that flips AVAILABLE→BOOKED proceeds.
@@ -165,6 +176,7 @@ export class BookingsService {
           playerPhone: dto.playerPhone ?? null,
           notes: dto.notes,
           bookedByUserId: bookedByUserId ?? null,
+          depositCents,
         },
         select: bookingSelect,
       })
@@ -814,6 +826,7 @@ export class BookingsService {
       select: {
         id: true,
         status: true,
+        bookedByUserId: true,
         _count: { select: { receipts: true } },
         club: { select: { paymentVerificationMode: true } },
       },
@@ -821,9 +834,10 @@ export class BookingsService {
     if (!booking) throw new NotFoundException(`Booking ${bookingId} not found`)
     if (booking.status !== 'PENDING_PAYMENT') return null
 
-    // In RECEIPT mode the whole point is that an admin verifies the player's receipt image, so
-    // confirming without one would defeat the check — require a receipt before confirming.
-    if (booking.club.paymentVerificationMode === 'RECEIPT' && booking._count.receipts === 0) {
+    // Admin-created bookings are confirmed at the desk without a player receipt.
+    // Only bot-initiated bookings (bookedByUserId === null) require the receipt in RECEIPT mode.
+    const isAdminBooking = booking.bookedByUserId !== null
+    if (booking.club.paymentVerificationMode === 'RECEIPT' && booking._count.receipts === 0 && !isAdminBooking) {
       throw new BadRequestException('No se puede confirmar la reserva sin un comprobante adjunto')
     }
 
@@ -913,6 +927,45 @@ export class BookingsService {
     }
 
     return results
+  }
+
+  // ── Booking products (consumos) ─────────────────────────────────────────────
+
+  /**
+   * Replaces all products associated with a booking in a single transaction.
+   * Passing an empty items array clears all consumos. Club-scoped.
+   */
+  async setBookingProducts(clubId: string, bookingId: string, dto: SetBookingProductsDto) {
+    const booking = await this.prisma.booking.findFirst({ where: { id: bookingId, clubId }, select: { id: true } })
+    if (!booking) throw new NotFoundException(`Booking ${bookingId} not found`)
+
+    if (dto.items.length > 0) {
+      const productIds = dto.items.map(i => i.productId)
+      const products = await this.prisma.product.findMany({
+        where: { id: { in: productIds }, clubId },
+        select: { id: true, priceCents: true },
+      })
+      const priceMap = new Map(products.map(p => [p.id, p.priceCents]))
+      const missing = productIds.filter(id => !priceMap.has(id))
+      if (missing.length > 0) throw new NotFoundException(`Products not found: ${missing.join(', ')}`)
+
+      await this.prisma.$transaction([
+        this.prisma.bookingProduct.deleteMany({ where: { bookingId } }),
+        this.prisma.bookingProduct.createMany({
+          data: dto.items.map(item => ({
+            bookingId,
+            productId: item.productId,
+            clubId,
+            quantity: item.quantity,
+            unitPriceCents: priceMap.get(item.productId)!,
+          })),
+        }),
+      ])
+    } else {
+      await this.prisma.bookingProduct.deleteMany({ where: { bookingId } })
+    }
+
+    return this.findOne(clubId, bookingId)
   }
 
   /**

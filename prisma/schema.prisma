@@ -61,6 +61,8 @@ model Club {
   conversationSessions ConversationSession[]
   paymentReceipts      PaymentReceipt[]
   deviceTokens         DeviceToken[]
+  products             Product[]
+  bookingProducts      BookingProduct[]
 }
 
 enum Role {
@@ -240,6 +242,7 @@ model Booking {
   /// auto-expiring while it awaits an admin's manual review.
   receiptUploadedAt  DateTime?
   receipts           PaymentReceipt[]
+  bookingProducts    BookingProduct[]
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
@@ -270,6 +273,48 @@ model PaymentReceipt {
   /// Meta media id the image came from (audit / dedup).
   waMediaId  String?
   createdAt  DateTime @default(now())
+
+  @@index([bookingId])
+  @@index([clubId])
+}
+
+/// A product in the club's store (balls, drinks, snacks, accessories, etc.)
+model Product {
+  id           String          @id @default(cuid())
+  clubId       String
+  club         Club            @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  name         String
+  priceCents   Int
+  category     ProductCategory @default(OTRO)
+  isActive     Boolean         @default(true)
+  bookingItems BookingProduct[]
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@index([clubId])
+}
+
+enum ProductCategory {
+  PELOTA
+  BEBIDA
+  SNACK
+  ACCESORIO
+  OTRO
+}
+
+/// Records which products were consumed during a booked court session.
+model BookingProduct {
+  id             String   @id @default(cuid())
+  bookingId      String
+  booking        Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product  @relation(fields: [productId], references: [id])
+  clubId         String
+  club           Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  quantity       Int      @default(1)
+  /// Snapshot of the product price at the time of sale (cents).
+  unitPriceCents Int
+  createdAt      DateTime @default(now())
 
   @@index([bookingId])
   @@index([clubId])
