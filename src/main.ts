@@ -1,9 +1,19 @@
 import 'dotenv/config'
+import { networkInterfaces } from 'os'
 import { NestFactory } from '@nestjs/core'
-import { ValidationPipe } from '@nestjs/common'
+import { Logger, ValidationPipe } from '@nestjs/common'
 import { NestExpressApplication } from '@nestjs/platform-express'
 import { AppModule } from './app.module'
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter'
+
+function localNetworkIp(): string | null {
+  for (const ifaces of Object.values(networkInterfaces())) {
+    for (const iface of ifaces ?? []) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address
+    }
+  }
+  return null
+}
 
 async function bootstrap() {
   // rawBody: true exposes req.rawBody (Buffer) needed for Meta webhook signature verification
@@ -26,6 +36,10 @@ async function bootstrap() {
     origin: process.env.ADMIN_ORIGIN ?? 'http://localhost:3000',
     credentials: true,
   })
-  await app.listen(process.env.PORT ?? 3001)
+  const port = process.env.PORT ?? 3001
+  await app.listen(port)
+  const networkIp = localNetworkIp()
+  Logger.log(`API running on http://localhost:${port}`, 'Bootstrap')
+  if (networkIp) Logger.log(`Network (mobile .env): http://${networkIp}:${port}`, 'Bootstrap')
 }
 void bootstrap()
