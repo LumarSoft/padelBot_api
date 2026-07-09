@@ -318,6 +318,10 @@ model BookingProduct {
   quantity       Int      @default(1)
   /// Snapshot of the product price at the time of sale (cents).
   unitPriceCents Int
+  /// Which of the 4 players share this line, as a bitmask over positions 1..4
+  /// (bit0=J1 … bit3=J4). 15 = split among all four. The line cost splits
+  /// equally among the set bits. Legacy rows default to 15 (shared by all).
+  playerMask     Int      @default(15)
   createdAt      DateTime @default(now())
 
   @@index([bookingId])

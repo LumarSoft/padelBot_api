@@ -61,6 +61,7 @@ const bookingSelect = {
       id: true,
       quantity: true,
       unitPriceCents: true,
+      playerMask: true,
       product: { select: { id: true, name: true, category: true } },
     },
   },
@@ -80,6 +81,26 @@ function withReceiptFlag<T extends { _count: { receipts: number } }>(
 ): Omit<T, '_count'> & { hasReceipt: boolean } {
   const { _count, ...rest } = booking
   return { ...rest, hasReceipt: _count.receipts > 0 }
+}
+
+/** Converts a `playerMask` bit (bit0=J1 … bit3=J4) into the array of player positions it covers. */
+function playersFromMask(mask: number): number[] {
+  const players: number[] = []
+  for (let position = 1; position <= 4; position++) {
+    if (mask & (1 << (position - 1))) players.push(position)
+  }
+  return players
+}
+
+/** Replaces each consumo line's internal `playerMask` with the client-facing `players` array. */
+function withPlayers<T extends { bookingProducts: { playerMask: number }[] }>(booking: T) {
+  return {
+    ...booking,
+    bookingProducts: booking.bookingProducts.map(({ playerMask, ...rest }) => ({
+      ...rest,
+      players: playersFromMask(playerMask),
+    })),
+  }
 }
 
 /** Default seña percentage (one of four padel players) when a club has none set. */
@@ -141,7 +162,7 @@ export class BookingsService {
       select: bookingSelect,
       orderBy: { createdAt: 'desc' },
     })
-    return bookings.map(withReceiptFlag)
+    return bookings.map(booking => withPlayers(withReceiptFlag(booking)))
   }
 
   async findOne(clubId: string, id: string) {
@@ -150,7 +171,7 @@ export class BookingsService {
       select: bookingSelect,
     })
     if (!booking) throw new NotFoundException(`Booking ${id} not found`)
-    return withReceiptFlag(booking)
+    return withPlayers(withReceiptFlag(booking))
   }
 
   async book(clubId: string, dto: CreateBookingDto, bookedByUserId?: number) {
@@ -964,6 +985,7 @@ export class BookingsService {
             clubId,
             quantity: item.quantity,
             unitPriceCents: priceMap.get(item.productId)!,
+            playerMask: item.players.reduce((mask, player) => mask | (1 << (player - 1)), 0),
           })),
         }),
       ])

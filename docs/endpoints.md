@@ -429,6 +429,38 @@ Streams the latest transfer-receipt image for a booking (RECEIPT verification mo
 
 `200 OK` — the image bytes, with the stored `Content-Type` (e.g. `image/jpeg`) and `Cache-Control: private, max-age=60`.
 
+### PUT /bookings/:id/products
+
+Replaces all consumo lines (products consumed during the court session) attached to a booking. Passing an empty `items` array clears all consumos. Club-scoped.
+
+Each line records which of the 4 fixed anonymous players (`1`..`4`) share its cost — used by the panel to split the turno's bill (court price ÷ 4 plus each player's share of shared consumos).
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field           | Type     | Required | Constraints                                  |
+| --------------- | -------- | -------- | --------------------------------------------- |
+| items           | array    | Yes      | may be empty to clear all consumos            |
+| items[].productId | string | Yes      | must belong to the caller's club              |
+| items[].quantity  | number | Yes      | integer ≥ 1                                   |
+| items[].players   | number[] | Yes    | non-empty, each 1..4 (player positions sharing this line) |
+
+```json
+{
+  "items": [
+    { "productId": "clx...", "quantity": 1, "players": [1] },
+    { "productId": "clx...", "quantity": 2, "players": [3, 4] }
+  ]
+}
+```
+
+`200 OK` — the updated booking, including `bookingProducts[].players` (e.g. `[1]`, `[3, 4]`, or `[1, 2, 3, 4]` for a line shared by all four)
+
+`404 Not Found` — booking not found in the caller's club, or one of the `productId`s doesn't exist in the caller's club
+
+`400 Bad Request` — validation error
+
 `404 Not Found` — no receipt for this booking, or booking not in the caller's club
 
 ## Recurring Bookings (Turnos Fijos)
