@@ -23,6 +23,7 @@ import { StatsModule } from './stats/stats.module'
 import { PriceRulesModule } from './price-rules/price-rules.module'
 import { NotificationsModule } from './notifications/notifications.module'
 import { ProductsModule } from './products/products.module'
+import { BookingRemindersModule } from './booking-reminders/booking-reminders.module'
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { ProductsModule } from './products/products.module'
     PriceRulesModule,
     NotificationsModule,
     ProductsModule,
+    BookingRemindersModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

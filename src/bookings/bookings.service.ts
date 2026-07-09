@@ -327,7 +327,13 @@ export class BookingsService {
       // Atomic lock on the target slot: if another reschedule/booking took it first, the
       // whole transaction (including the release above) rolls back cleanly.
       await this.lockSlotOrThrow(tx, dto.newSlotId, clubId)
-      return tx.booking.update({ where: { id }, data: { slotId: dto.newSlotId }, select: bookingSelect })
+      // Reset so BookingRemindersService re-evaluates against the new slot time — otherwise a
+      // reminder already sent for the old time would suppress the (now-wrong) one for the new time.
+      return tx.booking.update({
+        where: { id },
+        data: { slotId: dto.newSlotId, reminderSentAt: null },
+        select: bookingSelect,
+      })
     })
 
     this.emitBookingChange('rescheduled', updated)

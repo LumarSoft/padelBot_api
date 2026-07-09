@@ -243,6 +243,9 @@ model Booking {
   receiptUploadedAt  DateTime?
   receipts           PaymentReceipt[]
   bookingProducts    BookingProduct[]
+  /// When the pre-match WhatsApp reminder was sent (BookingRemindersService, ~1h before
+  /// the slot). Null until sent; guards the reminder cron from re-sending on every sweep.
+  reminderSentAt     DateTime?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
@@ -252,6 +255,7 @@ model Booking {
   @@index([clubId, status])
   @@index([status, paymentExpiresAt])
   @@index([status, transferAmountCents])
+  @@index([status, reminderSentAt])
 }
 
 /// A transfer-receipt image a player sent for a booking in RECEIPT verification mode.

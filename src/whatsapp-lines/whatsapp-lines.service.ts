@@ -43,6 +43,19 @@ export class WhatsAppLinesService {
   }
 
   /**
+   * Resolves the active WhatsApp line to send *from* on behalf of a club (the reverse of
+   * `resolveClub`). Called by cross-cutting senders (e.g. booking reminders) that only have
+   * a `clubId` and need a `phoneNumberId` to call the Graph API with.
+   */
+  async findActiveForClub(clubId: string): Promise<{ phoneNumberId: string } | null> {
+    return this.prisma.whatsAppLine.findFirst({
+      where: { clubId, isActive: true },
+      select: { phoneNumberId: true },
+      orderBy: { createdAt: 'asc' },
+    })
+  }
+
+  /**
    * Resolves the club that owns a given Meta phone_number_id.
    * Called by the bot on every incoming webhook message.
    */

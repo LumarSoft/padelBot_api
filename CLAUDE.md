@@ -69,11 +69,12 @@ This is **PadelBot**, a multi-tenant SaaS for padel clubs in Rosario, Argentina 
 - `mercadopago` — MercadoPago API client + OAuth token exchange/refresh.
 - `events` — Server-Sent Events (`booking-events.service.ts`) so the panel reflects bot bookings in real time.
 - `stats` — `GET /stats/overview` aggregates per-club dashboard metrics (today's turnos, active reservations, active chats, pending payments, deposits collected, bot-vs-panel bookings, and a 14-day series).
+- `booking-reminders` — cron (`EVERY_5_MINUTES`) that WhatsApps a player ~1h before their confirmed slot via a Meta message template (required outside the 24h session window). Needs `WHATSAPP_REMINDER_TEMPLATE_NAME`/`_LANG` approved per club's number to actually deliver; `Booking.reminderSentAt` guards against duplicate sends and is reset on reschedule.
 
 **Payment policy (seña vs full):** what the bot asks the player to transfer is per-club config on `Club`: `depositMode` (`DEPOSIT` = a seña of `depositPercent`% of the court price, default 25%; `FULL` = the whole court price). `BookingsService.resolveDepositCents` computes the amount; the bot's confirmation wording adapts in `messages.ts`. The owner sets this in the panel's Pagos tab. (Per-player choice at booking time is a future extension — see ROADMAP.)
 - `common/crypto` — AES encrypt/decrypt for secrets at rest. `common/filters` — global exception filter.
 
-**What's NOT built yet (see `../docs/ROADMAP.md`):** self-service onboarding (alta of a club without manual DB work), SaaS billing of PadelBot itself, configurable slot duration per court, "tipo de complejo" and multi-venue (one brand with several addresses), player reminders, and automated tests of the critical flows.
+**What's NOT built yet (see `../docs/ROADMAP.md`):** self-service onboarding (alta of a club without manual DB work), SaaS billing of PadelBot itself, configurable slot duration per court, "tipo de complejo" and multi-venue (one brand with several addresses), and automated tests of the critical flows.
 
 > ⚠️ **Pending migration:** `prisma/migrations/20260623190000_add_deposit_mode` (adds `Club.depositMode`/`depositPercent`) must be applied with `npx prisma migrate deploy` (or `dev`) before running against a real DB. The Prisma client is already regenerated.
 

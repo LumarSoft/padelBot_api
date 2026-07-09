@@ -38,6 +38,35 @@ export class WhatsAppService {
     await this.postMessage(phoneNumberId, to, payload)
   }
 
+  /**
+   * Sends a pre-approved Meta message template (HSM). Required for any business-initiated
+   * message outside the 24h customer-service window (e.g. a booking reminder) — Meta rejects
+   * free-form `sendText` in that case. `bodyParams` fill the template's `{{1}}`, `{{2}}`… in
+   * order; the template itself (name, language, wording) must already be approved in the
+   * WhatsApp Business Manager for the number behind `phoneNumberId`.
+   */
+  async sendTemplate(
+    phoneNumberId: string,
+    to: string,
+    templateName: string,
+    languageCode: string,
+    bodyParams: string[],
+  ): Promise<void> {
+    await this.postMessage(phoneNumberId, to, {
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        components: [
+          {
+            type: 'body',
+            parameters: bodyParams.map(text => ({ type: 'text', text })),
+          },
+        ],
+      },
+    })
+  }
+
   /** Posts a message object to the Graph API, normalizing the recipient and logging failures. */
   private async postMessage(phoneNumberId: string, to: string, message: Record<string, unknown>): Promise<void> {
     const url = `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}/messages`
@@ -126,6 +155,7 @@ function describeOutbound(message: Record<string, unknown>): string {
   const text =
     (message.text as { body?: string } | undefined)?.body ??
     (message.interactive as { body?: { text?: string } } | undefined)?.body?.text ??
+    (message.template ? `[template: ${(message.template as { name?: string }).name}]` : undefined) ??
     `[${String(message.type ?? 'mensaje')}]`
   const oneLine = text.replace(/\s+/g, ' ').trim()
   return oneLine.length <= 140 ? oneLine : oneLine.slice(0, 139) + '…'
