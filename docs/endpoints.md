@@ -725,3 +725,57 @@ Read-only production go/no-go check. Lists the club's recent incoming transfers 
 `400 Bad Request` — no MercadoPago account available (club not connected and no `MERCADOPAGO_ACCESS_TOKEN`)
 
 `403 Forbidden` — caller is not the club OWNER
+
+## Notifications
+
+Registers/unregisters the staff mobile app's Expo push token so `NotificationsService.notifyClub`
+can reach it. Triggered automatically (no client call needed) when a booking is created
+(`"Nueva reserva pendiente de seña"`) or a transfer receipt is uploaded
+(`"Nuevo comprobante para revisar"`) — hooked directly into `BookingsService.emitBookingChange`
+and the receipt-upload flow, right where the SSE events already fire. Sending is best-effort: a
+push failure never blocks or fails the booking/receipt action, and tokens Expo reports as
+`DeviceNotRegistered` are pruned automatically.
+
+### POST /notifications/register
+
+Registers (or re-registers, on token rotation) the caller's device for push notifications.
+Upserts by `token`, so calling it again with the same token is a no-op update. Club/user scoped
+from the JWT.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field    | Type   | Required | Constraints        |
+| -------- | ------ | -------- | ------------------- |
+| token    | string | Yes      | Min length 1 (Expo push token) |
+| platform | string | Yes      | One of `ios`, `android` |
+
+```json
+{ "token": "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]", "platform": "ios" }
+```
+
+**Responses**
+
+`200 OK` — empty body
+
+### DELETE /notifications/register
+
+Removes a device token (called on logout so a signed-out device stops receiving pushes for this
+club). Scoped to the caller — a user cannot remove another user's token.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field | Type   | Required | Constraints  |
+| ----- | ------ | -------- | ------------ |
+| token | string | Yes      | Min length 1 |
+
+```json
+{ "token": "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]" }
+```
+
+**Responses**
+
+`200 OK` — empty body

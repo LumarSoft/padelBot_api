@@ -89,9 +89,7 @@ export class ConversationsService {
     return {
       bookingsConfirmed,
       bookingsUpcoming,
-      nextBooking: nextBooking
-        ? { startsAt: nextBooking.slot.startsAt, courtName: nextBooking.slot.court.name }
-        : null,
+      nextBooking: nextBooking ? { startsAt: nextBooking.slot.startsAt, courtName: nextBooking.slot.court.name } : null,
       playerDni: lastWithDni?.playerDni ?? null,
     }
   }

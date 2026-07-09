@@ -60,6 +60,7 @@ model Club {
   whatsappLines        WhatsAppLine[]
   conversationSessions ConversationSession[]
   paymentReceipts      PaymentReceipt[]
+  deviceTokens         DeviceToken[]
 }
 
 enum Role {
@@ -167,10 +168,31 @@ model User {
   club             Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
   bookings         Booking[]
   recurringBookings RecurringBooking[]
+  deviceTokens     DeviceToken[]
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
   @@index([clubId])
+}
+
+/// A staff-app device registered for push notifications ("Nueva reserva pendiente de seña",
+/// "Nuevo comprobante para revisar"). One row per physical device/install — a user with two
+/// phones has two rows; the same physical app reinstalled gets a new Expo push token and a
+/// new row (the old one is pruned once Expo reports it as DeviceNotRegistered).
+model DeviceToken {
+  id        String   @id @default(cuid())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clubId    String
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Expo push token, e.g. "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]".
+  token     String   @unique
+  platform  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clubId])
+  @@index([userId])
 }
 
 enum BookingStatus {

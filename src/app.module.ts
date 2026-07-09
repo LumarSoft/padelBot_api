@@ -21,6 +21,7 @@ import { ClubsModule } from './clubs/clubs.module'
 import { ConversationsModule } from './conversations/conversations.module'
 import { StatsModule } from './stats/stats.module'
 import { PriceRulesModule } from './price-rules/price-rules.module'
+import { NotificationsModule } from './notifications/notifications.module'
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { PriceRulesModule } from './price-rules/price-rules.module'
     ConversationsModule,
     StatsModule,
     PriceRulesModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

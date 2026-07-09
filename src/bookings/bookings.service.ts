@@ -11,6 +11,7 @@ import { formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { BookingAction, BookingEventsService } from '../events/booking-events.service'
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
+import { NotificationsService } from '../notifications/notifications.service'
 
 /** Booking a schedule band that may not have a materialized Slot row yet. */
 export interface BookBandInput {
@@ -58,6 +59,7 @@ const bookingSelect = {
 
 /** Shape needed to build an event summary — satisfied by any `bookingSelect` row. */
 type BookingForEvent = {
+  id: string
   clubId: string
   playerName: string
   slot: { startsAt: Date; endsAt: Date; court: { name: string } }
@@ -102,6 +104,7 @@ export class BookingsService {
     private readonly prisma: PrismaService,
     private readonly events: BookingEventsService,
     private readonly receiptStorage: ReceiptStorageService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async findAll(clubId: string, query: QueryBookingsDto) {
@@ -763,11 +766,12 @@ export class BookingsService {
     ])
 
     const { startsAt, endsAt, court } = booking.slot
-    this.events.emitReceipt({
-      type: 'payment.receipt',
-      clubId,
-      bookingId,
-      summary: `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`,
+    const summary = `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`
+    this.events.emitReceipt({ type: 'payment.receipt', clubId, bookingId, summary })
+    void this.notifications.notifyClub(clubId, {
+      title: 'Nuevo comprobante para revisar',
+      body: summary,
+      data: { bookingId },
     })
   }
 
@@ -912,16 +916,21 @@ export class BookingsService {
   }
 
   /**
-   * Broadcasts a booking change to the club's connected admins (live dashboard).
-   * Best-effort: emitting never blocks or fails the booking itself.
+   * Broadcasts a booking change to the club's connected admins (live dashboard) and, for a new
+   * booking, pushes a notification to the staff app so someone checks it even with the app
+   * closed. Best-effort: neither ever blocks or fails the booking itself.
    */
   private emitBookingChange(action: BookingAction, booking: BookingForEvent): void {
     const { startsAt, endsAt, court } = booking.slot
-    this.events.emit({
-      type: 'booking.changed',
-      clubId: booking.clubId,
-      action,
-      summary: `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`,
-    })
+    const summary = `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`
+    this.events.emit({ type: 'booking.changed', clubId: booking.clubId, action, summary })
+
+    if (action === 'created') {
+      void this.notifications.notifyClub(booking.clubId, {
+        title: 'Nueva reserva pendiente de seña',
+        body: summary,
+        data: { bookingId: booking.id },
+      })
+    }
   }
 }

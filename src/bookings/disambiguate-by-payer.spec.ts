@@ -8,7 +8,7 @@ import { BookingsService } from './bookings.service'
 type Candidate = { id: string; playerDni: string | null; payerMpUserId: string | null }
 
 describe('BookingsService.disambiguateByPayer', () => {
-  const service = new BookingsService({} as never, {} as never)
+  const service = new BookingsService({} as never, {} as never, {} as never, {} as never)
   const choose = (candidates: Candidate[], payer?: { cuit?: string | null; mpUserId?: string | null }) =>
     (
       service as unknown as { disambiguateByPayer: (c: Candidate[], p?: unknown) => Candidate | null }
