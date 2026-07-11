@@ -9,13 +9,7 @@ import { RequestClubDto } from './dto/request-club.dto'
 import { SaveSetupProgressDto } from './dto/save-setup-progress.dto'
 import { notifyOps } from '../common/ops-alert'
 import { formatSignupAlert } from './lib/signup-alert'
-import {
-  REQUIRED_STEP_IDS,
-  SETUP_STEP_IDS,
-  SetupProgress,
-  SetupStepId,
-  parseSetupProgress,
-} from './lib/setup-steps'
+import { REQUIRED_STEP_IDS, SETUP_STEP_IDS, SetupProgress, SetupStepId, parseSetupProgress } from './lib/setup-steps'
 
 const BCRYPT_ROUNDS = 10
 /** Free-trial length for new clubs. */
@@ -109,9 +103,10 @@ export class OnboardingService {
    * loaded for real in the `/setup` wizard, sitting with the owner. Seeding fake courts and
    * example bookings here would only leave them demo rows to hunt down and delete.
    */
-  async register(dto: RegisterClubDto): Promise<{ email: string }> {
+  async register(dto: RegisterClubDto): Promise<{ email: string; clubId: string }> {
     const email = dto.email.toLowerCase().trim()
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS)
+    let clubId = ''
 
     try {
       await this.prisma.$transaction(async tx => {
@@ -123,6 +118,7 @@ export class OnboardingService {
           },
           select: { id: true },
         })
+        clubId = club.id
 
         await tx.user.create({
           data: {
@@ -142,7 +138,7 @@ export class OnboardingService {
     }
 
     this.logger.log(`New club provisioned: ${dto.clubName} (${email}) — setup pending`)
-    return { email }
+    return { email, clubId }
   }
 
   /**

@@ -157,11 +157,13 @@ export class WhatsAppService {
 
   /**
    * Verifies the HMAC-SHA256 signature Meta attaches to every webhook POST.
-   * Returns true if WHATSAPP_APP_SECRET is not configured (local dev / CI).
+   * Skips verification if WHATSAPP_APP_SECRET is not configured — but only outside
+   * production, so a missing/misconfigured secret disables the local-dev/CI convenience
+   * instead of silently accepting unsigned webhook payloads in prod.
    */
   verifySignature(rawBody: Buffer, signature: string): boolean {
     const appSecret = process.env.WHATSAPP_APP_SECRET ?? process.env.META_APP_SECRET
-    if (!appSecret) return true
+    if (!appSecret) return process.env.NODE_ENV !== 'production'
     if (!signature?.startsWith('sha256=')) return false
     const expected = createHmac('sha256', appSecret).update(rawBody).digest('hex')
     const received = signature.slice(7)

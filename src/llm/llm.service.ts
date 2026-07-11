@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import OpenAI from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
+import { todayKey } from '../availability/lib/datetime'
 import { BotState, HandlerResult, SessionContext } from '../bot/types'
 import { matchCourt, matchSlot } from '../bot/lib/match'
 import { availabilityResult, bandsToSlotOptions, courtsFromBands, resolveBand } from '../bot/lib/booking-flow'
@@ -132,6 +133,9 @@ export class LlmService {
           `in=${usage.prompt_tokens} out=${usage.completion_tokens} total=${usage.total_tokens} costo=$${cost.toFixed(6)} ` +
           `| acumulado: ${this.totalCalls} llamadas · ${this.totalTokens} tokens · $${this.totalCostUsd.toFixed(4)}`,
       )
+      // The counters above die with the process. This is the copy that survives, and the
+      // only way to know what a club actually costs us.
+      void this.recordUsage(clubId, usage.prompt_tokens, usage.completion_tokens, cost)
     }
 
     const choice = completion.choices[0]
@@ -275,6 +279,35 @@ export class LlmService {
     // No court, no time → show the day's availability grouped by court.
     if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: base }
     return availabilityResult(ctx, bands, args.date)
+  }
+
+  // ── Cost accounting ─────────────────────────────────────────────────────────
+
+  /**
+   * Rolls this call into the club's daily OpenAI total (read by the ops console).
+   *
+   * Fire-and-forget and never throws: the player is waiting on a WhatsApp reply, and our
+   * accounting is not worth failing their booking over. A dropped row costs us a fraction
+   * of a cent of visibility; a thrown error costs a customer.
+   */
+  private async recordUsage(clubId: string, inputTokens: number, outputTokens: number, costUsd: number): Promise<void> {
+    const dateKey = todayKey()
+    const costMicroUsd = Math.round(costUsd * 1_000_000)
+
+    try {
+      await this.prisma.llmUsageDaily.upsert({
+        where: { clubId_dateKey: { clubId, dateKey } },
+        create: { clubId, dateKey, calls: 1, inputTokens, outputTokens, costMicroUsd },
+        update: {
+          calls: { increment: 1 },
+          inputTokens: { increment: inputTokens },
+          outputTokens: { increment: outputTokens },
+          costMicroUsd: { increment: costMicroUsd },
+        },
+      })
+    } catch (error) {
+      this.logger.error(`Failed to record LLM usage for club ${clubId}`, error)
+    }
   }
 }
 

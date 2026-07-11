@@ -13,5 +13,8 @@ import { PaymentsService } from './payments.service'
   imports: [BookingsModule, ClubsModule, MercadoPagoModule, WhatsAppModule, NotificationsModule],
   controllers: [PaymentsController, PaymentsAdminController, PaymentsDiagnosticsController],
   providers: [PaymentsService],
+  // Exported for the ops console, which reads the poller's in-memory health across every
+  // club (the per-club endpoint only ever answers for the caller's own tenant).
+  exports: [PaymentsService],
 })
 export class PaymentsModule {}

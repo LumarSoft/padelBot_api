@@ -64,7 +64,8 @@ export class WhatsAppController {
     const rawBody = (req as any).rawBody as Buffer | undefined
     const signature = req.headers['x-hub-signature-256'] as string
 
-    if (rawBody && !this.whatsappService.verifySignature(rawBody, signature)) {
+    // Fail closed: a missing rawBody must never be treated as "skip verification".
+    if (!rawBody || !this.whatsappService.verifySignature(rawBody, signature)) {
       throw new ForbiddenException('Invalid webhook signature')
     }
 

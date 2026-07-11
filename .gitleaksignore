@@ -1,0 +1,5 @@
+# Known false positives, verified manually — example/placeholder values in API docs,
+# not real credentials. Re-verify before adding new entries here.
+05ca7890e8408d4d0ced1e2154eb7b656abff03f:docs/endpoints.md:generic-api-key:176
+05ca7890e8408d4d0ced1e2154eb7b656abff03f:docs/endpoints.md:generic-api-key:202
+56a5dcb752a0faaf498c4b07304ee9a15d08a955:docs/endpoints.md:generic-api-key:1606

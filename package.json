@@ -21,7 +21,9 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "bot:reset": "ts-node scripts/reset-bot-session.ts",
     "subscription": "ts-node scripts/set-subscription.ts",
-    "players:backfill": "ts-node scripts/backfill-players.ts"
+    "ops:admin": "ts-node scripts/create-platform-admin.ts",
+    "players:backfill": "ts-node scripts/backfill-players.ts",
+    "prepare": "husky"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
@@ -61,6 +63,7 @@
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-prettier": "^5.2.2",
     "globals": "^17.0.0",
+    "husky": "^9.1.7",
     "jest": "^30.0.0",
     "prettier": "^3.4.2",
     "prisma": "^7.8.0",
