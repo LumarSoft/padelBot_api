@@ -185,7 +185,11 @@ export class LlmService {
     if (bands.length === 0) {
       // Proactively offer the nearest days with availability instead of dead-ending.
       const suggestions = await this.availability.nextAvailableDates(clubId, args.date, { excludeDateKey: args.date })
-      return { reply: noAvailabilityWithSuggestions(args.date, suggestions), state: BotState.BOOK_DATE, ctx }
+      return {
+        reply: noAvailabilityWithSuggestions(args.date, suggestions),
+        state: BotState.BOOK_DATE,
+        ctx: { ...ctx, waitlistOfferDate: args.date },
+      }
     }
 
     const needsName = !ctx.playerName

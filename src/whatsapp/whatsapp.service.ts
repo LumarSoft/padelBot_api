@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
+import { schedulerEnabled } from '../common/scheduling'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
@@ -19,8 +20,26 @@ export class WhatsAppService {
     return process.env.WHATSAPP_TOKEN ?? process.env.META_ACCESS_TOKEN ?? ''
   }
 
-  async sendText(phoneNumberId: string, to: string, body: string): Promise<void> {
-    await this.postMessage(phoneNumberId, to, { type: 'text', text: { body } })
+  async sendText(phoneNumberId: string, to: string, body: string): Promise<boolean> {
+    return this.postMessage(phoneNumberId, to, { type: 'text', text: { body } })
+  }
+
+  /**
+   * Sends a critical text (payment confirmed/expired, etc.) retrying with backoff when
+   * Graph delivery fails. A confirmation the player never receives means "the money
+   * arrived and nobody told me" — worth a few retries before giving up. Returns whether
+   * the message was ultimately delivered so the caller can log/alert on total failure.
+   */
+  async sendTextWithRetry(phoneNumberId: string, to: string, body: string, attempts = 3): Promise<boolean> {
+    const delaysMs = [1_000, 5_000, 15_000]
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (await this.sendText(phoneNumberId, to, body)) return true
+      if (attempt < attempts - 1) {
+        await new Promise(resolve => setTimeout(resolve, delaysMs[Math.min(attempt, delaysMs.length - 1)]))
+      }
+    }
+    this.logger.error(`WA message to ${to} NOT delivered after ${attempts} attempts`)
+    return false
   }
 
   /**
@@ -29,13 +48,12 @@ export class WhatsAppService {
    * next inbound message, which the bot feeds straight into the FSM. Falls back to plain
    * text when the payload carries no options.
    */
-  async sendInteractive(phoneNumberId: string, to: string, body: string, interactive: Interactive): Promise<void> {
+  async sendInteractive(phoneNumberId: string, to: string, body: string, interactive: Interactive): Promise<boolean> {
     const payload = buildInteractivePayload(body, interactive)
     if (!payload) {
-      await this.sendText(phoneNumberId, to, body)
-      return
+      return this.sendText(phoneNumberId, to, body)
     }
-    await this.postMessage(phoneNumberId, to, payload)
+    return this.postMessage(phoneNumberId, to, payload)
   }
 
   /**
@@ -51,8 +69,8 @@ export class WhatsAppService {
     templateName: string,
     languageCode: string,
     bodyParams: string[],
-  ): Promise<void> {
-    await this.postMessage(phoneNumberId, to, {
+  ): Promise<boolean> {
+    return this.postMessage(phoneNumberId, to, {
       type: 'template',
       template: {
         name: templateName,
@@ -67,8 +85,11 @@ export class WhatsAppService {
     })
   }
 
-  /** Posts a message object to the Graph API, normalizing the recipient and logging failures. */
-  private async postMessage(phoneNumberId: string, to: string, message: Record<string, unknown>): Promise<void> {
+  /**
+   * Posts a message object to the Graph API, normalizing the recipient and logging
+   * failures. Returns whether Graph accepted the message (used by the retry path).
+   */
+  private async postMessage(phoneNumberId: string, to: string, message: Record<string, unknown>): Promise<boolean> {
     const url = `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}/messages`
     // Argentina mobile wa_ids arrive as 549XXXXXXXXXX but the API requires 54XXXXXXXXXX
     const recipient = to.startsWith('549') && to.length === 13 ? '54' + to.slice(3) : to
@@ -83,24 +104,25 @@ export class WhatsAppService {
       })
       if (response.ok) {
         this.logger.log(`✅ WA enviado a ${recipient}: ${describeOutbound(message)}`)
+        return true
       }
-      if (!response.ok) {
-        const text = await response.text()
-        // Code 190 / 401 = the Meta access token expired or was revoked. The bot still
-        // ran (reply saved in the platform) but WhatsApp delivery failed — surface a
-        // clear, actionable line instead of a raw Graph dump.
-        if (response.status === 401 || text.includes('"code":190')) {
-          this.logger.error(
-            'WhatsApp token expired/invalid (Graph 401/190). The bot processed the message but ' +
-              'could NOT deliver it on WhatsApp. Generate a permanent System User token in Meta and ' +
-              'set WHATSAPP_TOKEN. Temporary tokens expire every ~24h.',
-          )
-        } else {
-          this.logger.error(`Graph API error ${response.status}: ${text}`)
-        }
+      const text = await response.text()
+      // Code 190 / 401 = the Meta access token expired or was revoked. The bot still
+      // ran (reply saved in the platform) but WhatsApp delivery failed — surface a
+      // clear, actionable line instead of a raw Graph dump.
+      if (response.status === 401 || text.includes('"code":190')) {
+        this.logger.error(
+          'WhatsApp token expired/invalid (Graph 401/190). The bot processed the message but ' +
+            'could NOT deliver it on WhatsApp. Generate a permanent System User token in Meta and ' +
+            'set WHATSAPP_TOKEN. Temporary tokens expire every ~24h.',
+        )
+      } else {
+        this.logger.error(`Graph API error ${response.status}: ${text}`)
       }
+      return false
     } catch (err) {
       this.logger.error('Failed to reach Graph API', err)
+      return false
     }
   }
 
@@ -124,6 +146,7 @@ export class WhatsAppService {
   /** Prunes processed-message dedup rows older than a day (Meta retries within minutes). */
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
   async pruneProcessedMessages(): Promise<void> {
+    if (!schedulerEnabled()) return
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000)
     try {
       await this.prisma.processedWebhookMessage.deleteMany({ where: { createdAt: { lt: cutoff } } })

@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
-import { bandDateTimes, generateBands, findBandInSchedule } from '../availability/lib/schedule'
+import { bandDateTimes, bandsForDate, courtScheduleSelect, findBandInSchedule } from '../availability/lib/schedule'
 import { shiftDateKey } from '../availability/lib/datetime'
 import { CreateSlotDto } from './dto/create-slot.dto'
 import { UpdateSlotDto } from './dto/update-slot.dto'
@@ -48,7 +48,7 @@ export class SlotsService {
       select: slotSelect,
     })
     if (!slot) {
-      throw new NotFoundException(`Slot ${id} not found`)
+      throw new NotFoundException(`Turno no encontrado`)
     }
     return slot
   }
@@ -75,7 +75,7 @@ export class SlotsService {
       // The unique index on (courtId, startsAt) already holds a slot for this
       // court and time — likely created concurrently by the bot.
       if (isUniqueConstraintError(error)) {
-        throw new ConflictException('A slot already exists for this court at this time')
+        throw new ConflictException('Ya existe un turno para esta cancha en ese horario')
       }
       throw error
     }
@@ -123,20 +123,20 @@ export class SlotsService {
     const courtIds = [...new Set(dto.courtIds)]
     const courts = await this.prisma.court.findMany({
       where: { clubId, id: { in: courtIds } },
-      select: { id: true, priceCents: true, openTime: true, closeTime: true },
+      select: { id: true, priceCents: true, ...courtScheduleSelect },
     })
     if (courts.length !== courtIds.length) {
-      throw new BadRequestException('One or more courts do not belong to this club')
+      throw new BadRequestException('Una o más canchas no pertenecen a este complejo')
     }
     const priceByCourt = new Map(courts.map(c => [c.id, c.priceCents]))
-    const bandsByCourt = new Map(courts.map(c => [c.id, generateBands(c.openTime, c.closeTime)]))
 
     const dates = this.enumerateDates(dto.fromDate, dto.toDate)
 
     const targets: { courtId: string; startsAt: Date; endsAt: Date }[] = []
     for (const date of dates) {
-      for (const courtId of courtIds) {
-        const courtBands = bandsByCourt.get(courtId)!
+      for (const court of courts) {
+        // Bands depend on the date's weekday (per-day opening hours).
+        const courtBands = bandsForDate(court, date)
         const starts =
           dto.slotStarts && dto.slotStarts.length > 0
             ? dto.slotStarts.filter(s => courtBands.some(b => b.start === s))
@@ -145,7 +145,7 @@ export class SlotsService {
           const band = findBandInSchedule(courtBands, start)
           if (!band) continue
           const { startsAt, endsAt } = bandDateTimes(date, band)
-          targets.push({ courtId, startsAt, endsAt })
+          targets.push({ courtId: court.id, startsAt, endsAt })
         }
       }
     }
@@ -204,10 +204,10 @@ export class SlotsService {
     const end = to.slice(0, 10)
     // Validate as real calendar dates without pulling in the server timezone.
     if (Number.isNaN(Date.parse(`${start}T00:00:00Z`)) || Number.isNaN(Date.parse(`${end}T00:00:00Z`))) {
-      throw new BadRequestException('Invalid date range')
+      throw new BadRequestException('Rango de fechas inválido')
     }
     if (end < start) {
-      throw new BadRequestException('toDate must be on or after fromDate')
+      throw new BadRequestException('La fecha hasta debe ser igual o posterior a la fecha desde')
     }
     const dates: string[] = []
     let cursor = start
@@ -220,7 +220,7 @@ export class SlotsService {
 
   private assertValidRange(startsAt: Date, endsAt: Date): void {
     if (endsAt <= startsAt) {
-      throw new BadRequestException('endsAt must be after startsAt')
+      throw new BadRequestException('La hora de fin debe ser posterior a la de inicio')
     }
   }
 
@@ -230,7 +230,7 @@ export class SlotsService {
       select: { id: true },
     })
     if (!court) {
-      throw new BadRequestException(`Court ${courtId} not found for this club`)
+      throw new BadRequestException(`Cancha no encontrada en este complejo`)
     }
   }
 }

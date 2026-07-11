@@ -3,9 +3,10 @@ import { BookingsController } from './bookings.controller'
 import { BookingsService } from './bookings.service'
 import { EventsModule } from '../events/events.module'
 import { NotificationsModule } from '../notifications/notifications.module'
+import { PlayersModule } from '../players/players.module'
 
 @Module({
-  imports: [EventsModule, NotificationsModule],
+  imports: [EventsModule, NotificationsModule, PlayersModule],
   controllers: [BookingsController],
   providers: [BookingsService],
   exports: [BookingsService],

@@ -22,6 +22,15 @@ export class PaymentsDiagnosticsController {
     return this.paymentsService.getMoneyInDiagnostics(user.clubId, query.minutes ?? 60)
   }
 
+  /**
+   * Reconciliation health for the panel's "reconciliación activa" indicator. Open to
+   * STAFF too (it exposes no payer data — just liveness + counters for their club).
+   */
+  @Get('health')
+  getHealth(@CurrentUser() user: AuthenticatedUser) {
+    return this.paymentsService.getHealth(user.clubId)
+  }
+
   private assertOwner(user: AuthenticatedUser): void {
     if (user.role !== 'owner') {
       throw new ForbiddenException('Only the club owner can read payment diagnostics')

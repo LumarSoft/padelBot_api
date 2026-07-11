@@ -21,6 +21,8 @@ export interface SlotOption {
   price: number
   /** Present only when a real Slot row already exists (AVAILABLE) for this band. */
   slotId?: string
+  /** Minutes since the grid day's midnight — keeps past-midnight bands sorted last. */
+  sortMinutes?: number
 }
 
 /** One court that is free at a given band, with its price for that band. */
@@ -37,6 +39,8 @@ export interface BandOption {
   bandStart: string
   label: string
   courts: BandCourt[]
+  /** Minutes since the grid day's midnight — keeps past-midnight bands sorted last. */
+  sortMinutes?: number
 }
 
 export interface HistoryMessage {
@@ -63,6 +67,10 @@ export interface SessionContext {
   selectedBandStart?: string
   selectedSlotLabel?: string
   selectedSlotPrice?: number
+  /** Set when the bot offered the waitlist for a full day — "avisame" joins it. */
+  waitlistOfferDate?: string
+  /** The player's habitual slot, stamped on the welcome so "repetir" re-books it. */
+  habit?: { weekday: number; bandStart: string; courtId: string; courtName: string }
 }
 
 export interface HandlerResult {

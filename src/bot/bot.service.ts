@@ -1,8 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { BookingsService } from '../bookings/bookings.service'
 import { AvailabilityService } from '../availability/availability.service'
-import { todayKey } from '../availability/lib/datetime'
+import { dayLabelFromKey, shiftDateKey, todayKey, wallTimeToUtc, weekdayOfKey } from '../availability/lib/datetime'
 import { LlmService } from '../llm/llm.service'
 import { ConversationSessionService, keepName } from './conversation-session.service'
 import { matchCourt, matchSlot } from './lib/match'
@@ -14,6 +14,9 @@ import {
   resolveBand,
   resolveCourtAtBand,
 } from './lib/booking-flow'
+import { subscriptionSelect, subscriptionState } from '../clubs/lib/subscription'
+import { WaitlistService } from '../waitlist/waitlist.service'
+import { PlayersService } from '../players/players.service'
 import { WhatsAppMediaService } from '../whatsapp/whatsapp-media.service'
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import { BotReply, BotState, HandlerResult, InboundMedia, SessionContext } from './types'
@@ -48,6 +51,11 @@ import {
 /** Inbound messages are truncated to this length before processing (cost / abuse guard). */
 const MAX_MESSAGE_LENGTH = 1000
 
+const WEEKDAY_LABELS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado']
+
+/** "¿Cómo llegar?" in its usual forms — answered from Club.locationInfo. */
+const LOCATION_QUESTION = /c[oó]mo lleg|direcci[oó]n|ubicaci[oó]n|d[oó]nde (est[aá]n|queda)/i
+
 @Injectable()
 export class BotService {
   private readonly logger = new Logger(BotService.name)
@@ -60,6 +68,8 @@ export class BotService {
     private readonly llmService: LlmService,
     private readonly media: WhatsAppMediaService,
     private readonly receiptStorage: ReceiptStorageService,
+    private readonly waitlist: WaitlistService,
+    private readonly players: PlayersService,
   ) {}
 
   async handleMessage(waId: string, clubId: string, body: string): Promise<BotReply | null> {
@@ -74,6 +84,11 @@ export class BotService {
   }
 
   private async runMessage(waId: string, clubId: string, body: string): Promise<BotReply | null> {
+    // Soft subscription guard: a club whose trial/payment lapsed past the grace window
+    // gets a polite fallback instead of the booking flow (never a silent dead line).
+    const blockedReply = await this.subscriptionBlockedReply(clubId)
+    if (blockedReply) return blockedReply
+
     const session = await this.sessionService.getOrCreate(waId, clubId)
     // Cap length so a pathologically long message can't bloat the LLM prompt / cost.
     const msg = body.trim().slice(0, MAX_MESSAGE_LENGTH)
@@ -86,6 +101,20 @@ export class BotService {
       await this.sessionService.reset(session.id)
       this.logger.log(`♻️  ${waId}: chat reseteado (/reset)`)
       return { text: '🧹 Listo, borré la conversación. Empezamos de cero — escribime *hola* cuando quieras. 🎾' }
+    }
+
+    // "avisame" right after a no-availability reply → join that day's waitlist.
+    const sessionCtx = session.context
+    if (sessionCtx.waitlistOfferDate && /\bavis(a|á)me\b|\bavisarme\b/i.test(msg)) {
+      const dateKey = sessionCtx.waitlistOfferDate
+      await this.waitlist.join(clubId, waId, dateKey, sessionCtx.playerName)
+      const reply =
+        `🔔 ¡Listo! Si se libera un turno el *${dayLabelFromKey(dateKey)}* te aviso al toque por acá. ` +
+        `Mientras tanto podés reservar otro día cuando quieras. 🎾`
+      await this.sessionService.saveMessage(session.id, 'USER', msg)
+      await this.sessionService.saveMessage(session.id, 'BOT', reply)
+      await this.sessionService.update(session.id, BotState.MENU, { ...keepName(sessionCtx) })
+      return { text: reply }
     }
 
     // Always persist the incoming message for admin visibility.
@@ -103,9 +132,10 @@ export class BotService {
     // "Ya transferí" / "te mando el comprobante" after booking: acknowledge and let the
     // poller confirm the real money — never from a claim.
     const result =
-      isPaymentClaim(msg) && isMenuState
+      (await this.repeatFlowResult(msg, state, session.context, clubId, waId)) ??
+      (isPaymentClaim(msg) && isMenuState
         ? await this.paymentClaimReply(clubId, waId, session.context)
-        : await this.dispatch(state, msg, session.context, clubId, waId)
+        : await this.dispatch(state, msg, session.context, clubId, waId))
 
     // Keep last 8 messages (4 turns) so the LLM has short-term conversational context.
     const prevHistory = session.context.history ?? []
@@ -140,6 +170,9 @@ export class BotService {
   }
 
   private async runAttachment(waId: string, clubId: string, media: InboundMedia | null): Promise<BotReply | null> {
+    const blockedReply = await this.subscriptionBlockedReply(clubId)
+    if (blockedReply) return blockedReply
+
     const session = await this.sessionService.getOrCreate(waId, clubId)
     this.logger.log(`📥 IN  ${waId}: [imagen/comprobante ${media?.mimeType ?? 'desconocido'}]`)
     await this.sessionService.saveMessage(session.id, 'USER', '[Imagen / comprobante recibido]')
@@ -207,6 +240,123 @@ export class BotService {
       select: { paymentVerificationMode: true },
     })
     return club?.paymentVerificationMode ?? 'AUTO'
+  }
+
+  /**
+   * "Lo de siempre" for regulars, in two moves:
+   * 1. A greeting at the menu, when the player has a habitual slot (same weekday +
+   *    time + court repeated >=2 times), gets the welcome plus a one-line shortcut.
+   * 2. Answering "repetir" (or "lo de siempre") jumps straight to the CONFIRM step of
+   *    the next occurrence — if it's still free — so a regular books in 3 taps.
+   * Returns null when this flow doesn't apply (normal dispatch continues).
+   */
+  private async repeatFlowResult(
+    msg: string,
+    state: BotState,
+    ctx: SessionContext,
+    clubId: string,
+    waId: string,
+  ): Promise<HandlerResult | null> {
+    const menuLike = state === BotState.MENU || state === BotState.IDLE
+
+    // "Cómo llegar" — answered from the club's own copy at any point of the chat.
+    if (LOCATION_QUESTION.test(msg)) {
+      const copy = await this.clubCopy(clubId)
+      const reply = copy.locationInfo
+        ? `📍 *Cómo llegar:*\n${copy.locationInfo}`
+        : `📍 No tengo la dirección cargada acá, pero el club te la pasa al toque si les escribís directo. 🙏`
+      return { reply, state, ctx }
+    }
+
+    // (1) Greeting -> welcome, plus the club's own line and the regular's shortcut.
+    if (menuLike && isGreeting(msg)) {
+      const [habit, copy] = await Promise.all([this.players.habitualBooking(clubId, waId), this.clubCopy(clubId)])
+      if (!habit && !copy.botWelcomeExtra) return null
+      const extra = copy.botWelcomeExtra ? `\n\n${copy.botWelcomeExtra}` : ''
+      const hint = habit
+        ? `\n\n💡 ¿Repetís lo de siempre? *${WEEKDAY_LABELS[habit.weekday]} ${habit.bandStart}* en ` +
+          `*${habit.courtName}* — respondé *repetir* y te lo reservo.`
+        : ''
+      return {
+        reply: welcome(ctx.playerName) + extra + hint,
+        state: BotState.MENU,
+        ctx: habit ? { ...ctx, habit } : ctx,
+      }
+    }
+
+    // (2) "repetir" -> seed the normal confirm step for the next free occurrence.
+    if (!menuLike || !/\brepetir\b|\blo de siempre\b/i.test(msg)) return null
+    const habit = ctx.habit ?? (await this.players.habitualBooking(clubId, waId))
+    if (!habit) return null
+
+    const dateKey = this.nextOccurrenceKey(habit.weekday, habit.bandStart)
+    const options = await this.availability.slotsForDate(clubId, dateKey, habit.courtId)
+    const slot = options.find(o => o.bandStart === habit.bandStart)
+    if (!slot) {
+      return {
+        reply:
+          `😕 Tu turno de siempre (*${dayLabelFromKey(dateKey)} ${habit.bandStart}* en *${habit.courtName}*) ` +
+          `ya está tomado esta vez. Decime otra fecha y te busco lugar. 🎾`,
+        state: BotState.BOOK_DATE,
+        ctx: keepName(ctx),
+      }
+    }
+
+    const seeded: SessionContext = {
+      ...keepName(ctx),
+      selectedDate: dateKey,
+      selectedCourtId: habit.courtId,
+      selectedCourtName: habit.courtName,
+      selectedBandStart: slot.bandStart,
+      selectedSlotId: slot.slotId,
+      selectedSlotLabel: slot.label,
+      selectedSlotPrice: slot.price,
+    }
+    // Without a name the confirm step can't complete — the flow asks it first.
+    if (!seeded.playerName) {
+      return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: seeded }
+    }
+    return { reply: confirmBooking(seeded), state: BotState.BOOK_CONFIRM, ctx: seeded }
+  }
+
+  /** The club's configurable bot copy (welcome extra + cómo llegar). */
+  private async clubCopy(clubId: string): Promise<{ botWelcomeExtra: string | null; locationInfo: string | null }> {
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: { botWelcomeExtra: true, locationInfo: true },
+    })
+    return { botWelcomeExtra: club?.botWelcomeExtra ?? null, locationInfo: club?.locationInfo ?? null }
+  }
+
+  /** Next club-local date (today included if the start is still ahead) for a weekday+time. */
+  private nextOccurrenceKey(weekday: number, bandStart: string): string {
+    const today = todayKey()
+    const daysUntil = (weekday - weekdayOfKey(today) + 7) % 7
+    const candidate = shiftDateKey(today, daysUntil)
+    if (daysUntil === 0 && wallTimeToUtc(candidate, bandStart) <= new Date()) {
+      return shiftDateKey(candidate, 7)
+    }
+    return candidate
+  }
+
+  /**
+   * Returns the fallback reply when the club's PadelBot subscription is blocked
+   * (cancelled, or trial/payment lapsed beyond the grace window), else null.
+   * The player is redirected to the club itself — the club's relationship with
+   * its players must survive our billing.
+   */
+  private async subscriptionBlockedReply(clubId: string): Promise<BotReply | null> {
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: { name: true, ...subscriptionSelect },
+    })
+    if (!club || subscriptionState(club).botAllowed) return null
+    this.logger.warn(`Bot blocked for club ${clubId} (subscription ${club.subscriptionStatus})`)
+    return {
+      text:
+        `😕 Las reservas por WhatsApp de *${club.name}* están deshabilitadas por el momento. ` +
+        `Comunicate directamente con el club para reservar. ¡Gracias!`,
+    }
   }
 
   /** Builds the "we're waiting for your transfer" reply, keeping the FSM state put. */
@@ -330,7 +480,11 @@ export class BotService {
       // Don't dead-end: offer the nearest days that do have availability and
       // stay in BOOK_DATE so the player can just reply with one of them.
       const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
-      return { reply: noAvailabilityWithSuggestions(date, suggestions), state: BotState.BOOK_DATE, ctx }
+      return {
+        reply: noAvailabilityWithSuggestions(date, suggestions),
+        state: BotState.BOOK_DATE,
+        ctx: { ...ctx, waitlistOfferDate: date },
+      }
     }
 
     // Need the name first; remember the date so we don't re-ask it.
@@ -385,7 +539,7 @@ export class BotService {
       return {
         reply: noAvailabilityWithSuggestions(nextCtx.selectedDate!, suggestions),
         state: BotState.BOOK_DATE,
-        ctx: nextCtx,
+        ctx: { ...nextCtx, waitlistOfferDate: nextCtx.selectedDate },
       }
     }
     return availabilityResult(nextCtx, bands, nextCtx.selectedDate!)
@@ -418,7 +572,11 @@ export class BotService {
       const suggestions = await this.availability.nextAvailableDates(clubId, ctx.selectedDate!, {
         excludeDateKey: ctx.selectedDate,
       })
-      return { reply: noAvailabilityWithSuggestions(ctx.selectedDate!, suggestions), state: BotState.BOOK_DATE, ctx }
+      return {
+        reply: noAvailabilityWithSuggestions(ctx.selectedDate!, suggestions),
+        state: BotState.BOOK_DATE,
+        ctx: { ...ctx, waitlistOfferDate: ctx.selectedDate },
+      }
     }
     return availabilityResult(ctx, bands, ctx.selectedDate!)
   }
@@ -548,7 +706,12 @@ export class BotService {
       paymentVerificationMode: 'AUTO' | 'RECEIPT'
     },
   ): Promise<HandlerResult> {
-    let pendingBooking: { id: string; transferAmountCents: number }
+    let pendingBooking: {
+      id: string
+      transferAmountCents: number
+      creditAppliedCents: number
+      confirmedByCredit: boolean
+    }
     try {
       if (ctx.selectedSlotId) {
         pendingBooking = await this.bookingsService.bookPending(clubId, {
@@ -567,8 +730,28 @@ export class BotService {
           playerDni: ctx.playerDni,
         })
       }
-    } catch {
+    } catch (err) {
+      // A blocked player gets the club's message, not the generic "slot taken".
+      if (err instanceof ForbiddenException) {
+        return {
+          reply: '😕 No puedo tomar reservas para este número por acá. Comunicate directamente con el club. 🙏',
+          state: BotState.MENU,
+          ctx: keepName(ctx),
+        }
+      }
       return { reply: BOOKING_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    // Credit covered the whole deposit → the booking is already CONFIRMED, no transfer needed.
+    if (pendingBooking.confirmedByCredit) {
+      const credit = (pendingBooking.creditAppliedCents / 100).toLocaleString('es-AR')
+      return {
+        reply:
+          `✅ *¡Reserva confirmada!*\n\n` +
+          `Usamos tu crédito a favor de $${credit} para cubrir la seña — no tenés que transferir nada. ¡Nos vemos en la cancha! 🎾`,
+        state: BotState.MENU,
+        ctx: keepName(ctx),
+      }
     }
 
     return {

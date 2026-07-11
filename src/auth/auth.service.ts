@@ -26,6 +26,7 @@ export class AuthService {
         password: true,
         name: true,
         role: true,
+        isActive: true,
         clubId: true,
         club: { select: { name: true } },
       },
@@ -34,12 +35,18 @@ export class AuthService {
     // Same generic error for "no user" and "wrong password" to avoid leaking
     // which emails exist.
     if (!user) {
-      throw new UnauthorizedException('Invalid credentials')
+      throw new UnauthorizedException('Credenciales incorrectas')
     }
 
     const passwordMatches = await bcrypt.compare(dto.password, user.password)
     if (!passwordMatches) {
-      throw new UnauthorizedException('Invalid credentials')
+      throw new UnauthorizedException('Credenciales incorrectas')
+    }
+
+    // Checked AFTER the password so a probe can't distinguish "wrong password"
+    // from "deactivated account" without knowing the credentials.
+    if (!user.isActive) {
+      throw new UnauthorizedException('Tu usuario fue desactivado. Hablá con el dueño del club.')
     }
 
     const authUser: AuthenticatedUser = {

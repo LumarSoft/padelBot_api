@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE `Club` ADD COLUMN `currentPeriodEnd` DATETIME(3) NULL,
+    ADD COLUMN `plan` VARCHAR(191) NOT NULL DEFAULT 'base',
+    ADD COLUMN `subscriptionStatus` ENUM('TRIAL', 'ACTIVE', 'PAST_DUE', 'CANCELLED') NOT NULL DEFAULT 'TRIAL',
+    ADD COLUMN `trialEndsAt` DATETIME(3) NULL;

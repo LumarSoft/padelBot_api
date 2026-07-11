@@ -8,6 +8,10 @@ import { PrismaModule } from './prisma/prisma.module'
 import { CryptoModule } from './common/crypto/crypto.module'
 import { StorageModule } from './storage/storage.module'
 import { AuthModule } from './auth/auth.module'
+import { UsersModule } from './users/users.module'
+import { OnboardingModule } from './onboarding/onboarding.module'
+import { PlayersModule } from './players/players.module'
+import { WaitlistModule } from './waitlist/waitlist.module'
 import { CourtsModule } from './courts/courts.module'
 import { SlotsModule } from './slots/slots.module'
 import { BookingsModule } from './bookings/bookings.module'
@@ -36,6 +40,10 @@ import { BookingRemindersModule } from './booking-reminders/booking-reminders.mo
     CryptoModule,
     StorageModule,
     AuthModule,
+    UsersModule,
+    OnboardingModule,
+    PlayersModule,
+    WaitlistModule,
     CourtsModule,
     SlotsModule,
     BookingsModule,

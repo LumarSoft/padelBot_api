@@ -27,6 +27,12 @@ export class ClubsController {
     return this.clubsService.getProfile(user.clubId)
   }
 
+  /** Subscription state for the panel banner (trial days left / past-due warning). */
+  @Get('me/subscription')
+  getSubscription(@CurrentUser() user: AuthenticatedUser) {
+    return this.clubsService.getSubscriptionState(user.clubId)
+  }
+
   @Patch('me/profile')
   updateProfile(@CurrentUser() user: AuthenticatedUser, @Body() dto: UpdateClubProfileDto) {
     this.assertOwner(user)

@@ -3,7 +3,13 @@ import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { shiftDateKey, todayKey, toDateKey, wallTimeToUtc, weekdayOfKey } from '../availability/lib/datetime'
-import { findBandInSchedule, generateBands } from '../availability/lib/schedule'
+import {
+  bandDateTimes,
+  bandsForWeekday,
+  courtScheduleSelect,
+  findBandInSchedule,
+  ScheduleBand,
+} from '../availability/lib/schedule'
 import { CreateRecurringBookingDto } from './dto/create-recurring-booking.dto'
 import { UpdateRecurringBookingDto } from './dto/update-recurring-booking.dto'
 
@@ -54,7 +60,8 @@ export class RecurringBookingsService {
 
   async create(clubId: string, createdByUserId: number, dto: CreateRecurringBookingDto) {
     const court = await this.assertCourtBelongsToClub(clubId, dto.courtId)
-    this.assertValidSlotPair(generateBands(court.openTime, court.closeTime), dto.slotStart, dto.slotEnd)
+    // Validate against the schedule of the chosen weekday (opening hours can differ per day).
+    const band = this.assertValidSlotPair(bandsForWeekday(court, dto.dayOfWeek), dto.slotStart, dto.slotEnd)
 
     const rb = await this.prisma.recurringBooking.create({
       data: {
@@ -79,12 +86,11 @@ export class RecurringBookingsService {
       {
         courtId: dto.courtId,
         dayOfWeek: dto.dayOfWeek,
-        slotStart: dto.slotStart,
-        slotEnd: dto.slotEnd,
         playerName: dto.playerName,
         playerPhone: dto.playerPhone,
         priceCents: dto.priceCents,
       },
+      band,
       dto.untilDate,
     )
 
@@ -107,7 +113,12 @@ export class RecurringBookingsService {
 
   async applyToExistingSlots(clubId: string, id: string) {
     const rb = await this.findOne(clubId, id)
-    if (!rb.isActive) throw new BadRequestException('Recurring booking is inactive')
+    if (!rb.isActive) throw new BadRequestException('El turno fijo está inactivo')
+
+    // The court's schedule may have changed since the recurring was created — re-derive
+    // the band from today's config and fail clearly if the time no longer exists.
+    const court = await this.assertCourtBelongsToClub(clubId, rb.courtId)
+    const band = this.assertValidSlotPair(bandsForWeekday(court, rb.dayOfWeek), rb.slotStart, rb.slotEnd)
 
     const applied = await this.applyForWeeksAhead(
       clubId,
@@ -115,12 +126,11 @@ export class RecurringBookingsService {
       {
         courtId: rb.courtId,
         dayOfWeek: rb.dayOfWeek,
-        slotStart: rb.slotStart,
-        slotEnd: rb.slotEnd,
         playerName: rb.playerName,
         playerPhone: rb.playerPhone,
         priceCents: rb.priceCents,
       },
+      band,
       rb.untilDate ? toDateKey(rb.untilDate) : undefined,
     )
 
@@ -139,13 +149,11 @@ export class RecurringBookingsService {
   private async applyForWeeksAhead(
     clubId: string,
     recurringBookingId: string,
-    dto: Pick<
-      CreateRecurringBookingDto,
-      'courtId' | 'dayOfWeek' | 'slotStart' | 'slotEnd' | 'playerName' | 'playerPhone' | 'priceCents'
-    >,
+    dto: Pick<CreateRecurringBookingDto, 'courtId' | 'dayOfWeek' | 'playerName' | 'playerPhone' | 'priceCents'>,
+    band: ScheduleBand,
     untilKey?: string,
   ): Promise<number> {
-    const occurrences = this.nextOccurrences(dto.dayOfWeek, dto.slotStart, dto.slotEnd, untilKey)
+    const occurrences = this.nextOccurrences(dto.dayOfWeek, band, untilKey)
     if (occurrences.length === 0) return 0
 
     const minStart = occurrences[0].startsAt
@@ -163,11 +171,25 @@ export class RecurringBookingsService {
 
     const existingByKey = new Map(existing.map(s => [s.startsAt.toISOString(), s]))
 
+    // An occurrence whose booking was CANCELLED was deliberately skipped ("el fijo no
+    // viene ESTE martes") — never re-book it on the next apply/weekly sweep.
+    const skipped = await this.prisma.booking.findMany({
+      where: {
+        clubId,
+        recurringBookingId,
+        status: 'CANCELLED',
+        slot: { startsAt: { gte: minStart, lte: maxStart } },
+      },
+      select: { slot: { select: { startsAt: true } } },
+    })
+    const skippedKeys = new Set(skipped.map(b => b.slot.startsAt.toISOString()))
+
     const toCreate: Prisma.SlotCreateManyInput[] = []
     const toBook: string[] = [] // IDs of AVAILABLE slots to flip to BOOKED
 
     for (const occ of occurrences) {
       const key = occ.startsAt.toISOString()
+      if (skippedKeys.has(key)) continue
       const found = existingByKey.get(key)
 
       if (!found) {
@@ -198,7 +220,7 @@ export class RecurringBookingsService {
         // bot) after our findMany. The unique index on (courtId, startsAt) rolls
         // the batch back — surface a retryable conflict instead of a raw 500.
         if (isUniqueConstraintError(error)) {
-          throw new ConflictException('A conflicting slot was created concurrently; please retry')
+          throw new ConflictException('Conflicto de turnos simultáneo, volvé a intentar')
         }
         throw error
       }
@@ -246,8 +268,7 @@ export class RecurringBookingsService {
    */
   private nextOccurrences(
     targetDay: number,
-    slotStart: string,
-    slotEnd: string,
+    band: ScheduleBand,
     untilKey?: string,
   ): { startsAt: Date; endsAt: Date }[] {
     const results: { startsAt: Date; endsAt: Date }[] = []
@@ -263,29 +284,26 @@ export class RecurringBookingsService {
       // ISO date keys compare correctly as strings — stop once we pass the end date.
       if (untilKey && cursorKey > untilKey) break
 
-      const startsAt = wallTimeToUtc(cursorKey, slotStart)
-      // The 22:30–00:00 band ends at midnight of the following day.
-      const endsAt =
-        slotEnd === '00:00' ? wallTimeToUtc(shiftDateKey(cursorKey, 1), '00:00') : wallTimeToUtc(cursorKey, slotEnd)
-
-      results.push({ startsAt, endsAt })
+      // The band carries its own day offsets (a late band can start or end past midnight).
+      results.push(bandDateTimes(cursorKey, band))
       cursorKey = shiftDateKey(cursorKey, 7)
     }
 
     return results
   }
 
-  private assertValidSlotPair(bands: ReturnType<typeof generateBands>, slotStart: string, slotEnd: string): void {
+  private assertValidSlotPair(bands: ScheduleBand[], slotStart: string, slotEnd: string): ScheduleBand {
     const band = findBandInSchedule(bands, slotStart)
     if (!band || band.end !== slotEnd) {
-      throw new BadRequestException(`Invalid slot pair: ${slotStart} – ${slotEnd}`)
+      throw new BadRequestException(`El horario ${slotStart} – ${slotEnd} no existe en la grilla de esa cancha ese día`)
     }
+    return band
   }
 
   private async assertCourtBelongsToClub(clubId: string, courtId: string) {
     const court = await this.prisma.court.findFirst({
       where: { id: courtId, clubId },
-      select: { id: true, openTime: true, closeTime: true },
+      select: { id: true, ...courtScheduleSelect },
     })
     if (!court) {
       throw new BadRequestException(`Court ${courtId} not found for this club`)

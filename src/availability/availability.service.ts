@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { BandOption, SlotOption } from '../bot/types'
-import { dayRangeUtc, formatTimeRange, shiftDateKey, toDateKey } from './lib/datetime'
-import { bandDateTimes, generateBands } from './lib/schedule'
+import { dayRangeUtc, formatTimeRange, shiftDateKey } from './lib/datetime'
+import { bandDateTimes, bandsForDate, bandSortMinutes, courtScheduleSelect } from './lib/schedule'
 import { resolveBandPriceCents } from './lib/pricing'
 
 /** A date that has at least one bookable band, with how many are free. */
@@ -40,12 +40,18 @@ export class AvailabilityService {
     for (const court of courts) {
       const slots = await this.slotsForDate(clubId, dateKey, court.id)
       for (const s of slots) {
-        const entry = byBand.get(s.bandStart) ?? { bandStart: s.bandStart, label: s.label, courts: [] }
+        const entry = byBand.get(s.bandStart) ?? {
+          bandStart: s.bandStart,
+          label: s.label,
+          courts: [],
+          sortMinutes: s.sortMinutes,
+        }
         entry.courts.push({ id: court.id, name: court.name, slotId: s.slotId, price: s.price })
         byBand.set(s.bandStart, entry)
       }
     }
-    return [...byBand.values()].sort((a, b) => a.bandStart.localeCompare(b.bandStart))
+    // Chronological, not lexicographic: a past-midnight band ("00:30") closes the day.
+    return [...byBand.values()].sort((a, b) => (a.sortMinutes ?? 0) - (b.sortMinutes ?? 0))
   }
 
   /** Free bands on the given club-local day for a court (open-by-default). */
@@ -54,18 +60,24 @@ export class AvailabilityService {
       where: { id: courtId, clubId },
       select: {
         priceCents: true,
-        openTime: true,
-        closeTime: true,
+        ...courtScheduleSelect,
         priceRules: { select: { dayOfWeek: true, startTime: true, priceCents: true } },
       },
     })
     if (!court) return []
 
-    const { gte, lt } = dayRangeUtc(dateKey)
-    // Fetch every slot that overlaps the day (including one crossing in from the
-    // previous day), not just those starting inside it, so overlap detection is complete.
+    const bands = bandsForDate(court, dateKey)
+    if (bands.length === 0) return []
+    const bandTimes = bands.map(band => ({ band, ...bandDateTimes(dateKey, band) }))
+
+    const { gte } = dayRangeUtc(dateKey)
+    // The day's grid can end past midnight (a "viernes hasta la 1 AM" schedule), so the
+    // window runs from the day's start to the last band's end. Fetch every slot that
+    // overlaps it (including one crossing in from the previous day), not just those
+    // starting inside it, so overlap detection is complete.
+    const lastEnd = new Date(Math.max(...bandTimes.map(b => b.endsAt.getTime())))
     const existing = await this.prisma.slot.findMany({
-      where: { clubId, courtId, startsAt: { lt }, endsAt: { gt: gte } },
+      where: { clubId, courtId, startsAt: { lt: lastEnd }, endsAt: { gt: gte } },
       select: { id: true, startsAt: true, endsAt: true, priceCents: true, status: true },
     })
     // Occupancy is by interval overlap, not exact start: a BOOKED/BLOCKED slot that is
@@ -79,14 +91,14 @@ export class AvailabilityService {
     const now = new Date()
 
     const options: SlotOption[] = []
-    for (const band of generateBands(court.openTime, court.closeTime)) {
-      const { startsAt, endsAt } = bandDateTimes(dateKey, band)
+    for (const { band, startsAt, endsAt } of bandTimes) {
       if (startsAt <= now) continue
 
       // Half-open overlap: [startsAt, endsAt) — a slot merely touching the edge doesn't block.
       const blocked = occupied.some(s => s.startsAt < endsAt && s.endsAt > startsAt)
       if (blocked) continue
 
+      const sortMinutes = bandSortMinutes(band)
       const found = availableByStart.get(startsAt.toISOString())
       if (found) {
         options.push({
@@ -94,11 +106,12 @@ export class AvailabilityService {
           slotId: found.id,
           label: formatTimeRange(found.startsAt, found.endsAt),
           price: found.priceCents,
+          sortMinutes,
         })
       } else {
         // Not materialized yet — price comes from the court's exceptions or its default.
         const price = resolveBandPriceCents(court.priceCents, court.priceRules, dateKey, band.start)
-        options.push({ bandStart: band.start, label: formatTimeRange(startsAt, endsAt), price })
+        options.push({ bandStart: band.start, label: formatTimeRange(startsAt, endsAt), price, sortMinutes })
       }
     }
     return options
@@ -118,21 +131,18 @@ export class AvailabilityService {
 
     const courts = await this.prisma.court.findMany({
       where: { clubId },
-      select: { id: true, openTime: true, closeTime: true },
+      select: { id: true, ...courtScheduleSelect },
     })
     if (courts.length === 0) return []
 
     const windowStart = dayRangeUtc(fromDateKey).gte
-    const windowEnd = dayRangeUtc(shiftDateKey(fromDateKey, horizonDays)).gte
+    // +1 day so bands of the last grid day that start past midnight are covered.
+    const windowEnd = dayRangeUtc(shiftDateKey(fromDateKey, horizonDays + 1)).gte
     const occupied = await this.prisma.slot.findMany({
       where: { clubId, status: { in: ['BOOKED', 'BLOCKED'] }, startsAt: { gte: windowStart, lt: windowEnd } },
-      select: { startsAt: true },
+      select: { courtId: true, startsAt: true },
     })
-    const occupiedByDay = new Map<string, number>()
-    for (const s of occupied) {
-      const key = toDateKey(s.startsAt)
-      occupiedByDay.set(key, (occupiedByDay.get(key) ?? 0) + 1)
-    }
+    const occupiedKeys = new Set(occupied.map(s => `${s.courtId}|${s.startsAt.toISOString()}`))
 
     const now = new Date()
     const results: AvailableDate[] = []
@@ -140,13 +150,14 @@ export class AvailabilityService {
       const key = shiftDateKey(fromDateKey, i)
       if (key === excludeDateKey) continue
 
-      let totalFutureBands = 0
+      let free = 0
       for (const court of courts) {
-        for (const band of generateBands(court.openTime, court.closeTime)) {
-          if (bandDateTimes(key, band).startsAt > now) totalFutureBands++
+        for (const band of bandsForDate(court, key)) {
+          const { startsAt } = bandDateTimes(key, band)
+          if (startsAt <= now) continue
+          if (!occupiedKeys.has(`${court.id}|${startsAt.toISOString()}`)) free++
         }
       }
-      const free = totalFutureBands - (occupiedByDay.get(key) ?? 0)
       if (free > 0) results.push({ dateKey: key, count: free })
     }
     return results
