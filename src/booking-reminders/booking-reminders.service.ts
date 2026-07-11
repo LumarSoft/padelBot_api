@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
+import { schedulerEnabled } from '../common/scheduling'
 import { PrismaService } from '../prisma/prisma.service'
 import { WhatsAppService } from '../whatsapp/whatsapp.service'
 import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
@@ -43,6 +44,7 @@ export class BookingRemindersService {
    */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async sendUpcomingReminders(): Promise<void> {
+    if (!schedulerEnabled()) return
     const now = Date.now()
     const windowStart = new Date(now + LEAD_MINUTES * 60_000)
     const windowEnd = new Date(now + (LEAD_MINUTES + SWEEP_MINUTES) * 60_000)

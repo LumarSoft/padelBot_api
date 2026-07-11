@@ -35,4 +35,14 @@ export class UpdateTransferConfigDto {
   @IsOptional()
   @IsEnum(PaymentVerificationMode)
   paymentVerificationMode?: PaymentVerificationMode
+
+  /**
+   * Hours before the slot start within which cancelling forfeits the deposit.
+   * Cancelling earlier than this turns the paid deposit into player credit.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(168)
+  cancellationWindowHours?: number
 }

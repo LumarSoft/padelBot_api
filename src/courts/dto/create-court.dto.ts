@@ -1,5 +1,6 @@
-import { IsEnum, IsInt, IsOptional, IsString, Matches, MaxLength, Min, MinLength } from 'class-validator'
+import { IsEnum, IsInt, IsObject, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator'
 import { CourtType } from 'generated/prisma/client'
+import { WeeklyHours } from '../../availability/lib/schedule'
 
 const TIME_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/
 
@@ -26,4 +27,19 @@ export class CreateCourtDto {
   @IsOptional()
   @IsEnum(CourtType)
   courtType?: CourtType
+
+  /** Band length in minutes (60/90/120…). Defaults to 90 (padel). */
+  @IsOptional()
+  @IsInt()
+  @Min(30)
+  @Max(240)
+  slotDurationMinutes?: number
+
+  /**
+   * Per-weekday opening-hours overrides, keyed "0" (Sunday) … "6" (Saturday).
+   * Shape is validated in CourtsService via parseWeeklyHours.
+   */
+  @IsOptional()
+  @IsObject()
+  weeklyHours?: WeeklyHours
 }

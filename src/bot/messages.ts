@@ -82,7 +82,8 @@ export function noAvailabilityWithSuggestions(dateKey: string, suggestions: Avai
     return (
       `😕 Para el *${dayLabelFromKey(dateKey)}* no me queda ningún turno libre, ` +
       `y tampoco veo lugar en los próximos días.\n\n` +
-      `Escribime otra fecha y la chequeo, o probá más adelante. 🎾`
+      `Escribime otra fecha y la chequeo. Y si querés, respondé *avisame* y te escribo ` +
+      `apenas se libere un turno ese día. 🔔`
     )
   }
   const list = suggestions
@@ -91,7 +92,8 @@ export function noAvailabilityWithSuggestions(dateKey: string, suggestions: Avai
   return (
     `😕 Para el *${dayLabelFromKey(dateKey)}* no me queda ningún turno libre.\n\n` +
     `Pero sí tengo lugar acá:\n${list}\n\n` +
-    `¿Te muestro alguno? Decime la fecha o el día. 🎾`
+    `¿Te muestro alguno? Decime la fecha o el día. 🎾\n\n` +
+    `💡 O respondé *avisame* y te escribo apenas se libere algo el ${dayLabelFromKey(dateKey)}.`
   )
 }
 

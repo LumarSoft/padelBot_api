@@ -84,6 +84,147 @@ Returns the authenticated user resolved from the JWT.
 { "statusCode": 401, "message": "Unauthorized" }
 ```
 
+## Onboarding
+
+Club creation is **managed**: prospects ask for a club through the public form; we contact
+them, configure MercadoPago and the WhatsApp line, and provision the tenant ourselves.
+
+### POST /onboarding/request
+
+Public lead form ("quiero mi club"): stores a `ClubSignupRequest` and alerts ops
+(`OPS_ALERT_WEBHOOK_URL`). Rate-limited 3/min per IP.
+
+**Auth required:** No
+
+**Request body**
+
+| Field     | Type   | Required | Constraints |
+| --------- | ------ | -------- | ----------- |
+| clubName  | string | Yes      | 2–80 chars  |
+| ownerName | string | Yes      | 1–100 chars |
+| email     | string | Yes      | valid email |
+| phone     | string | Yes      | 6–30 chars  |
+| message   | string | No       | ≤1000 chars |
+
+`201 Created` — `{ "received": true }`
+
+### POST /onboarding/register
+
+**Ops-only** provisioning (header `x-ops-secret` must equal `OPS_ADMIN_SECRET`; fails
+closed when unset): creates the Club (on a `TRIAL_DAYS` free trial, default 14), its OWNER
+user and demo data (two padel courts + labeled example bookings), then returns the login
+payload (token + user) so we can hand credentials to the owner once MP/WhatsApp are set up.
+
+**Auth required:** ops secret header
+
+**Request body** — same as before: `clubName` (2–80), `ownerName` (1–100), `email`, `password` (8–72)
+
+`201 Created` — token + user · `403 Forbidden` — missing/invalid ops secret · `409 Conflict` — email in use
+
+## Users (equipo)
+
+Team management for the panel. All routes require auth; everything except
+`POST /users/me/change-password` is OWNER-only. Users are always scoped to the caller's club.
+
+### GET /users
+
+Lists the club's users.
+
+**Auth required:** Yes (OWNER only)
+
+`200 OK`
+
+```json
+[
+  {
+    "id": 2,
+    "email": "maria@club.com",
+    "name": "María López",
+    "role": "STAFF",
+    "isActive": true,
+    "mustChangePassword": false,
+    "createdAt": "2026-07-09T12:00:00.000Z"
+  }
+]
+```
+
+### POST /users
+
+Creates a team member with a generated temporary password, returned ONCE (the owner passes
+it to the employee out-of-band; no email delivery involved). The user is flagged
+`mustChangePassword` until they set their own.
+
+**Auth required:** Yes (OWNER only)
+
+**Request body**
+
+| Field | Type   | Required | Constraints            |
+| ----- | ------ | -------- | ---------------------- |
+| email | string | Yes      | valid email, unique    |
+| name  | string | Yes      | 1–100 chars            |
+| role  | enum   | No       | OWNER \| STAFF (def. STAFF) |
+
+```json
+{ "email": "maria@club.com", "name": "María López" }
+```
+
+**Responses**
+
+`201 Created`
+
+```json
+{ "user": { "id": 2, "email": "maria@club.com", "name": "María López", "role": "STAFF", "isActive": true, "mustChangePassword": true, "createdAt": "..." }, "tempPassword": "k3Xq9vZ_p1aB" }
+```
+
+`409 Conflict` — email already in use
+
+### PATCH /users/:id
+
+Updates a team member's name, role or active state. Deactivated users cannot log in.
+The caller cannot edit themself (avoids self-lockout).
+
+**Auth required:** Yes (OWNER only)
+
+**Request body** — `{ "name"?: string, "role"?: "OWNER" | "STAFF", "isActive"?: boolean }`
+
+`200 OK` — updated user · `400 Bad Request` — attempted self-edit · `404 Not Found`
+
+### POST /users/:id/reset-password
+
+Generates a fresh temporary password for a team member (returned once) and flags them
+to change it.
+
+**Auth required:** Yes (OWNER only)
+
+`201 Created`
+
+```json
+{ "tempPassword": "k3Xq9vZ_p1aB" }
+```
+
+`400 Bad Request` — attempted on self (use change-password) · `404 Not Found`
+
+### POST /users/me/change-password
+
+Changes the caller's own password (any role). Requires the current password.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field           | Type   | Required | Constraints |
+| --------------- | ------ | -------- | ----------- |
+| currentPassword | string | Yes      | —           |
+| newPassword     | string | Yes      | 8–72 chars  |
+
+`201 Created`
+
+```json
+{ "changed": true }
+```
+
+`400 Bad Request` — current password incorrect
+
 ## Courts
 
 All court routes are scoped to the authenticated user's club (`clubId` from the
@@ -119,26 +260,80 @@ Creates a court.
 
 **Request body**
 
-| Field      | Type    | Required | Constraints |
-| ---------- | ------- | -------- | ----------- |
-| name       | string  | Yes      | 1–80 chars  |
-| priceCents | integer | Yes      | ≥ 0         |
+| Field               | Type    | Required | Constraints                                                              |
+| ------------------- | ------- | -------- | ------------------------------------------------------------------------ |
+| name                | string  | Yes      | 1–80 chars                                                                |
+| priceCents          | integer | Yes      | ≥ 0                                                                       |
+| openTime            | string  | No       | "HH:MM" (default "09:00")                                                 |
+| closeTime           | string  | No       | "HH:MM" (default "00:00"); ≤ openTime = closes past midnight the next day |
+| slotDurationMinutes | integer | No       | 30–240 (default 90)                                                       |
+| weeklyHours         | object  | No       | `{"0".."6": {open, close} \| null}` per-weekday overrides; null = closed  |
+| courtType           | enum    | No       | INDOOR \| OUTDOOR (default INDOOR)                                        |
 
 ```json
-{ "name": "Cancha 3", "priceCents": 1200000 }
+{
+  "name": "Cancha 3",
+  "priceCents": 1200000,
+  "openTime": "09:00",
+  "closeTime": "00:00",
+  "slotDurationMinutes": 90,
+  "weeklyHours": { "5": { "open": "09:00", "close": "01:00" }, "0": null }
+}
 ```
 
-`201 Created` — the created court
+`201 Created` — the created court · `400 Bad Request` — invalid weeklyHours shape
+
+### POST /courts/bulk-price
+
+Mass price adjustment ("subí todo 10%"): applies a percentage to EVERY court default
+price and per-band price rule of the club, rounding to the nearest $100. `dryRun: true`
+returns the preview without writing. Owner-only.
+
+**Auth required:** Yes (OWNER only)
+
+**Request body**
+
+| Field   | Type    | Required | Constraints        |
+| ------- | ------- | -------- | ------------------ |
+| percent | number  | Yes      | -50–300, non-zero  |
+| dryRun  | boolean | No       | preview only       |
+| effectiveDate | string | No | "YYYY-MM-DD"; a FUTURE date SCHEDULES the change (applied by a daily job at 00:10 club time) instead of applying now |
+
+`201 Created`
+
+```json
+{
+  "applied": true,
+  "percent": 10,
+  "courts": [{ "id": "…", "name": "Cancha 1", "beforeCents": 4000000, "afterCents": 4400000 }],
+  "priceRulesUpdated": 3
+}
+```
+
+### GET /courts/scheduled-price-adjustments
+
+Pending scheduled mass price adjustments (not yet applied), soonest first. Owner-only.
+
+**Auth required:** Yes (OWNER only)
+
+`200 OK` — `[{ "id": "…", "percent": 10, "effectiveDateKey": "2026-08-01", "createdAt": "…" }]`
+
+### DELETE /courts/scheduled-price-adjustments/:id
+
+Removes a pending scheduled adjustment. Owner-only.
+
+**Auth required:** Yes (OWNER only)
+
+`204 No Content` · `404 Not Found`
 
 ### PATCH /courts/:id
 
-Updates a court.
+Updates a court. Same fields as POST, all optional; `weeklyHours: null` clears every
+per-weekday override.
 
 **Auth required:** Yes
 
-**Request body** — `{ "name"?: string (1–80 chars), "priceCents"?: integer (≥ 0) }`
-
-`200 OK` — updated court · `404 Not Found`
+`200 OK` — updated court · `404 Not Found` · `400 Bad Request` — invalid weeklyHours
 
 ### DELETE /courts/:id
 
@@ -286,6 +481,7 @@ Lists bookings ordered by creation date (newest first). Optional filters via que
 | to          | ISO 8601 | inclusive upper bound on slot `startsAt`   |
 | courtId     | string   | filter by court                            |
 | status      | enum     | `CONFIRMED` \| `CANCELLED`                 |
+| search  | string   | global search: player name or phone (contains); returns latest 30 by slot time |
 | playerPhone | string   | exact match on player phone                |
 
 `200 OK`
@@ -365,6 +561,14 @@ Cancels a booking. The associated slot transitions back to `AVAILABLE`.
 
 `404 Not Found`
 
+
+**Deposit outcome:** when the cancelled booking had a PAID deposit (bot flow,
+`transferAmountCents` set, CONFIRMED), the club's cancellation policy decides where the
+money goes and records it on the booking as `depositOutcome`: cancelled
+`cancellationWindowHours`+ before the slot → `CREDITED` (deposit + any applied credit
+become the player's `creditCents`, applied automatically to their next booking); later →
+`FORFEITED`. Unpaid bookings just restore any player credit they had consumed.
+
 ### PATCH /bookings/:id/reschedule
 
 Moves a booking to a different slot. The old slot becomes `AVAILABLE`; the new slot becomes `BOOKED`. Both changes happen in a single transaction.
@@ -404,6 +608,13 @@ Manually confirms the transfer deposit for a `PENDING_PAYMENT` booking (front-de
 `{ "confirmed": false }` — booking existed but was already processed (not pending)
 
 `404 Not Found` — booking not found in the caller's club
+
+
+**Casi-match (asignar transferencia):** the body may carry the detected transfer being
+assigned — `{ "paymentRef": "<mp movement id>", "payerCuit"?, "payerEmail"?, "payerMpUserId"? }`.
+The ref is single-use (400 if it already confirmed another booking), it bypasses the
+RECEIPT-mode receipt requirement (the money is verified by the transfer itself), and the
+payer identity is recorded on the booking + Player so future transfers reconcile alone.
 
 ### PATCH /bookings/:id/reject-payment
 
@@ -462,6 +673,149 @@ Each line records which of the 4 fixed anonymous players (`1`..`4`) share its co
 `400 Bad Request` — validation error
 
 `404 Not Found` — no receipt for this booking, or booking not in the caller's club
+
+## Players (CRM)
+
+The club's player file, keyed by phone. Players are created/refreshed automatically on
+every booking that carries a phone (bot and panel) and backfilled from history
+(`npm run players:backfill`). All routes are club-scoped.
+
+Booking policy driven by the CRM: a player with `noShowCount ≥ NO_SHOW_FULL_THRESHOLD`
+(default 3) is asked the FULL court price as the deposit by the bot; a blocked player
+can't book through the bot at all (the panel always can).
+
+### GET /players
+
+Lists the club's players (most recently active first, up to 200), with the total
+bookings count. Optional `?search=` matches name or phone.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "ckx…",
+    "phone": "5493411234567",
+    "name": "Juan Pérez",
+    "dni": "30405060",
+    "noShowCount": 1,
+    "creditCents": 0,
+    "isBlocked": false,
+    "notes": null,
+    "bookingsCount": 12,
+    "createdAt": "…",
+    "updatedAt": "…"
+  }
+]
+```
+
+### GET /players/:id
+
+The player file: profile + the 15 most recent bookings (court, times, status, no-show flag).
+
+**Auth required:** Yes
+
+`200 OK` — player with `bookings[]` · `404 Not Found`
+
+### PATCH /players/:id
+
+Updates the player's name, blocked state or club notes.
+
+**Auth required:** Yes
+
+**Request body** — `{ "name"?: string, "isBlocked"?: boolean, "notes"?: string (≤2000) }`
+
+`200 OK` — updated player · `404 Not Found`
+
+### GET /bookings/:id/account
+
+The turno's bill ("cuenta del turno"): court price ÷ 4 + each player's consumo shares
+(positions J1–J4, same as `BookingProduct.playerMask`), what each already put in — the
+paid seña (+ applied credit) is credited to J1, quien reservó — and the settled state.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{
+  "courtPriceCents": 4000000,
+  "consumosTotalCents": 600000,
+  "totalCents": 4600000,
+  "depositPaidCents": 1000000,
+  "unassignedPaidCents": 0,
+  "paidCents": 1000000,
+  "remainingCents": 3600000,
+  "settledAt": null,
+  "players": [
+    { "slot": 1, "owesCents": 1300000, "paidCents": 1000000, "remainingCents": 300000, "depositCreditedCents": 1000000 }
+  ],
+  "payments": [{ "id": "…", "playerSlot": 2, "amountCents": 1000000, "method": "CASH", "createdAt": "…" }]
+}
+```
+
+### POST /bookings/:id/payments
+
+Registers one player's payment toward the bill (cierre del turno). When the whole bill
+is covered, `Booking.settledAt` is set automatically ("turno finalizado"); it clears
+again if a payment is undone. Returns the refreshed account.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field       | Type | Required | Constraints             |
+| ----------- | ---- | -------- | ----------------------- |
+| playerSlot  | int  | Yes      | 1–4 (J1 = quien reservó) |
+| amountCents | int  | Yes      | ≥ 1                     |
+| method      | enum | Yes      | CASH \| QR \| TRANSFER |
+
+`200 OK` — refreshed account · `400 Bad Request` — cancelled booking · `404 Not Found`
+
+### DELETE /bookings/:id/payments/:paymentId
+
+Undoes a registered player payment (reopens the account if it was settled). Returns the
+refreshed account.
+
+**Auth required:** Yes
+
+`200 OK` — refreshed account · `404 Not Found`
+
+### PATCH /bookings/:id/local-payment
+
+Modo mostrador: records money collected at the front desk for a booking (cash or the
+club's own QR — e.g. the rest of the court price on arrival), feeding the daily cash
+closure in `/stats/revenue`. Amount 0 clears the record.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field       | Type   | Required | Constraints    |
+| ----------- | ------ | -------- | -------------- |
+| method      | enum   | Yes      | CASH \| QR    |
+| amountCents | int    | Yes      | ≥ 0            |
+
+`200 OK` — updated booking · `400 Bad Request` — cancelled booking · `404 Not Found`
+
+### POST /bookings/:id/no-show
+
+Marks a CONFIRMED booking as a no-show (the player never came) and bumps the player's
+counter. Idempotent.
+
+**Auth required:** Yes
+
+`200 OK` — `{ "noShowAt": "…" }` · `400 Bad Request` — booking not confirmed · `404 Not Found`
+
+### DELETE /bookings/:id/no-show
+
+Undoes a no-show mark (and decrements the player's counter).
+
+**Auth required:** Yes
+
+`204 No Content` · `404 Not Found`
 
 ## Recurring Bookings (Turnos Fijos)
 
@@ -562,6 +916,8 @@ Re-applies a recurring booking to all currently `AVAILABLE` matching slots (usef
 
 **Auth required:** Yes
 
+Occurrences whose booking was CANCELLED are treated as deliberately skipped ("el fijo no viene ESTE martes") and are never re-booked by apply or the weekly sweep — cancel the occurrence from the agenda to skip it.
+
 `200 OK`
 
 ```json
@@ -575,6 +931,29 @@ Re-applies a recurring booking to all currently `AVAILABLE` matching slots (usef
 ## Clubs
 
 Per-club settings. The transfer config holds the MercadoPago alias/CVU players send the deposit to.
+
+### GET /clubs/me/subscription
+
+Effective PadelBot subscription state for the panel's banner. Derived from the stored
+status + dates: an ACTIVE club whose paid period lapsed behaves as past-due on its own,
+with a grace window (`SUBSCRIPTION_GRACE_DAYS`, default 7) before the bot answers a
+fallback message. The panel itself is never blocked.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{
+  "subscriptionStatus": "TRIAL",
+  "plan": "base",
+  "trialEndsAt": "2026-07-23T00:00:00.000Z",
+  "currentPeriodEnd": null,
+  "severity": "trial",
+  "botAllowed": true,
+  "daysLeft": 14
+}
+```
 
 ### GET /clubs/me/transfer-config
 
@@ -604,6 +983,7 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 | transferHolder          | string | No       | max 120 chars                      |
 | depositMode             | enum   | No       | `DEPOSIT` \| `FULL`                |
 | depositPercent          | int    | No       | 1–100 (used when `DEPOSIT`)        |
+| cancellationWindowHours | int    | No       | 0–168; cancelling ≥ N h before the slot credits the deposit to the player, later forfeits it |
 | requireDniMatch         | bool   | No       | only relevant in `AUTO` mode       |
 | paymentVerificationMode | enum   | No       | `AUTO` \| `RECEIPT`                |
 
@@ -678,6 +1058,56 @@ Disconnects the club's MercadoPago account (clears stored tokens). **Owner only.
 
 `403 Forbidden` — caller is not the club owner
 
+## Stats reports
+
+### GET /stats/occupancy
+
+Occupancy heatmap (weekday × band start) aggregated over the last N full weeks across
+every court. Owner-only. Drives "tus martes 15:00 están al 20%, probá un precio promo".
+
+**Auth required:** Yes (OWNER only)
+
+**Query** — `weeks` (int 1–12, default 4)
+
+`200 OK`
+
+```json
+{
+  "weeks": 4,
+  "fromDateKey": "2026-06-12",
+  "toDateKey": "2026-07-09",
+  "bandStarts": ["09:00", "10:30"],
+  "cells": [{ "weekday": 2, "bandStart": "15:00", "offered": 8, "occupied": 2 }]
+}
+```
+
+### GET /stats/revenue
+
+Money per club-local day in a range: deposits actually collected through the transfer
+flow, kiosk consumption, and front-desk collections — both the legacy aggregate and the
+per-player bill payments (CASH → efectivo; QR/TRANSFER → mostrador digital). Owner-only. The panel exports this as CSV.
+
+**Auth required:** Yes (OWNER only)
+
+**Query** — `from`, `to` ("YYYY-MM-DD"; defaults: last 30 days)
+
+`200 OK`
+
+```json
+{
+  "fromDateKey": "2026-06-10",
+  "toDateKey": "2026-07-09",
+  "totalDepositCents": 1250000,
+  "totalProductsCents": 340000,
+  "totalBookings": 84,
+  "days": [{ "dateKey": "2026-07-08", "depositCents": 25000, "productsCents": 8000, "bookings": 3 }]
+}
+```
+
+**Weekly digest:** every Monday 09:05 (club timezone) each club's staff devices get a
+push with last week's numbers (turnos, % ocupación, señas, turnos vendidos por el bot).
+Skipped for clubs with zero bookings that week. Gated by `RUN_SCHEDULER`.
+
 ## Payments (Webhooks)
 
 Deposits are paid by bank transfer to the club's MercadoPago alias/CVU. An incoming transfer is matched to a pending booking by its **exact unique amount** (`transferAmountCents`), then the booking is confirmed and the player notified. These endpoints are unauthenticated by JWT — they are secured by a signature / shared secret instead.
@@ -715,7 +1145,7 @@ Generic transfer-received webhook for an external notification source (e.g. a Pa
 
 ### GET /payments/diagnostics/money-in
 
-Read-only production go/no-go check. Lists the club's recent incoming transfers exactly as the reconciler sees them, exposing the payer identity MercadoPago returns (name, CUIT, the DNI derived from it, MP user id, email) and whether each movement would match a pending booking. Confirms nothing and changes no booking state. Reads the club's own MercadoPago account when connected, otherwise the shared env account.
+Read-only production go/no-go check. Lists the club's recent incoming transfers exactly as the reconciler sees them, exposing the payer identity MercadoPago returns (name, CUIT, the DNI derived from it, MP user id, email), whether each movement would match a pending booking, and `alreadyUsed` (the movement already confirmed a booking). Feeds the panel's "transferencias sin asignar" queue. Confirms nothing and changes no booking state. Reads the club's own MercadoPago account when connected, otherwise the shared env account.
 
 **Auth required:** Yes (OWNER only)
 
@@ -757,6 +1187,46 @@ Read-only production go/no-go check. Lists the club's recent incoming transfers 
 `400 Bad Request` — no MercadoPago account available (club not connected and no `MERCADOPAGO_ACCESS_TOKEN`)
 
 `403 Forbidden` — caller is not the club OWNER
+
+### GET /payments/diagnostics/health
+
+Reconciliation health for the panel's "reconciliación activa" indicator: whether the
+payments poller ran recently, consecutive failure counters (global and for the caller's
+club), when the club's last booking was auto-confirmed from a real transfer, and how many
+bookings are pending payment. Exposes no payer data, so STAFF can read it too. In-memory
+poll state reflects the instance that runs the scheduler (see `RUN_SCHEDULER`).
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+{
+  "reconciliationActive": true,
+  "lastPollOkAt": "2026-07-09T20:15:04.000Z",
+  "consecutiveFailures": 0,
+  "clubConsecutiveFailures": 0,
+  "lastAutoConfirmationAt": "2026-07-09T19:58:31.000Z",
+  "pendingCount": 2
+}
+```
+
+## Waitlist (bot)
+
+No HTTP surface — the waitlist lives inside the bot flow:
+
+1. When a requested day has no availability, the bot offers: "respondé *avisame* y te
+   escribo apenas se libere un turno ese día". Answering joins `WaitlistEntry`
+   (club + phone + dateKey, deduped).
+2. Whenever a slot frees (panel cancellation, expired/rejected pending) a `slot.freed`
+   event fires and every waitlisted player for that day gets a WhatsApp with the freed
+   court/time — throttled to one broadcast per entry per 10 minutes, max 10 recipients.
+3. Each notified player's bot session is pre-seeded at the CONFIRM step for that exact
+   slot, so replying "sí" runs the normal pending-booking flow — the atomic slot lock
+   makes "primero que confirma, gana" true by construction.
+4. Entries whose day passed are pruned daily (03:00, gated by `RUN_SCHEDULER`).
 
 ## Notifications
 

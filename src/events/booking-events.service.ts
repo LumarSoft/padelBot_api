@@ -39,7 +39,18 @@ export interface PaymentConfirmedEvent {
   source: 'AUTO' | 'MANUAL'
 }
 
-export type AppEvent = BookingEvent | ConversationEvent | PaymentReceiptEvent | PaymentConfirmedEvent
+/** A slot just became bookable again (cancellation / expired pending) — feeds the waitlist. */
+export interface SlotFreedEvent {
+  type: 'slot.freed'
+  clubId: string
+  courtId: string
+  courtName: string
+  startsAt: Date
+  endsAt: Date
+  priceCents: number
+}
+
+export type AppEvent = BookingEvent | ConversationEvent | PaymentReceiptEvent | PaymentConfirmedEvent | SlotFreedEvent
 
 @Injectable()
 export class BookingEventsService {
@@ -60,6 +71,15 @@ export class BookingEventsService {
 
   emitPaymentConfirmed(event: PaymentConfirmedEvent): void {
     this.publish(event)
+  }
+
+  emitSlotFreed(event: SlotFreedEvent): void {
+    this.publish(event)
+  }
+
+  /** Every event across all clubs — for in-process subscribers like the waitlist. */
+  all(): Observable<AppEvent> {
+    return this.stream$.asObservable()
   }
 
   /**

@@ -12,6 +12,7 @@ import {
   Res,
   StreamableFile,
   UseGuards,
+  Delete,
 } from '@nestjs/common'
 import { Response } from 'express'
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'
@@ -22,6 +23,8 @@ import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import { CreateBookingDto } from './dto/create-booking.dto'
 import { RescheduleBookingDto } from './dto/reschedule-booking.dto'
 import { QueryBookingsDto } from './dto/query-bookings.dto'
+import { LocalPaymentDto } from './dto/local-payment.dto'
+import { AddPlayerPaymentDto } from './dto/add-player-payment.dto'
 import { SetBookingProductsDto } from './dto/set-booking-products.dto'
 
 @Controller('bookings')
@@ -69,6 +72,50 @@ export class BookingsController {
   @HttpCode(HttpStatus.OK)
   cancel(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     return this.bookingsService.cancel(user.clubId, id)
+  }
+
+  /** The turno's bill: per-player owed/paid/remaining, seña credited to J1, settled state. */
+  @Get(':id/account')
+  getAccount(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.bookingsService.getAccount(user.clubId, id)
+  }
+
+  /** Registers one player's payment toward the bill; settles the turno when it's covered. */
+  @Post(':id/payments')
+  @HttpCode(HttpStatus.OK)
+  addPlayerPayment(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: AddPlayerPaymentDto) {
+    return this.bookingsService.addPlayerPayment(user.clubId, id, dto)
+  }
+
+  /** Undoes a registered player payment. */
+  @Delete(':id/payments/:paymentId')
+  @HttpCode(HttpStatus.OK)
+  removePlayerPayment(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Param('paymentId') paymentId: string,
+  ) {
+    return this.bookingsService.removePlayerPayment(user.clubId, id, paymentId)
+  }
+
+  /** Records a front-desk collection (cash / club QR) so the daily cash closure adds up. */
+  @Patch(':id/local-payment')
+  @HttpCode(HttpStatus.OK)
+  setLocalPayment(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: LocalPaymentDto) {
+    return this.bookingsService.setLocalPayment(user.clubId, id, dto)
+  }
+
+  /** Marks a confirmed booking as a no-show (player never came) — feeds the CRM counter. */
+  @Post(':id/no-show')
+  @HttpCode(HttpStatus.OK)
+  markNoShow(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.bookingsService.markNoShow(user.clubId, id)
+  }
+
+  @Delete(':id/no-show')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  unmarkNoShow(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.bookingsService.unmarkNoShow(user.clubId, id)
   }
 
   @Patch(':id/reschedule')

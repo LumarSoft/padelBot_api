@@ -7,11 +7,30 @@ datasource db {
   provider = "mysql"
 }
 
+/// PadelBot's own subscription lifecycle for a club (billed manually for now; the
+/// status is what gates the product). See `src/clubs/lib/subscription.ts`.
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
 /// A club (tenant). Every tenant-scoped record relates back to a Club.
 model Club {
   id        String   @id @default(cuid())
   name      String
   slug      String   @unique
+
+  /// PadelBot subscription state. New clubs start on TRIAL (see trialEndsAt).
+  subscriptionStatus SubscriptionStatus @default(TRIAL)
+  /// Commercial plan ("base" / "pro"); informational for now.
+  plan               String             @default("base")
+  /// When the free trial ends (null = no fixed end, e.g. clubs created before billing).
+  trialEndsAt        DateTime?
+  /// End of the last paid period for ACTIVE/PAST_DUE clubs. The bot keeps working for
+  /// a grace window past this before falling back to "contact the club directly".
+  currentPeriodEnd   DateTime?
   /// MercadoPago alias/CVU players transfer the deposit to. Null until the owner configures it.
   transferAlias  String?
   /// Account holder name shown to players alongside the alias ("titular").
@@ -24,6 +43,17 @@ model Club {
   /// Percentage of the court price charged as the seña when depositMode = DEPOSIT.
   /// Default 25 (one of four padel players). Ignored when depositMode = FULL.
   depositPercent Int         @default(25)
+
+  /// Club voice (acotado, no todo el copy): an extra line the bot appends to its
+  /// welcome (reglas de la casa, tono propio). Null = default welcome only.
+  botWelcomeExtra String? @db.Text
+  /// "Cómo llegar": address / landmarks / maps link the bot answers when asked. Null = the
+  /// bot says it doesn't have the address loaded and suggests asking the club.
+  locationInfo    String? @db.Text
+
+  /// Hours before the slot start within which a cancellation forfeits the deposit.
+  /// Cancelling EARLIER than this window turns the paid deposit into player credit.
+  cancellationWindowHours Int @default(24)
 
   /// When true, the bot asks the player's DNI at booking, the transfer amount is a clean
   /// round number (no centavos tag), and a transfer auto-confirms only if the payer's DNI
@@ -52,6 +82,7 @@ model Club {
   updatedAt DateTime @updatedAt
 
   users                User[]
+  players              Player[]
   courts               Court[]
   courtPriceRules      CourtPriceRule[]
   slots                Slot[]
@@ -63,6 +94,9 @@ model Club {
   deviceTokens         DeviceToken[]
   products             Product[]
   bookingProducts      BookingProduct[]
+  waitlistEntries      WaitlistEntry[]
+  scheduledPriceAdjustments ScheduledPriceAdjustment[]
+  bookingPlayerPayments BookingPlayerPayment[]
 }
 
 enum Role {
@@ -91,8 +125,17 @@ model Court {
   priceCents Int     @default(0)
   /// Wall-clock time ("HH:MM") when the first daily slot starts.
   openTime  String   @default("09:00")
-  /// Wall-clock time ("HH:MM") when the last daily slot ends; "00:00" means midnight.
+  /// Wall-clock time ("HH:MM") when the last daily slot ends. A close time equal to or
+  /// earlier than `openTime` crosses midnight into the NEXT day ("00:00" = midnight,
+  /// "01:00" = 1 AM of the following day).
   closeTime  String    @default("00:00")
+  /// Length of each bookable band in minutes (60 / 90 / 120…). Per court so a padel
+  /// court (90) and a fútbol 5 court (60) can coexist in the same club.
+  slotDurationMinutes Int @default(90)
+  /// Per-weekday opening-hours overrides, keyed "0" (Sunday) … "6" (Saturday):
+  /// `{ "5": { "open": "09:00", "close": "01:00" }, "0": null }`.
+  /// A missing key falls back to openTime/closeTime; an explicit null closes that day.
+  weeklyHours Json?
   courtType  CourtType @default(INDOOR)
   clubId    String
   club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
@@ -166,6 +209,11 @@ model User {
   password         String
   name             String
   role             Role               @default(STAFF)
+  /// Deactivated users cannot log in (soft delete — keeps their booking history).
+  isActive         Boolean            @default(true)
+  /// True while the user is on a temporary password (created/reset by the OWNER);
+  /// the panel nags them to change it.
+  mustChangePassword Boolean          @default(false)
   clubId           String
   club             Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
   bookings         Booking[]
@@ -197,6 +245,47 @@ model DeviceToken {
   @@index([userId])
 }
 
+/// A club's player (CRM), keyed by phone. Created/refreshed automatically on every
+/// booking that carries a phone; backfilled from historical bookings. Unlocks the
+/// player file (history), no-show tracking (3+ → the bot demands the FULL price as
+/// deposit), blocking, and credit from "good" cancellations.
+model Player {
+  id          String   @id @default(cuid())
+  clubId      String
+  club        Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Digits-only phone (WhatsApp wa_id format, e.g. "5493411234567").
+  phone       String
+  name        String?
+  /// DNI captured at booking (digits only), persisted so the bot never asks twice.
+  dni         String?
+  /// Stable MercadoPago payer id learned from a confirmed transfer.
+  payerMpUserId String?
+  /// Times this player didn't show up (admin marks the booking). At 3+ the bot
+  /// requires the FULL court price as the deposit.
+  noShowCount Int      @default(0)
+  /// Credit (cents) in the player's favor — e.g. the deposit of a cancellation inside
+  /// the allowed window. Applied automatically to their next booking's deposit.
+  creditCents Int      @default(0)
+  /// Blocked players can't book through the bot (the club decides).
+  isBlocked   Boolean  @default(false)
+  notes       String?  @db.Text
+  bookings    Booking[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([clubId, phone])
+  @@index([clubId])
+}
+
+/// What happened to a paid deposit when its booking was cancelled:
+/// CREDITED = became player credit (cancelled early enough), FORFEITED = lost
+/// (late cancel / no-show policy), REFUNDED = the club returned the money by hand.
+enum DepositOutcome {
+  CREDITED
+  FORFEITED
+  REFUNDED
+}
+
 enum BookingStatus {
   PENDING_PAYMENT
   CONFIRMED
@@ -212,6 +301,21 @@ model Booking {
   club               Club              @relation(fields: [clubId], references: [id], onDelete: Cascade)
   playerName         String
   playerPhone        String?
+  /// CRM link, set automatically when the booking carries a phone.
+  playerId           String?
+  player             Player?           @relation(fields: [playerId], references: [id], onDelete: SetNull)
+  /// When the admin marked this booking as a no-show (player never came).
+  noShowAt           DateTime?
+  /// Player credit (cents) consumed at creation to reduce the required transfer.
+  /// Restored to the player if the booking is cancelled/expires unpaid.
+  creditAppliedCents Int               @default(0)
+  /// Set when a booking with a PAID deposit is cancelled — records where the money went.
+  depositOutcome     DepositOutcome?
+  /// Money collected at the front desk for this booking (cash or the club's own QR),
+  /// e.g. the rest of the court price on arrival — so the daily cash closure adds up.
+  localPaymentCents  Int               @default(0)
+  /// "CASH" | "QR" — how the front-desk amount was collected. Null when nothing was.
+  localPaymentMethod String?
   /// DNI the bot captured at booking (digits only), used to validate the payer's identity
   /// when the club has requireDniMatch on. Null otherwise.
   playerDni          String?
@@ -243,6 +347,10 @@ model Booking {
   receiptUploadedAt  DateTime?
   receipts           PaymentReceipt[]
   bookingProducts    BookingProduct[]
+  /// When the turno's bill was fully settled (todos pagaron) — set/cleared
+  /// automatically as player payments cover the total. Null = cuenta abierta.
+  settledAt          DateTime?
+  playerPayments     BookingPlayerPayment[]
   /// When the pre-match WhatsApp reminder was sent (BookingRemindersService, ~1h before
   /// the slot). Null until sent; guards the reminder cron from re-sending on every sweep.
   reminderSentAt     DateTime?
@@ -251,6 +359,7 @@ model Booking {
 
   @@index([clubId])
   @@index([slotId])
+  @@index([playerId])
   @@index([recurringBookingId])
   @@index([clubId, status])
   @@index([status, paymentExpiresAt])
@@ -306,6 +415,31 @@ enum ProductCategory {
   OTRO
 }
 
+/// How a player settled their share of the bill at the club.
+enum PlayerPaymentMethod {
+  CASH
+  QR
+  TRANSFER
+}
+
+/// One player's payment toward a booking's bill (cierre del turno). Positions 1..4
+/// match BookingProduct.playerMask (J1 = quien reservó, a quien se le acredita la seña).
+model BookingPlayerPayment {
+  id          String              @id @default(cuid())
+  bookingId   String
+  booking     Booking             @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  clubId      String
+  club        Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Player position 1..4 within the booking.
+  playerSlot  Int
+  amountCents Int
+  method      PlayerPaymentMethod
+  createdAt   DateTime            @default(now())
+
+  @@index([bookingId])
+  @@index([clubId])
+}
+
 /// Records which products were consumed during a booked court session.
 model BookingProduct {
   id             String   @id @default(cuid())
@@ -326,6 +460,63 @@ model BookingProduct {
 
   @@index([bookingId])
   @@index([clubId])
+}
+
+/// A scheduled mass price adjustment ("desde el 1/8 sube 10%"), applied by a daily
+/// cron once effectiveDateKey arrives (club-local), reusing the same bulk logic as the
+/// immediate adjustment. appliedAt marks it done (kept for history).
+model ScheduledPriceAdjustment {
+  id               String    @id @default(cuid())
+  clubId           String
+  club             Club      @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Percentage change, e.g. 10 = +10%.
+  percent          Float
+  /// Club-local "YYYY-MM-DD" the new prices take effect.
+  effectiveDateKey String
+  appliedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([clubId])
+  @@index([appliedAt, effectiveDateKey])
+}
+
+/// A prospect asking for a club ("Probar gratis"). Club creation is MANAGED: we
+/// contact them, configure MercadoPago/WhatsApp and provision the club ourselves
+/// (POST /onboarding/register with the ops secret). No tenant relation — this is
+/// pre-sales data.
+model ClubSignupRequest {
+  id        String   @id @default(cuid())
+  clubName  String
+  ownerName String
+  email     String
+  phone     String
+  message   String?  @db.Text
+  /// NEW → CONTACTED → CONVERTED (managed by us, updated by hand for now).
+  status    String   @default("NEW")
+  createdAt DateTime @default(now())
+
+  @@index([status])
+}
+
+/// A player waiting for a freed slot on a given club-local day. Created by the bot
+/// when a date has no availability and the player answers "avisame"; notified (and the
+/// booking flow pre-seeded) whenever a slot frees that day. First confirmed wins — the
+/// atomic slot lock already guarantees it. Rows expire daily once the day passes.
+model WaitlistEntry {
+  id         String   @id @default(cuid())
+  clubId     String
+  club       Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// WhatsApp sender id (E.164 without '+').
+  waId       String
+  playerName String?
+  /// Club-local day the player wants ("YYYY-MM-DD").
+  dateKey    String
+  /// Last freed-slot broadcast sent to this entry (throttles notification bursts).
+  notifiedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@unique([clubId, waId, dateKey])
+  @@index([clubId, dateKey])
 }
 
 /// Maps a Meta WhatsApp Business phone number ID to a club (tenant).

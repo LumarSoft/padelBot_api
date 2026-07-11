@@ -5,6 +5,7 @@ import { MercadoPagoService } from '../mercadopago/mercadopago.service'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
 import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
 import { DepositMode, PaymentVerificationMode } from 'generated/prisma/client'
+import { SubscriptionState, subscriptionSelect, subscriptionState } from './lib/subscription'
 
 export interface TransferConfig {
   transferAlias: string | null
@@ -13,11 +14,14 @@ export interface TransferConfig {
   depositPercent: number
   requireDniMatch: boolean
   paymentVerificationMode: PaymentVerificationMode
+  cancellationWindowHours: number
 }
 
 export interface ClubProfile {
   name: string
   slug: string
+  botWelcomeExtra: string | null
+  locationInfo: string | null
 }
 
 export interface MercadoPagoStatus {
@@ -43,10 +47,20 @@ export class ClubsService {
     private readonly mp: MercadoPagoService,
   ) {}
 
+  /** Effective subscription state for the panel's banner (soft guard, never blocks the panel). */
+  async getSubscriptionState(clubId: string): Promise<SubscriptionState> {
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: subscriptionSelect,
+    })
+    if (!club) throw new NotFoundException(`Club ${clubId} not found`)
+    return subscriptionState(club)
+  }
+
   async getProfile(clubId: string): Promise<ClubProfile> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { name: true, slug: true },
+      select: { name: true, slug: true, botWelcomeExtra: true, locationInfo: true },
     })
     if (!club) throw new NotFoundException(`Club ${clubId} not found`)
     return club
@@ -55,7 +69,11 @@ export class ClubsService {
   async updateProfile(clubId: string, dto: UpdateClubProfileDto): Promise<ClubProfile> {
     await this.prisma.club.update({
       where: { id: clubId },
-      data: { name: dto.name.trim() },
+      data: {
+        name: dto.name.trim(),
+        ...(dto.botWelcomeExtra !== undefined ? { botWelcomeExtra: dto.botWelcomeExtra.trim() || null } : {}),
+        ...(dto.locationInfo !== undefined ? { locationInfo: dto.locationInfo.trim() || null } : {}),
+      },
     })
     return this.getProfile(clubId)
   }
@@ -68,6 +86,7 @@ export class ClubsService {
         transferHolder: true,
         depositMode: true,
         depositPercent: true,
+        cancellationWindowHours: true,
         requireDniMatch: true,
         paymentVerificationMode: true,
       },
@@ -84,6 +103,7 @@ export class ClubsService {
         ...(dto.transferHolder !== undefined ? { transferHolder: dto.transferHolder.trim() || null } : {}),
         ...(dto.depositMode !== undefined ? { depositMode: dto.depositMode } : {}),
         ...(dto.depositPercent !== undefined ? { depositPercent: dto.depositPercent } : {}),
+        ...(dto.cancellationWindowHours !== undefined ? { cancellationWindowHours: dto.cancellationWindowHours } : {}),
         ...(dto.requireDniMatch !== undefined ? { requireDniMatch: dto.requireDniMatch } : {}),
         ...(dto.paymentVerificationMode !== undefined ? { paymentVerificationMode: dto.paymentVerificationMode } : {}),
       },
