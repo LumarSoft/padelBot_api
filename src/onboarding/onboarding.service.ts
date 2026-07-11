@@ -1,22 +1,66 @@
-import { ConflictException, Injectable, Logger } from '@nestjs/common'
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import * as bcrypt from 'bcrypt'
 import { randomBytes } from 'crypto'
-import { Role, SlotStatus } from 'generated/prisma/client'
+import { Prisma, Role } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
-import { shiftDateKey, todayKey } from '../availability/lib/datetime'
-import { bandDateTimes, bandsForDate } from '../availability/lib/schedule'
 import { RegisterClubDto } from './dto/register-club.dto'
 import { RequestClubDto } from './dto/request-club.dto'
+import { SaveSetupProgressDto } from './dto/save-setup-progress.dto'
 import { notifyOps } from '../common/ops-alert'
+import { formatSignupAlert } from './lib/signup-alert'
+import {
+  REQUIRED_STEP_IDS,
+  SETUP_STEP_IDS,
+  SetupProgress,
+  SetupStepId,
+  parseSetupProgress,
+} from './lib/setup-steps'
 
 const BCRYPT_ROUNDS = 10
-/** Free-trial length for self-service signups. */
+/** Free-trial length for new clubs. */
 const TRIAL_DAYS = Number(process.env.TRIAL_DAYS) || 14
 const DAY_MS = 24 * 60 * 60 * 1000
 
-/** Note demo bookings carry so the owner knows they are safe to cancel. */
-const DEMO_NOTE = 'Reserva de ejemplo creada por PadelBot — cancelala cuando quieras.'
+/** State of one step of the guided setup. */
+export interface SetupStepStatus {
+  id: SetupStepId
+  /** Derived from real data — true when the club actually has what this step configures. */
+  done: boolean
+  /** The owner moved past this step in the wizard (they may have skipped it on purpose). */
+  acknowledged: boolean
+  /** The bot cannot operate without this step. Skippable anyway; it just won't take bookings. */
+  required: boolean
+}
+
+export interface SetupStatus {
+  clubName: string
+  /** Null while the setup is still pending. Finishing it is never mandatory. */
+  setupCompletedAt: Date | null
+  /** Where to resume the wizard. */
+  currentStep: SetupStepId | null
+  steps: SetupStepStatus[]
+  /** What's already loaded, so each step shows it instead of starting from a blank slate. */
+  counts: {
+    courts: number
+    recurringBookings: number
+    staff: number
+    products: number
+    whatsappLines: number
+  }
+  /** True once every REQUIRED step is done: the bot can take a booking end to end. */
+  ready: boolean
+}
+
+/** Everything getStatus needs from the club row, in one round trip. */
+const setupClubSelect = {
+  name: true,
+  locationInfo: true,
+  transferAlias: true,
+  mpConnectedAt: true,
+  setupCompletedAt: true,
+  setupProgress: true,
+} as const
 
 @Injectable()
 export class OnboardingService {
@@ -25,32 +69,45 @@ export class OnboardingService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Lead capture for the MANAGED signup: stores the prospect and pings ops so we
-   * contact them, configure MercadoPago/WhatsApp and provision the club ourselves.
-   * Idempotent enough for a public form — repeats just create another NEW row.
+   * Lead capture for the MANAGED signup: stores the prospect's answers from the
+   * step-by-step `/register` flow and pings ops so we contact them, configure
+   * MercadoPago/WhatsApp and provision the club ourselves. Idempotent enough for a public
+   * form — repeats just create another NEW row.
    */
   async requestSignup(dto: RequestClubDto): Promise<{ received: boolean }> {
-    await this.prisma.clubSignupRequest.create({
+    const lead = await this.prisma.clubSignupRequest.create({
       data: {
         clubName: dto.clubName.trim(),
         ownerName: dto.ownerName.trim(),
         email: dto.email.toLowerCase().trim(),
         phone: dto.phone.trim(),
         message: dto.message?.trim() || null,
+        city: dto.city?.trim() || null,
+        courtCount: dto.courtCount ?? null,
+        courtType: dto.courtType ?? null,
+        slotDurationMinutes: dto.slotDurationMinutes ?? null,
+        openTime: dto.openTime ?? null,
+        closeTime: dto.closeTime ?? null,
+        avgPriceCents: dto.avgPriceCents ?? null,
+        chargesDeposit: dto.chargesDeposit ?? null,
+        hasMercadoPago: dto.hasMercadoPago ?? null,
+        currentSystem: dto.currentSystem ?? null,
+        biggestPain: dto.biggestPain ?? null,
+        fixedSlots: dto.fixedSlots ?? null,
+        howFound: dto.howFound ?? null,
+        contactWindow: dto.contactWindow ?? null,
+        contactWindowNote: dto.contactWindowNote?.trim() || null,
       },
     })
-    await notifyOps(
-      `🏓 Nueva solicitud de club: *${dto.clubName.trim()}* — ${dto.ownerName.trim()} ` +
-        `(${dto.email.trim()}, ${dto.phone.trim()})${dto.message ? ` — "${dto.message.trim()}"` : ''}`,
-    )
+    await notifyOps(formatSignupAlert(lead))
     return { received: true }
   }
 
   /**
-   * Self-service signup: creates the Club (on a 14-day trial) + its OWNER user +
-   * demo data (two padel courts and a couple of example bookings) in one
-   * transaction, so the panel never greets a new owner with an empty, dead
-   * dashboard. Everything demo is plainly labeled and deletable.
+   * Ops provisioning: creates the Club (on a trial) + its OWNER user, and nothing else.
+   * The club starts EMPTY on purpose — courts, prices, payments and the WhatsApp line get
+   * loaded for real in the `/setup` wizard, sitting with the owner. Seeding fake courts and
+   * example bookings here would only leave them demo rows to hunt down and delete.
    */
   async register(dto: RegisterClubDto): Promise<{ email: string }> {
     const email = dto.email.toLowerCase().trim()
@@ -76,43 +133,6 @@ export class OnboardingService {
             role: Role.OWNER,
           },
         })
-
-        const courtOne = await tx.court.create({
-          data: { clubId: club.id, name: 'Cancha 1', priceCents: 2000000, courtType: 'INDOOR' },
-          select: { id: true, openTime: true, closeTime: true, slotDurationMinutes: true, weeklyHours: true },
-        })
-        await tx.court.create({
-          data: { clubId: club.id, name: 'Cancha 2', priceCents: 1800000, courtType: 'OUTDOOR' },
-        })
-
-        // Two example bookings tomorrow evening so the agenda shows life on day one.
-        const tomorrow = shiftDateKey(todayKey(), 1)
-        const eveningBands = bandsForDate(courtOne, tomorrow)
-          .filter(b => b.start >= '18:00' && b.startOffset === 0)
-          .slice(0, 2)
-        for (const band of eveningBands) {
-          const { startsAt, endsAt } = bandDateTimes(tomorrow, band)
-          const slot = await tx.slot.create({
-            data: {
-              clubId: club.id,
-              courtId: courtOne.id,
-              startsAt,
-              endsAt,
-              priceCents: 2000000,
-              status: SlotStatus.BOOKED,
-            },
-            select: { id: true },
-          })
-          await tx.booking.create({
-            data: {
-              clubId: club.id,
-              slotId: slot.id,
-              playerName: 'Jugador de ejemplo',
-              status: 'CONFIRMED',
-              notes: DEMO_NOTE,
-            },
-          })
-        }
       })
     } catch (error) {
       if (isUniqueConstraintError(error)) {
@@ -121,8 +141,87 @@ export class OnboardingService {
       throw error
     }
 
-    this.logger.log(`New self-service club registered: ${dto.clubName} (${email})`)
+    this.logger.log(`New club provisioned: ${dto.clubName} (${email}) — setup pending`)
     return { email }
+  }
+
+  /**
+   * Aggregated state of the guided setup, in one request instead of the five the panel used
+   * to fire. Each step's `done` comes from the club's REAL data, so a club set up by hand (or
+   * before the wizard existed) reads as done without ever having opened it.
+   */
+  async getStatus(clubId: string): Promise<SetupStatus> {
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: setupClubSelect })
+    if (!club) throw new NotFoundException(`Club ${clubId} not found`)
+
+    const [courts, recurringBookings, staff, products, whatsappLines] = await Promise.all([
+      this.prisma.court.count({ where: { clubId } }),
+      this.prisma.recurringBooking.count({ where: { clubId, isActive: true } }),
+      // The OWNER themself doesn't count — this step is about inviting the rest of the team.
+      this.prisma.user.count({ where: { clubId, role: Role.STAFF, isActive: true } }),
+      this.prisma.product.count({ where: { clubId, isActive: true } }),
+      this.prisma.whatsAppLine.count({ where: { clubId, isActive: true } }),
+    ])
+
+    const progress = parseSetupProgress(club.setupProgress)
+    // A club can take deposits once it can tell players WHERE to transfer: either its own
+    // MercadoPago account is connected (auto-reconciled) or an alias is loaded (manual).
+    const canTakePayments = Boolean(club.mpConnectedAt) || Boolean(club.transferAlias)
+
+    const doneByStep: Record<SetupStepId, boolean> = {
+      complejo: Boolean(club.locationInfo),
+      canchas: courts > 0,
+      pagos: canTakePayments,
+      whatsapp: whatsappLines > 0,
+      fijos: recurringBookings > 0,
+      equipo: staff > 0,
+      kiosco: products > 0,
+    }
+
+    const steps: SetupStepStatus[] = SETUP_STEP_IDS.map(id => ({
+      id,
+      done: doneByStep[id],
+      acknowledged: progress.doneSteps.includes(id),
+      required: REQUIRED_STEP_IDS.includes(id),
+    }))
+
+    return {
+      clubName: club.name,
+      setupCompletedAt: club.setupCompletedAt,
+      currentStep: progress.currentStep,
+      steps,
+      counts: { courts, recurringBookings, staff, products, whatsappLines },
+      ready: REQUIRED_STEP_IDS.every(id => doneByStep[id]),
+    }
+  }
+
+  /** Persists the wizard's position so an interrupted setup resumes where it left off. */
+  async saveProgress(clubId: string, dto: SaveSetupProgressDto): Promise<SetupProgress> {
+    const progress: SetupProgress = {
+      currentStep: dto.currentStep ?? null,
+      doneSteps: [...new Set(dto.doneSteps ?? [])],
+    }
+    await this.prisma.club.update({
+      where: { id: clubId },
+      // SetupProgress is a closed interface; Prisma's Json input wants an index signature.
+      data: { setupProgress: { ...progress } as Prisma.InputJsonObject },
+    })
+    return progress
+  }
+
+  /**
+   * Marks the setup as finished. Deliberately does NOT require every step to be done: the
+   * owner may finish with steps skipped (e.g. MercadoPago pending because they didn't have
+   * the credentials at hand) and complete them later from Configuración.
+   */
+  async complete(clubId: string): Promise<{ setupCompletedAt: Date }> {
+    const club = await this.prisma.club.update({
+      where: { id: clubId },
+      data: { setupCompletedAt: new Date() },
+      select: { name: true, setupCompletedAt: true },
+    })
+    this.logger.log(`Club setup completed: ${club.name}`)
+    return { setupCompletedAt: club.setupCompletedAt! }
   }
 
   /** Slugifies the club name; a short random suffix dodges collisions. */

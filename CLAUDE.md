@@ -54,6 +54,7 @@ This is **PadelBot**, a multi-tenant SaaS for padel clubs in Rosario, Argentina 
 **Feature modules (all built and wired in `AppModule`):**
 
 - `auth` — JWT login, guard, `@CurrentUser()` decorator, `OWNER`/`STAFF` roles.
+- `onboarding` — managed club signup (`POST /onboarding/request` captures the lead; ops-only `POST /onboarding/register` provisions an **empty** Club + OWNER on a trial — no demo data), plus the **guided account setup** behind the panel's `/setup` wizard: `GET /onboarding/status` aggregates the state of the seven setup steps, `PATCH /onboarding/progress` stores the resume position on `Club.setupProgress`, `POST /onboarding/complete` sets `Club.setupCompletedAt`. Each step's `done` is **derived from the club's real data** (`OnboardingService.getStatus`), never trusted from the stored progress blob, so a club configured by hand reads as done. Every step is skippable; `ready` gates only on the three the bot can't run without (courts, payment config, WhatsApp line).
 - `clubs` — per-club transfer config (alias/holder) and **MercadoPago Connect OAuth** (each club connects its own MP account; tokens stored encrypted via `CryptoService`, refreshed by the poller before expiry).
 - `courts` — physical courts (`name`, `priceCents`, `openTime`/`closeTime`, `courtType` INDOOR/OUTDOOR).
 - `slots` — bookable time bands (`turnos`); supports bulk-blocking. Unique `(courtId, startsAt)` prevents concurrent admin+bot from duplicating a slot.

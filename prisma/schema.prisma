@@ -31,6 +31,16 @@ model Club {
   /// End of the last paid period for ACTIVE/PAST_DUE clubs. The bot keeps working for
   /// a grace window past this before falling back to "contact the club directly".
   currentPeriodEnd   DateTime?
+  /// When the guided account setup (`/setup` wizard) was finished. Null = still pending;
+  /// the panel keeps surfacing the "puesta a punto" entry point until it's set. Finishing
+  /// the wizard is never mandatory — every step can be skipped and redone from Configuración.
+  setupCompletedAt DateTime?
+  /// Wizard progress so a setup interrupted mid-way resumes where it left off:
+  /// `{ "currentStep": "pagos", "doneSteps": ["complejo", "canchas"] }`. Advisory only —
+  /// the real state of each step is always derived from the actual data (see
+  /// OnboardingService.getStatus), never trusted from here.
+  setupProgress    Json?
+
   /// MercadoPago alias/CVU players transfer the deposit to. Null until the owner configures it.
   transferAlias  String?
   /// Account holder name shown to players alongside the alias ("titular").
@@ -484,6 +494,13 @@ model ScheduledPriceAdjustment {
 /// contact them, configure MercadoPago/WhatsApp and provision the club ourselves
 /// (POST /onboarding/register with the ops secret). No tenant relation — this is
 /// pre-sales data.
+///
+/// Everything below `phone` comes from the step-by-step signup at `/register`, which asks
+/// the questions we'd otherwise ask on the call. Two purposes: PRE-LOAD the `/setup` wizard
+/// (courts, hours, prices, deposit policy) so provisioning is half done before we sit with
+/// the club, and QUALIFY the lead (how they work today, what hurts, how they found us).
+/// All of it is nullable — the commercial block is skippable and a lead is worth having
+/// even half-answered.
 model ClubSignupRequest {
   id        String   @id @default(cuid())
   clubName  String
@@ -491,6 +508,44 @@ model ClubSignupRequest {
   email     String
   phone     String
   message   String?  @db.Text
+
+  city      String?
+
+  // ── Operación (pre-loads the courts step of /setup) ──────────────────────────
+  /// How many courts the complex has.
+  courtCount          Int?
+  /// "INDOOR" | "OUTDOOR" | "MIXED".
+  courtType           String?
+  /// Typical booking length (60 / 90 / 120). Null = "depende de la cancha".
+  slotDurationMinutes Int?
+  /// Opening / closing wall-clock time ("HH:MM").
+  openTime            String?
+  closeTime           String?
+  /// Typical price of one booking, in cents (same unit as everywhere else).
+  avgPriceCents       Int?
+
+  // ── Cobros (pre-loads the payments step — the hardest one to configure) ───────
+  /// Whether they charge a deposit today: "ALWAYS" | "SOMETIMES" | "NEVER".
+  chargesDeposit String?
+  /// Whether the club already has a MercadoPago account of its own:
+  /// "YES" | "NO" | "UNSURE". Decides how painful the MP Connect step will be.
+  hasMercadoPago String?
+
+  // ── Contexto comercial (optional — qualifies the lead) ────────────────────────
+  /// How they manage bookings today: "PAPER" | "WHATSAPP" | "SPREADSHEET" | "SOFTWARE".
+  currentSystem String?
+  /// What eats most of their time: "REPLYING" | "DEPOSITS" | "CHANGES" | "FIXED_SLOTS" | "OTHER".
+  biggestPain   String?
+  /// Weekly fixed bookings they'd need migrated: "NONE" | "FEW" | "SOME" | "MANY".
+  fixedSlots    String?
+  /// Where they heard about us: "INSTAGRAM" | "REFERRAL" | "GOOGLE" | "OTHER_CLUB" | "OTHER".
+  howFound      String?
+  /// When they prefer to be contacted: "MORNING" | "AFTERNOON" | "EVENING" | "CUSTOM"
+  /// (or legacy "ANY"). CUSTOM means they named a specific window — see contactWindowNote.
+  contactWindow     String?
+  /// Free text when contactWindow = CUSTOM ("martes y jueves después de las 16").
+  contactWindowNote String?
+
   /// NEW → CONTACTED → CONVERTED (managed by us, updated by hand for now).
   status    String   @default("NEW")
   createdAt DateTime @default(now())

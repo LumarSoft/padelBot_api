@@ -14,6 +14,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { AuthenticatedUser } from '../auth/types/jwt-payload'
 import { ClubsService } from './clubs.service'
+import { ConnectMercadoPagoDto } from './dto/connect-mercadopago.dto'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
 import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
 
@@ -57,12 +58,19 @@ export class ClubsController {
     return this.clubsService.getMercadoPagoStatus(user.clubId)
   }
 
-  /** Returns the URL the owner's browser must visit to authorize their MP account. */
+  /**
+   * Returns the URL the owner's browser must visit to authorize their MP account. `origin`
+   * says which screen they started from so the OAuth callback returns them there (the setup
+   * wizard must not lose them to Configuración mid-flow).
+   */
   @Post('me/mercadopago/connect')
   @HttpCode(HttpStatus.OK)
-  connectMercadoPago(@CurrentUser() user: AuthenticatedUser): { url: string } {
+  connectMercadoPago(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ConnectMercadoPagoDto,
+  ): { url: string } {
     this.assertOwner(user)
-    return { url: this.clubsService.buildConnectUrl(user.clubId) }
+    return { url: this.clubsService.buildConnectUrl(user.clubId, dto.origin) }
   }
 
   @Delete('me/mercadopago')

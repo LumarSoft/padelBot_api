@@ -91,35 +91,148 @@ them, configure MercadoPago and the WhatsApp line, and provision the tenant ours
 
 ### POST /onboarding/request
 
-Public lead form ("quiero mi club"): stores a `ClubSignupRequest` and alerts ops
-(`OPS_ALERT_WEBHOOK_URL`). Rate-limited 3/min per IP.
+Public lead form: the answers from the step-by-step signup at `/register`. Stores a
+`ClubSignupRequest` and alerts ops (`OPS_ALERT_WEBHOOK_URL`) with a readable summary
+(`lib/signup-alert.ts`) so we can call the club already knowing how their complex works.
+Rate-limited 3/min per IP.
 
-**Auth required:** No
+The questions serve two ends: **pre-loading the `/setup` wizard** (courts, hours, price,
+deposit policy — so provisioning is half done before we sit with them) and **qualifying the
+lead**. Only the contact fields are required — the commercial block is skippable in the UI,
+and a half-answered lead is still worth keeping, so nothing else is rejected.
+
+**Auth required:** No. The BFF must proxy this **without** a session (`proxyPublicToApi`) —
+a prospect has none by definition.
 
 **Request body**
 
-| Field     | Type   | Required | Constraints |
-| --------- | ------ | -------- | ----------- |
-| clubName  | string | Yes      | 2–80 chars  |
-| ownerName | string | Yes      | 1–100 chars |
-| email     | string | Yes      | valid email |
-| phone     | string | Yes      | 6–30 chars  |
-| message   | string | No       | ≤1000 chars |
+| Field               | Type   | Required | Constraints                                              |
+| ------------------- | ------ | -------- | -------------------------------------------------------- |
+| clubName            | string | Yes      | 2–80 chars                                               |
+| ownerName           | string | Yes      | 1–100 chars                                              |
+| email               | string | Yes      | valid email                                              |
+| phone               | string | Yes      | 6–30 chars                                               |
+| message             | string | No       | ≤1000 chars                                              |
+| city                | string | No       | ≤80 chars                                                |
+| courtCount          | int    | No       | 1–50                                                     |
+| courtType           | string | No       | `INDOOR` \| `OUTDOOR` \| `MIXED`                         |
+| slotDurationMinutes | int    | No       | 30–240                                                   |
+| openTime            | string | No       | `HH:MM`                                                  |
+| closeTime           | string | No       | `HH:MM`                                                  |
+| avgPriceCents       | int    | No       | ≥0 (cents, like everywhere else)                         |
+| chargesDeposit      | string | No       | `ALWAYS` \| `SOMETIMES` \| `NEVER`                       |
+| hasMercadoPago      | string | No       | `YES` \| `NO` \| `UNSURE`                                |
+| currentSystem       | string | No       | `PAPER` \| `WHATSAPP` \| `SPREADSHEET` \| `SOFTWARE`     |
+| biggestPain         | string | No       | `REPLYING` \| `DEPOSITS` \| `CHANGES` \| `FIXED_SLOTS` \| `OTHER` |
+| fixedSlots          | string | No       | `NONE` \| `FEW` \| `SOME` \| `MANY`                      |
+| howFound            | string | No       | `INSTAGRAM` \| `REFERRAL` \| `GOOGLE` \| `OTHER_CLUB` \| `OTHER` |
+| contactWindow       | string | No       | `MORNING` \| `AFTERNOON` \| `EVENING` \| `ANY`           |
+
+The allowed values live in `src/onboarding/lib/signup-answers.ts`, together with the Spanish
+labels the ops alert renders.
+
+```json
+{
+  "clubName": "Pádel Center",
+  "ownerName": "Juan Pérez",
+  "email": "juan@padelcenter.com",
+  "phone": "+54 9 341 555-5555",
+  "city": "Rosario",
+  "courtCount": 4,
+  "courtType": "INDOOR",
+  "slotDurationMinutes": 90,
+  "openTime": "09:00",
+  "closeTime": "23:00",
+  "avgPriceCents": 2000000,
+  "chargesDeposit": "ALWAYS",
+  "hasMercadoPago": "YES",
+  "contactWindow": "AFTERNOON"
+}
+```
 
 `201 Created` — `{ "received": true }`
 
 ### POST /onboarding/register
 
 **Ops-only** provisioning (header `x-ops-secret` must equal `OPS_ADMIN_SECRET`; fails
-closed when unset): creates the Club (on a `TRIAL_DAYS` free trial, default 14), its OWNER
-user and demo data (two padel courts + labeled example bookings), then returns the login
-payload (token + user) so we can hand credentials to the owner once MP/WhatsApp are set up.
+closed when unset): creates the Club (on a `TRIAL_DAYS` free trial, default 14) and its
+OWNER user, then returns the login payload (token + user).
+
+The club is created **empty** — no demo courts, no example bookings. Courts, prices,
+payments and the WhatsApp line are loaded for real in the `/setup` wizard, sitting with the
+owner; seeding fake rows would only leave them data to hunt down and delete.
 
 **Auth required:** ops secret header
 
-**Request body** — same as before: `clubName` (2–80), `ownerName` (1–100), `email`, `password` (8–72)
+**Request body** — `clubName` (2–80), `ownerName` (1–100), `email`, `password` (8–72)
 
 `201 Created` — token + user · `403 Forbidden` — missing/invalid ops secret · `409 Conflict` — email in use
+
+### GET /onboarding/status
+
+Aggregated state of the guided account setup (the `/setup` wizard), in one request instead
+of the five the panel used to fire. Each step's `done` is derived from the club's **real
+data**, never from stored progress — a club configured by hand reads as done without ever
+having opened the wizard.
+
+Steps: `complejo` · `canchas` · `pagos` · `whatsapp` · `fijos` · `equipo` · `kiosco`.
+`required` marks the three the bot cannot operate without (`canchas`, `pagos`, `whatsapp`);
+`ready` is true once all of those are done. Every step is skippable regardless.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{
+  "clubName": "Padel Center",
+  "setupCompletedAt": null,
+  "currentStep": "pagos",
+  "steps": [
+    { "id": "complejo", "done": true, "acknowledged": true, "required": false },
+    { "id": "canchas", "done": true, "acknowledged": true, "required": true },
+    { "id": "pagos", "done": false, "acknowledged": false, "required": true }
+  ],
+  "counts": { "courts": 4, "recurringBookings": 12, "staff": 2, "products": 6, "whatsappLines": 1 },
+  "ready": false
+}
+```
+
+`404 Not Found` — club does not exist
+
+### PATCH /onboarding/progress
+
+Saves the wizard's position so an interrupted setup resumes where it left off. Advisory
+only: `GET /onboarding/status` always derives `done` from real data, never from this.
+
+**Auth required:** Yes (OWNER)
+
+**Request body**
+
+| Field       | Type     | Required | Constraints                          |
+| ----------- | -------- | -------- | ------------------------------------ |
+| currentStep | string   | No       | one of the step ids, or null         |
+| doneSteps   | string[] | No       | step ids; duplicates are collapsed   |
+
+```json
+{ "currentStep": "pagos", "doneSteps": ["complejo", "canchas"] }
+```
+
+`200 OK` — `{ "currentStep": "pagos", "doneSteps": ["complejo", "canchas"] }`
+
+`403 Forbidden` — caller is not the OWNER
+
+### POST /onboarding/complete
+
+Marks the setup as finished (`Club.setupCompletedAt`). Deliberately does **not** require
+every step to be done — the owner may finish with steps skipped (e.g. MercadoPago pending
+because they didn't have the credentials at hand) and complete them later in Configuración.
+
+**Auth required:** Yes (OWNER)
+
+`200 OK` — `{ "setupCompletedAt": "2026-07-11T18:30:00.000Z" }`
+
+`403 Forbidden` — caller is not the OWNER
 
 ## Users (equipo)
 
@@ -1015,6 +1128,18 @@ Starts the MercadoPago Connect (OAuth) flow. Returns the authorization URL the o
 browser must visit to authorize their MercadoPago account. **Owner only.**
 
 **Auth required:** Yes (role `owner`)
+
+**Request body**
+
+| Field  | Type   | Required | Constraints                                    |
+| ------ | ------ | -------- | ---------------------------------------------- |
+| origin | string | No       | `"configuracion"` (default) or `"setup"`       |
+
+`origin` is the panel screen the owner started from; the OAuth callback returns them to it
+(so connecting from the setup wizard doesn't dump them into Configuración). It travels
+inside the encrypted `state` and is resolved against a fixed whitelist of panel paths on
+the way back — it is **not** a URL, because the callback is public and echoing a
+caller-supplied destination into a redirect would be an open redirect.
 
 `200 OK`
 
