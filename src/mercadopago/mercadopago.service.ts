@@ -244,11 +244,13 @@ export class MercadoPagoService {
    * Verifies the HMAC-SHA256 signature MercadoPago sends in the x-signature header.
    * Format: "ts=<unix_ts>,v1=<hmac_hex>"
    * Signed template: "id:<data.id>;request-id:<x-request-id>;ts:<ts>"
-   * Returns true when WEBHOOK_SECRET is not configured (local dev fallback).
+   * Skips verification when WEBHOOK_SECRET is not configured — but only outside production,
+   * so a missing/misconfigured secret disables the local-dev convenience instead of silently
+   * accepting unsigned payment webhooks in prod.
    */
   verifyWebhookSignature(dataId: string, xRequestId: string, xSignature: string): boolean {
     const secret = process.env.WEBHOOK_SECRET
-    if (!secret) return true
+    if (!secret) return process.env.NODE_ENV !== 'production'
 
     if (!xSignature) return false
 
