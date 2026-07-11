@@ -107,6 +107,7 @@ model Club {
   waitlistEntries      WaitlistEntry[]
   scheduledPriceAdjustments ScheduledPriceAdjustment[]
   bookingPlayerPayments BookingPlayerPayment[]
+  llmUsageDaily        LlmUsageDaily[]
 }
 
 enum Role {
@@ -224,6 +225,10 @@ model User {
   /// True while the user is on a temporary password (created/reset by the OWNER);
   /// the panel nags them to change it.
   mustChangePassword Boolean          @default(false)
+  /// Last successful login. Read by the ops console: a club that pays but hasn't opened
+  /// the panel in weeks is churning before it cancels, and this is the only place that
+  /// shows it.
+  lastLoginAt      DateTime?
   clubId           String
   club             Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
   bookings         Booking[]
@@ -546,11 +551,66 @@ model ClubSignupRequest {
   /// Free text when contactWindow = CUSTOM ("martes y jueves después de las 16").
   contactWindowNote String?
 
-  /// NEW → CONTACTED → CONVERTED (managed by us, updated by hand for now).
+  /// NEW → CONTACTED → CONVERTED → LOST. Moved from the ops console (`/ops/leads`).
   status    String   @default("NEW")
+  /// Our own notes on the lead ("pidió llamar el lunes", "compara con Playtomic").
+  /// Never shown to the prospect — this is the sales file.
+  internalNotes String? @db.Text
+  /// When we first reached out. Together with createdAt this is our response time,
+  /// the one number that decides whether a lead answers or goes cold.
+  contactedAt   DateTime?
+  /// The club we provisioned for this lead (set when status → CONVERTED). Not a
+  /// relation: a lead is pre-sales data and must survive the club being deleted.
+  convertedClubId String?
   createdAt DateTime @default(now())
 
   @@index([status])
+  @@index([createdAt])
+}
+
+/// A Lumarsoft operator (us). Deliberately NOT a `User`: `User` is tenant-scoped and
+/// carries a clubId, so a platform admin modelled there would have to "belong" to some
+/// club and a bug in one guard would expose every tenant. This model has its own login,
+/// its own JWT secret (OPS_JWT_SECRET) and its own guard — a club token and an ops token
+/// are not interchangeable even if a guard is wired wrong, because they don't verify
+/// against the same key.
+model PlatformAdmin {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  password  String
+  name      String
+  /// Deactivated admins can't log in (soft delete — keeps the audit trail readable).
+  isActive  Boolean  @default(true)
+  lastLoginAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Daily rollup of what a club's conversations cost us in OpenAI. Written by
+/// `LlmService` on every completion (upsert on clubId+dateKey).
+///
+/// This exists because the bot's cost is our only real variable cost per tenant: without
+/// it, "is this club profitable at $X/month?" is unanswerable. It's a daily aggregate and
+/// not a row per call on purpose — the per-call detail is already in the logs, and one row
+/// per club per day stays small forever.
+model LlmUsageDaily {
+  id           String   @id @default(cuid())
+  clubId       String
+  club         Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Club-local day ("YYYY-MM-DD"), same convention as everywhere else.
+  dateKey      String
+  calls        Int      @default(0)
+  inputTokens  Int      @default(0)
+  outputTokens Int      @default(0)
+  /// Cost in MICRO-dollars (1e-6 USD) — an integer, because storing money as a float is
+  /// how you end up with $0.30000000000000004 in a margin report.
+  costMicroUsd Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([clubId, dateKey])
+  @@index([clubId])
+  @@index([dateKey])
 }
 
 /// A player waiting for a freed slot on a given club-local day. Created by the bot

@@ -7,5 +7,8 @@ import { OnboardingService } from './onboarding.service'
   imports: [AuthModule],
   controllers: [OnboardingController],
   providers: [OnboardingService],
+  // The ops console provisions a club straight from a lead; it reuses this rather than
+  // keeping a second copy of tenant creation that could drift.
+  exports: [OnboardingService],
 })
 export class OnboardingModule {}

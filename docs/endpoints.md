@@ -1406,3 +1406,391 @@ club). Scoped to the caller — a user cannot remove another user's token.
 **Responses**
 
 `200 OK` — empty body
+
+---
+
+## Ops console (Lumarsoft, cross-tenant)
+
+The internal console at `/ops` (panel). **Every route here reads across tenants**, which is
+exactly what the rest of this API is built never to do. Two things keep that safe:
+
+1. **A separate identity.** `PlatformAdmin` is not a `User` — it has no `clubId`, so a club
+   admin can never be one by accident.
+2. **A separate key.** Ops tokens are signed with `OPS_JWT_SECRET`, not `JWT_SECRET`. A club's
+   token doesn't merely get rejected here — it fails to verify. The reverse holds too.
+
+The console is **opt-in**: with `OPS_JWT_SECRET` unset, login returns `503` and no token can
+validate. The club-facing API is unaffected.
+
+Create the first operator on the server: `npm run ops:admin -- --email … --name … --password …`
+
+### POST /ops/auth/login
+
+Signs an operator in and returns the ops token.
+
+**Auth required:** No (it mints the token). Rate-limited to 5/min per IP.
+
+**Request body**
+
+| Field    | Type   | Required | Constraints  |
+| -------- | ------ | -------- | ------------ |
+| email    | string | Yes      | valid email  |
+| password | string | Yes      | min length 1 |
+
+```json
+{ "email": "mateo@lumarsoft.com", "password": "…" }
+```
+
+**Responses**
+
+`200 OK`
+```json
+{
+  "token": "eyJhbGciOi…",
+  "admin": { "id": "1", "email": "mateo@lumarsoft.com", "name": "Mateo" }
+}
+```
+
+`401 Unauthorized` — wrong credentials, or the account is deactivated.
+```json
+{ "message": "Credenciales incorrectas", "statusCode": 401 }
+```
+
+`503 Service Unavailable` — `OPS_JWT_SECRET` is not configured; the console is disabled.
+```json
+{ "message": "La consola de operaciones no está configurada", "statusCode": 503 }
+```
+
+### GET /ops/auth/me
+
+The signed-in operator.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK`
+```json
+{ "id": "1", "email": "mateo@lumarsoft.com", "name": "Mateo" }
+```
+
+### GET /ops/leads
+
+The signup pipeline — every answer from the `/register` form, plus our sales file.
+
+**Auth required:** Yes (ops token)
+
+**Query**
+
+| Field  | Type   | Required | Constraints                            |
+| ------ | ------ | -------- | -------------------------------------- |
+| status | string | No       | `NEW` \| `CONTACTED` \| `CONVERTED` \| `LOST` — omit for the whole pipeline |
+
+**Responses**
+
+`200 OK` — newest first.
+```json
+[
+  {
+    "id": "clx…",
+    "clubName": "Padel Center",
+    "ownerName": "Ana",
+    "email": "ana@padelcenter.com",
+    "phone": "5493411234567",
+    "city": "Rosario",
+    "courtCount": 3,
+    "courtType": "INDOOR",
+    "slotDurationMinutes": 90,
+    "openTime": "09:00",
+    "closeTime": "00:00",
+    "avgPriceCents": 2000000,
+    "chargesDeposit": "SOMETIMES",
+    "hasMercadoPago": "YES",
+    "currentSystem": "WHATSAPP",
+    "biggestPain": "DEPOSITS",
+    "fixedSlots": "SOME",
+    "howFound": "REFERRAL",
+    "contactWindow": "CUSTOM",
+    "contactWindowNote": "martes y jueves después de las 16",
+    "message": "Quiero dejar de perseguir las señas.",
+    "status": "NEW",
+    "internalNotes": null,
+    "contactedAt": null,
+    "convertedClubId": null,
+    "createdAt": "2026-07-11T18:00:00.000Z"
+  }
+]
+```
+
+### GET /ops/leads/summary
+
+Where the leads come from, how fast we answer, and what they say hurts.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK` — `medianResponseHours` is the median (not mean) time from lead to first contact, and
+is `null` until we've contacted at least one.
+```json
+{
+  "pipeline": { "NEW": 2, "CONTACTED": 1, "CONVERTED": 1, "LOST": 0 },
+  "last30Days": 4,
+  "medianResponseHours": 3.5,
+  "byChannel": [{ "value": "REFERRAL", "leads": 3, "converted": 1 }],
+  "byPain": [{ "value": "DEPOSITS", "count": 3 }]
+}
+```
+
+### GET /ops/leads/:id
+
+One lead.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK` — same shape as an item of `GET /ops/leads`.
+
+`404 Not Found`
+```json
+{ "message": "Lead no encontrado", "statusCode": 404 }
+```
+
+### PATCH /ops/leads/:id
+
+Moves a lead through the pipeline, and stores our notes on it. `contactedAt` is stamped the
+first time the lead leaves `NEW` and is never overwritten — it's the start of the
+response-time metric.
+
+**Auth required:** Yes (ops token)
+
+**Request body**
+
+| Field         | Type   | Required | Constraints                                     |
+| ------------- | ------ | -------- | ----------------------------------------------- |
+| status        | string | No       | `NEW` \| `CONTACTED` \| `CONVERTED` \| `LOST`   |
+| internalNotes | string | No       | max 4000 chars. Never shown to the prospect.    |
+
+```json
+{ "status": "CONTACTED", "internalNotes": "Llamar el lunes, compara con Playtomic." }
+```
+
+**Responses**
+
+`200 OK` — the updated lead.
+
+`404 Not Found`
+```json
+{ "message": "Lead no encontrado", "statusCode": 404 }
+```
+
+### POST /ops/leads/:id/provision
+
+Creates the tenant from the lead and marks it `CONVERTED`, linked to the club it became. The
+club is created **empty** (as with `POST /onboarding/register`) — the courts/prices/hours the
+prospect gave us pre-load the `/setup` wizard, they are not written here.
+
+**Auth required:** Yes (ops token)
+
+**Request body**
+
+| Field     | Type   | Required | Constraints                                              |
+| --------- | ------ | -------- | -------------------------------------------------------- |
+| password  | string | Yes      | 8–72 chars. Temporary — the owner changes it on first login. |
+| clubName  | string | No       | 2–80 chars. Defaults to the lead's.                       |
+| ownerName | string | No       | 1–100 chars. Defaults to the lead's.                      |
+| email     | string | No       | valid email. Defaults to the lead's.                      |
+
+```json
+{ "password": "temporal-2026", "clubName": "Padel Center" }
+```
+
+**Responses**
+
+`201 Created` — the lead, now `CONVERTED` with `convertedClubId` set.
+
+`409 Conflict` — already provisioned, or the email is taken by another account.
+```json
+{ "message": "Este lead ya fue convertido en club", "statusCode": 409 }
+```
+
+### GET /ops/clubs
+
+Every tenant: subscription, whether it can actually take a booking, what it's doing, and what
+it costs us. `activity` covers the last 30 days.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK` — `readiness.ready` is true only with courts + payments + a WhatsApp line: a club
+missing any of them is not live, whatever its subscription says. `dormant` means nobody has
+opened the panel in 14 days (trial clubs are exempt — they haven't had time).
+```json
+[
+  {
+    "id": "clx…",
+    "name": "Club Demo Pádel",
+    "slug": "club-demo",
+    "createdAt": "2026-06-21T20:30:28.969Z",
+    "subscription": {
+      "subscriptionStatus": "TRIAL",
+      "plan": "base",
+      "trialEndsAt": null,
+      "currentPeriodEnd": null,
+      "severity": "trial",
+      "botAllowed": true,
+      "daysLeft": null
+    },
+    "readiness": {
+      "courts": 2,
+      "paymentsConfigured": true,
+      "mpConnected": false,
+      "whatsappLines": 1,
+      "ready": true,
+      "setupCompletedAt": "2026-07-11T15:28:16.035Z"
+    },
+    "activity": {
+      "bookingsBot": 22,
+      "bookingsPanel": 9,
+      "depositsCents": 10000000,
+      "conversations": 1,
+      "lastPanelLoginAt": "2026-07-11T14:02:00.000Z",
+      "dormant": false
+    },
+    "llmCostMicroUsd": 41230
+  }
+]
+```
+
+### PATCH /ops/clubs/:id/subscription
+
+Manual billing from the UI — the same thing `npm run subscription` does from the shell.
+
+**Auth required:** Yes (ops token)
+
+**Request body**
+
+| Field  | Type   | Required | Constraints                                                 |
+| ------ | ------ | -------- | ----------------------------------------------------------- |
+| status | string | Yes      | `TRIAL` \| `ACTIVE` \| `PAST_DUE` \| `CANCELLED`            |
+| months | number | No       | 1–24. With `ACTIVE`: paid months from now. Default 1.       |
+| days   | number | No       | 1–180. With `TRIAL`: trial days from now. Default 14.       |
+| plan   | string | No       | max 40 chars (`base` / `pro`).                              |
+
+```json
+{ "status": "ACTIVE", "months": 1 }
+```
+
+**Responses**
+
+`200 OK` — the derived subscription state.
+```json
+{
+  "subscriptionStatus": "ACTIVE",
+  "plan": "base",
+  "trialEndsAt": null,
+  "currentPeriodEnd": "2026-08-10T21:00:00.000Z",
+  "severity": "ok",
+  "botAllowed": true,
+  "daysLeft": 30
+}
+```
+
+`404 Not Found`
+```json
+{ "message": "Club no encontrado", "statusCode": 404 }
+```
+
+### GET /ops/metrics/business
+
+MRR, activation, GMV and bot-vs-panel across every club. Last 30 days.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK` — MRR prices each `ACTIVE` club by `PLAN_PRICE_<PLAN>_CENTS`; a plan with no
+configured price contributes 0 and is counted in `clubsWithoutPrice` rather than guessed at.
+`activation.activated` counts clubs that reached a real bot booking within 7 days of being
+provisioned.
+```json
+{
+  "mrrCents": 3500000,
+  "clubsWithoutPrice": 0,
+  "clubs": { "total": 1, "trial": 1, "active": 0, "pastDue": 0, "cancelled": 0, "ready": 1 },
+  "activation": { "provisioned": 1, "activated": 1, "medianDaysToFirstBooking": 0 },
+  "gmvCents": 10000000,
+  "bookings": { "bot": 22, "panel": 9 },
+  "series": [{ "date": "2026-07-11", "bot": 3, "panel": 1 }]
+}
+```
+
+### GET /ops/metrics/bot
+
+Whether the bot closes bookings on its own, and what it costs us to do so. Last 30 days.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK` — `handedToHuman` is the bot's failure rate (the player asked for a person, or staff
+took over). Costs are in **micro-USD** (integers; 1e-6 USD) and come from `LlmUsageDaily`.
+```json
+{
+  "funnel": {
+    "conversations": 84,
+    "bookingsStarted": 22,
+    "bookingsConfirmed": 15,
+    "handedToHuman": 3
+  },
+  "byState": [{ "state": "BOOK_SLOT", "count": 1 }],
+  "messages": { "user": 81, "bot": 81, "admin": 2 },
+  "cost": {
+    "totalMicroUsd": 41230,
+    "calls": 96,
+    "microUsdPerConfirmedBooking": 2749,
+    "perClub": [
+      { "clubId": "clx…", "clubName": "Club Demo Pádel", "microUsd": 41230, "calls": 96 }
+    ],
+    "series": [{ "date": "2026-07-11", "microUsd": 1820 }]
+  }
+}
+```
+
+### GET /ops/health
+
+Everything that needs a human, across every club. **An empty `issues` array means nothing is
+wrong** — the screen is a to-do list, not a wall of green ticks.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK` — `poller` is the reconciliation poller's in-memory state (meaningful on the instance
+running the scheduler, see `RUN_SCHEDULER`). Issue kinds: `POLLER_DOWN`, `CLUB_MP_FAILING`,
+`STUCK_PENDING`, `RECEIPT_AWAITING_REVIEW`, `MP_TOKEN_EXPIRING`, `ADVISOR_WAITING`,
+`CLUB_NOT_LIVE`. Critical ones sort first.
+```json
+{
+  "poller": {
+    "reconciliationActive": true,
+    "lastPollOkAt": "2026-07-11T21:06:40.000Z",
+    "consecutiveFailures": 0,
+    "failingClubs": []
+  },
+  "issues": [
+    {
+      "kind": "RECEIPT_AWAITING_REVIEW",
+      "severity": "warning",
+      "message": "2 comprobantes sin revisar en Club Demo Pádel. El jugador ya pagó y está esperando.",
+      "clubId": "clx…",
+      "clubName": "Club Demo Pádel",
+      "count": 2
+    }
+  ],
+  "webhookDedupRows": 0,
+  "checkedAt": "2026-07-11T21:06:58.317Z"
+}
+```

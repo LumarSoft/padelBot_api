@@ -43,6 +43,19 @@ const POLL_INTERVAL_MS = (Number(process.env.PAYMENT_POLL_SECONDS) || 20) * 1000
 /** Consecutive poll failures before alerting the club and ops. */
 const ALERT_FAILURE_THRESHOLD = Number(process.env.PAYMENT_ALERT_FAILURES) || 3
 
+/**
+ * The poller's own state, cross-tenant, for the ops console. Same in-memory counters the
+ * per-club health uses — but here the per-club failure map is exposed whole, because the
+ * question is "is any club's MercadoPago broken right now", not "is mine".
+ */
+export interface PollerHealth {
+  reconciliationActive: boolean
+  lastPollOkAt: Date | null
+  consecutiveFailures: number
+  /** Clubs whose own-token MercadoPago calls are currently failing (clubId → failure count). */
+  failingClubs: { clubId: string; consecutiveFailures: number }[]
+}
+
 /** Reconciliation health snapshot for the panel's "reconciliación activa" indicator. */
 export interface PaymentsHealth {
   /** True when the poller completed a tick recently (this instance runs the scheduler). */
@@ -376,6 +389,22 @@ export class PaymentsService {
       clubConsecutiveFailures: this.clubPollFailures.get(clubId) ?? 0,
       lastAutoConfirmationAt: lastConfirmed?.updatedAt ?? null,
       pendingCount,
+    }
+  }
+
+  /**
+   * The same poller state, but cross-tenant, for the ops console. No DB work: this is
+   * purely the in-memory counters of the instance running the scheduler.
+   */
+  getPollerHealth(): PollerHealth {
+    const staleAfterMs = Math.max(3 * POLL_INTERVAL_MS, 2 * 60 * 1000)
+    return {
+      reconciliationActive: this.lastPollOkAt !== null && Date.now() - this.lastPollOkAt.getTime() < staleAfterMs,
+      lastPollOkAt: this.lastPollOkAt,
+      consecutiveFailures: this.consecutivePollFailures,
+      failingClubs: [...this.clubPollFailures.entries()]
+        .filter(([, failures]) => failures > 0)
+        .map(([clubId, consecutiveFailures]) => ({ clubId, consecutiveFailures })),
     }
   }
 

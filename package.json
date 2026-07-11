@@ -21,6 +21,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "bot:reset": "ts-node scripts/reset-bot-session.ts",
     "subscription": "ts-node scripts/set-subscription.ts",
+    "ops:admin": "ts-node scripts/create-platform-admin.ts",
     "players:backfill": "ts-node scripts/backfill-players.ts"
   },
   "dependencies": {

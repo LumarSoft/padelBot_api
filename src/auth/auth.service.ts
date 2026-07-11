@@ -49,6 +49,13 @@ export class AuthService {
       throw new UnauthorizedException('Tu usuario fue desactivado. Hablá con el dueño del club.')
     }
 
+    // Retention signal for the ops console — a club that stops opening the panel is
+    // churning. Not awaited into the response path beyond the write itself.
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date() },
+    })
+
     const authUser: AuthenticatedUser = {
       id: String(user.id),
       email: user.email,
