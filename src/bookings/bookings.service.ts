@@ -14,7 +14,7 @@ import { SetBookingProductsDto } from './dto/set-booking-products.dto'
 import { LocalPaymentDto } from './dto/local-payment.dto'
 import { AddPlayerPaymentDto } from './dto/add-player-payment.dto'
 import { BookingAccountView, computeAccount } from './lib/account'
-import { DepositOutcome, Prisma, SlotStatus } from 'generated/prisma/client'
+import { DepositOutcome, PlayerRescheduleMode, Prisma, SlotStatus } from 'generated/prisma/client'
 import { bandDateTimes, bandsForDate, courtScheduleSelect, findBandInSchedule } from '../availability/lib/schedule'
 import { resolveBandPriceCents } from '../availability/lib/pricing'
 import { dniFromIdentification, dniMatches } from '../common/identity'
@@ -356,25 +356,29 @@ export class BookingsService {
     // money stops disappearing from the numbers either way.
     const { depositOutcome, creditDeltaCents } = await this.resolveCancellationOutcome(clubId, booking)
 
-    const [, updated] = await this.prisma.$transaction([
-      this.prisma.slot.update({
-        where: { id: booking.slotId },
-        data: { status: SlotStatus.AVAILABLE },
-      }),
-      this.prisma.booking.update({
-        where: { id },
+    const updated = await this.prisma.$transaction(async tx => {
+      // Conditional on the status the policy above was computed from: the payment poller can
+      // confirm a PENDING booking between our read and this write, and cancelling it as if it
+      // were still unpaid would silently swallow the deposit that just landed.
+      const { count } = await tx.booking.updateMany({
+        where: { id, status: booking.status },
         data: { status: 'CANCELLED', depositOutcome },
-        select: bookingSelect,
-      }),
-      ...(creditDeltaCents > 0 && booking.playerId
-        ? [
-            this.prisma.player.update({
-              where: { id: booking.playerId },
-              data: { creditCents: { increment: creditDeltaCents } },
-            }),
-          ]
-        : []),
-    ])
+      })
+      if (count !== 1) return null
+
+      await tx.slot.update({ where: { id: booking.slotId }, data: { status: SlotStatus.AVAILABLE } })
+      if (creditDeltaCents > 0 && booking.playerId) {
+        await tx.player.update({
+          where: { id: booking.playerId },
+          data: { creditCents: { increment: creditDeltaCents } },
+        })
+      }
+      return tx.booking.findUnique({ where: { id }, select: bookingSelect })
+    })
+
+    if (!updated) {
+      throw new ConflictException('La reserva cambió de estado mientras la cancelábamos. Volvé a abrirla y fijate.')
+    }
 
     this.emitBookingChange('cancelled', updated)
     this.events.emitSlotFreed({
@@ -1200,6 +1204,203 @@ export class BookingsService {
     })
   }
 
+  // ── Player self-service (the bot's "Mis turnos") ────────────────────────────
+
+  /**
+   * The player's upcoming bookings, newest first — what the bot lists under "Mis turnos".
+   * Scoped to their own phone: a player can only ever see their own reservations.
+   */
+  findUpcomingForPlayer(clubId: string, playerPhone: string, limit = 9) {
+    return this.prisma.booking.findMany({
+      where: {
+        clubId,
+        playerPhone,
+        status: { in: ['CONFIRMED', 'PENDING_PAYMENT'] },
+        slot: { startsAt: { gte: new Date() } },
+      },
+      orderBy: { slot: { startsAt: 'asc' } },
+      take: limit,
+      select: {
+        id: true,
+        status: true,
+        transferAmountCents: true,
+        creditAppliedCents: true,
+        slot: { select: { startsAt: true, endsAt: true, court: { select: { name: true } } } },
+      },
+    })
+  }
+
+  /**
+   * What the player is allowed to do with a booking they can't make it to.
+   *
+   * The bot never cancels: it MOVES the booking. Rescheduling keeps the deposit alive on the
+   * same booking, frees the old court for the waitlist to resell, and takes no money out of
+   * the club — which is why it can be self-service at all. A real cancellation moves money,
+   * so it stays a decision of the club, in the panel.
+   *
+   * Returns how this particular booking may be moved, right now:
+   *   SELF    → the bot can move it.
+   *   REQUEST → a human decides (club policy, past the cutoff, or the cap is used up).
+   *   OFF     → the club doesn't offer it at all.
+   * Null = not this player's booking (this is also the ownership check for the move below).
+   */
+  async reschedulePolicyForPlayer(
+    clubId: string,
+    bookingId: string,
+    playerPhone: string,
+  ): Promise<{
+    mode: PlayerRescheduleMode
+    /** Why it isn't SELF, when the club's own setting would have allowed it. */
+    reason: 'ok' | 'club-policy' | 'too-late' | 'limit-reached'
+    cutoffHours: number | null
+    startsAt: Date
+    courtName: string
+    priceCents: number
+  } | null> {
+    const booking = await this.prisma.booking.findFirst({
+      where: { id: bookingId, clubId, playerPhone, status: { in: ['CONFIRMED', 'PENDING_PAYMENT'] } },
+      select: {
+        rescheduleCount: true,
+        slot: { select: { startsAt: true, priceCents: true, court: { select: { name: true } } } },
+      },
+    })
+    if (!booking) return null
+
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: { playerReschedule: true, playerRescheduleCutoffHours: true, maxPlayerReschedules: true },
+    })
+    const configured = club?.playerReschedule ?? PlayerRescheduleMode.SELF
+    const cutoffHours = club?.playerRescheduleCutoffHours ?? null
+    const base = {
+      cutoffHours,
+      startsAt: booking.slot.startsAt,
+      courtName: booking.slot.court.name,
+      priceCents: booking.slot.priceCents,
+    }
+
+    if (configured !== PlayerRescheduleMode.SELF) {
+      return { mode: configured, reason: 'club-policy', ...base }
+    }
+
+    // Used up their moves → a human decides, rather than a flat "no".
+    if (booking.rescheduleCount >= (club?.maxPlayerReschedules ?? 1)) {
+      return { mode: PlayerRescheduleMode.REQUEST, reason: 'limit-reached', ...base }
+    }
+
+    // Too close to the start: a court freed now can't be resold, so it isn't ours to give away.
+    if (cutoffHours !== null) {
+      const hoursAhead = (booking.slot.startsAt.getTime() - Date.now()) / 3_600_000
+      if (hoursAhead < cutoffHours) {
+        return { mode: PlayerRescheduleMode.REQUEST, reason: 'too-late', ...base }
+      }
+    }
+
+    return { mode: PlayerRescheduleMode.SELF, reason: 'ok', ...base }
+  }
+
+  /**
+   * Moves a player's booking to another band, from WhatsApp.
+   *
+   * The booking keeps its identity — same row, same deposit, same status — so nothing has to
+   * be refunded and nothing has to be re-paid. Only the slot changes. The old court is freed
+   * and broadcast, which is what lets the waitlist resell the hour the player gave back.
+   *
+   * The whole move is one transaction: taking the new slot and releasing the old one cannot
+   * half-happen, or the player ends up with two courts or none. `null` = the move is no longer
+   * possible (someone took the target band first, or the booking changed underneath us).
+   */
+  async rescheduleToBandByPlayer(
+    clubId: string,
+    bookingId: string,
+    playerPhone: string,
+    target: { courtId: string; dateKey: string; bandStart: string },
+  ): Promise<{ priceDiffCents: number; newPriceCents: number } | null> {
+    const booking = await this.prisma.booking.findFirst({
+      where: { id: bookingId, clubId, playerPhone, status: { in: ['CONFIRMED', 'PENDING_PAYMENT'] } },
+      select: { id: true, slotId: true, status: true, slot: { select: { priceCents: true } } },
+    })
+    if (!booking) return null
+
+    const court = await this.prisma.court.findFirst({
+      where: { id: target.courtId, clubId },
+      select: {
+        priceCents: true,
+        ...courtScheduleSelect,
+        priceRules: { select: { dayOfWeek: true, startTime: true, priceCents: true } },
+      },
+    })
+    if (!court) return null
+
+    const band = findBandInSchedule(bandsForDate(court, target.dateKey), target.bandStart)
+    if (!band) return null
+
+    const { startsAt, endsAt } = bandDateTimes(target.dateKey, band)
+    if (startsAt.getTime() <= Date.now()) return null
+
+    const newPriceCents = resolveBandPriceCents(court.priceCents, court.priceRules, target.dateKey, band.start)
+
+    try {
+      const updated = await this.prisma.$transaction(async tx => {
+        // Take the new slot first: if it's gone, we roll back and the player keeps the old one.
+        const existing = await tx.slot.findFirst({
+          where: { clubId, courtId: target.courtId, startsAt },
+          select: { id: true },
+        })
+        const newSlotId = existing
+          ? (await this.lockSlotOrThrow(tx, existing.id, clubId), existing.id)
+          : await this.createBookedSlot(tx, {
+              clubId,
+              courtId: target.courtId,
+              startsAt,
+              endsAt,
+              priceCents: newPriceCents,
+            })
+
+        // Conditional on the booking still sitting where we read it: the expiry cron or an
+        // admin may have moved/cancelled it while the player was choosing a new hour.
+        const { count } = await tx.booking.updateMany({
+          where: { id: bookingId, slotId: booking.slotId, status: booking.status },
+          data: {
+            slotId: newSlotId,
+            // The reminder was scheduled against the old time; let it be re-evaluated.
+            reminderSentAt: null,
+            rescheduleCount: { increment: 1 },
+          },
+        })
+        if (count !== 1) throw new ConflictException('La reserva cambió mientras la movíamos')
+
+        await tx.slot.update({ where: { id: booking.slotId }, data: { status: SlotStatus.AVAILABLE } })
+        return tx.booking.findUnique({ where: { id: bookingId }, select: bookingSelect })
+      })
+
+      if (!updated) return null
+
+      this.emitBookingChange('rescheduled', updated)
+      // The hour the player gave back — offer it to whoever is waiting for it.
+      const freed = await this.prisma.slot.findUnique({
+        where: { id: booking.slotId },
+        select: { startsAt: true, endsAt: true, priceCents: true, court: { select: { id: true, name: true } } },
+      })
+      if (freed) {
+        this.events.emitSlotFreed({
+          type: 'slot.freed',
+          clubId,
+          courtId: freed.court.id,
+          courtName: freed.court.name,
+          startsAt: freed.startsAt,
+          endsAt: freed.endsAt,
+          priceCents: freed.priceCents,
+        })
+      }
+
+      return { priceDiffCents: newPriceCents - booking.slot.priceCents, newPriceCents }
+    } catch (err) {
+      if (err instanceof ConflictException) return null
+      throw err
+    }
+  }
+
   // ── Receipt-photo flow (RECEIPT verification mode) ──────────────────────────
 
   /**
@@ -1362,20 +1563,8 @@ export class BookingsService {
       },
     })
     if (!booking || booking.status !== 'PENDING_PAYMENT') return null
-
-    await this.prisma.$transaction([
-      this.prisma.slot.update({ where: { id: booking.slotId }, data: { status: SlotStatus.AVAILABLE } }),
-      this.prisma.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED' } }),
-      // Nothing was paid — give back the credit this pending had consumed.
-      ...(booking.playerId && booking.creditAppliedCents > 0
-        ? [
-            this.prisma.player.update({
-              where: { id: booking.playerId },
-              data: { creditCents: { increment: booking.creditAppliedCents } },
-            }),
-          ]
-        : []),
-    ])
+    // Still PENDING a moment ago — but the poller may confirm it before we write.
+    if (!(await this.releasePendingSlot(booking))) return null
 
     // Drop the receipt screenshot (if any) — the booking is no longer pending.
     await this.purgeReceipts(bookingId)
@@ -1391,6 +1580,44 @@ export class BookingsService {
       priceCents: booking.slot.priceCents,
     })
     return { playerPhone: booking.playerPhone, clubId: booking.clubId }
+  }
+
+  /**
+   * Flips ONE booking to CANCELLED and releases its slot — but only if it is *still*
+   * PENDING_PAYMENT at write time. The conditional `updateMany` is the whole point: between
+   * the read that selected this booking and this write, the payment poller may have
+   * CONFIRMED it (the player transferred inside the window and MercadoPago reported the
+   * movement late — the poller scans with a grace margin precisely for that). An
+   * unconditional update would then un-confirm a booking the player already paid and was
+   * told was confirmed, and hand their court to somebody else.
+   *
+   * Returns false when the booking is no longer pending — nothing was touched.
+   */
+  private async releasePendingSlot(booking: {
+    id: string
+    slotId: string
+    playerId: string | null
+    creditAppliedCents: number
+  }): Promise<boolean> {
+    return this.prisma.$transaction(async tx => {
+      const { count } = await tx.booking.updateMany({
+        where: { id: booking.id, status: 'PENDING_PAYMENT' },
+        data: { status: 'CANCELLED' },
+      })
+      if (count !== 1) {
+        this.logger.warn(`Booking ${booking.id} was confirmed while being cancelled — left untouched`)
+        return false
+      }
+      await tx.slot.update({ where: { id: booking.slotId }, data: { status: SlotStatus.AVAILABLE } })
+      // Nothing was paid — give back the credit this pending had consumed.
+      if (booking.playerId && booking.creditAppliedCents > 0) {
+        await tx.player.update({
+          where: { id: booking.playerId },
+          data: { creditCents: { increment: booking.creditAppliedCents } },
+        })
+      }
+      return true
+    })
   }
 
   /**
@@ -1420,19 +1647,8 @@ export class BookingsService {
 
     for (const booking of expired) {
       try {
-        await this.prisma.$transaction([
-          this.prisma.slot.update({ where: { id: booking.slotId }, data: { status: SlotStatus.AVAILABLE } }),
-          this.prisma.booking.update({ where: { id: booking.id }, data: { status: 'CANCELLED' } }),
-          // Nothing was paid — give back the credit this pending had consumed.
-          ...(booking.playerId && booking.creditAppliedCents > 0
-            ? [
-                this.prisma.player.update({
-                  where: { id: booking.playerId },
-                  data: { creditCents: { increment: booking.creditAppliedCents } },
-                }),
-              ]
-            : []),
-        ])
+        // The transfer may have landed between the read above and this write.
+        if (!(await this.releasePendingSlot(booking))) continue
         this.emitBookingChange('cancelled', booking)
         this.events.emitSlotFreed({
           type: 'slot.freed',

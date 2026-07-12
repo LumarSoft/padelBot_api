@@ -1,6 +1,6 @@
 import { AvailableDate } from '../availability/availability.service'
 import { dayLabelFromKey, dayMonthFromKey, formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
-import { BandOption, BotReply, BotState, SessionContext, SlotOption } from './types'
+import { BandOption, BotReply, BotState, MyBookingOption, SessionContext, SlotOption } from './types'
 import { buildInteractive } from './lib/interactive'
 
 // ── Formatters ─────────────────────────────────────────────────────────────
@@ -23,7 +23,8 @@ function fmtExact(cents: number): string {
 
 export const MENU =
   '¿Qué querés hacer?\n\n' +
-  '1️⃣ Reservar un turno\n\n' +
+  '1️⃣ Reservar un turno\n' +
+  '2️⃣ Ver mis turnos (o cambiar uno de horario)\n\n' +
   'Respondé con el número, o escribime con tus palabras (ej: *"un turno el sábado a la tarde"*).'
 
 /**
@@ -41,18 +42,17 @@ export function thanksReply(name?: string): string {
   return `${hi} Si necesitás algo más, acá estoy.\n\n${MENU}`
 }
 
-export const WELCOME = welcome()
-
-export const BAD_OPTION = `Mmm, no entendí esa opción 🤔\n\n${MENU}`
-export const ASK_DATE = `📅 ¿Para qué día lo querés? Decime la fecha (ej: *25/06*) o algo como *"mañana"* o *"el sábado"*.`
-export const BAD_DATE = `No me quedó clara la fecha 🤔 Probá con el día y mes (ej: *25/06*) o algo como *"el sábado"*.`
+export const ASK_DATE = `📅 ¿Para qué día lo querés? Tocá una opción, o decime la fecha (ej: *25/06*).`
 export const ASK_NAME = `👤 ¡Genial! ¿A nombre de quién pongo la reserva?`
 export const ASK_DNI = `🪪 Para confirmar el pago necesito tu *DNI* (solo los números). Tiene que ser el del titular que va a transferir la seña.`
 export const BAD_DNI = `Mmm, ese DNI no me cierra 🤔 Pasámelo solo con números (7 u 8 dígitos), sin puntos.`
-export const BAD_SLOT = `Ese número de turno no está en la lista 🤔 Elegí uno de los de arriba.`
-export const BAD_COURT = `Ese número de cancha no está en la lista 🤔 Elegí una de las de arriba.`
-export const BAD_BOOKING = `Ese número no está en la lista 🤔 Elegí uno, o escribí *0* para volver.`
 export const BOOKING_ABORTED = `Listo, no reservé nada 👍 Cuando quieras lo vemos.\n\n${MENU}`
+/** The LLM couldn't make sense of the message — said above the current step's prompt. */
+export const NOT_UNDERSTOOD = `Perdón, no te entendí bien 🤔`
+/** Per-user LLM budget exhausted (a burst of messages) — said above the current step's prompt. */
+export const TOO_MANY_MESSAGES = `Uy, me llegaron varios mensajes juntos 😅 Vamos de a uno.`
+/** The date we understood is unusable (past, or absurdly far away) — re-ask instead of guessing. */
+export const DATE_OUT_OF_RANGE = `Mmm, esa fecha no me sirve 🤔 Solo puedo reservar de hoy en adelante.`
 export const BOOKING_FAILED = `😕 Uy, no pude confirmar la reserva — puede que alguien haya tomado ese turno justo recién. Probemos con otro.\n\n${MENU}`
 export const PAYMENT_UNAVAILABLE = `😅 Justo no puedo tomar el pago por acá en este momento. Escribile al club así te ayudan a confirmar la reserva. 🎾`
 export const PAYMENT_CLAIM_NO_PENDING = `Mmm, no me figura ninguna reserva tuya esperando pago 🤔. Si transferiste recién, dame un par de minutos y revisá; si no, escribime *reservar* y armamos el turno. 🎾`
@@ -67,10 +67,6 @@ export const RECEIPT_CLAIM_ASK_PHOTO = `¡Genial! 🙌 Para confirmar tu reserva
 export const TECHNICAL_ERROR = `😅 Uy, tuvimos un inconveniente técnico de mi lado. Probá de nuevo en un ratito, por favor. Si sigue sin andar, escribile al club y te ayudan. 🎾`
 
 // ── Dynamic builders ────────────────────────────────────────────────────────
-
-export function noCourts(date: string): string {
-  return `😕 No hay turnos disponibles para el ${fmtDate(date)}. ¿Querés probar con otra fecha?`
-}
 
 /**
  * Shown when the requested date has no availability. Instead of dead-ending, it
@@ -171,14 +167,85 @@ export function confirmBooking(ctx: SessionContext): string {
   )
 }
 
-export function bookingConfirmed(ctx: SessionContext): string {
+// ── Mis turnos / reprogramación ─────────────────────────────────────────────
+// The bot MOVES bookings, it never cancels them. Rescheduling keeps the deposit alive on the
+// same booking, frees the old court for the waitlist to resell, and takes no money out of the
+// club — so the player can do it alone. A real cancellation moves money and stays with the club.
+
+export const NO_UPCOMING_BOOKINGS =
+  `No te veo ningún turno reservado por acá 🤔\n\n` + `¿Querés reservar uno? Decime *reservar* y lo armamos. 🎾`
+
+/** The player's upcoming bookings. The botonera carries the same list as tappable rows. */
+export function myBookingsList(bookings: MyBookingOption[]): string {
+  const list = bookings.map(b => `• ${b.label}${b.pending ? ' _(falta la seña)_' : ''}`).join('\n')
+  return `🗓️ *Tus próximos turnos:*\n\n${list}\n\n¿Necesitás mover alguno? Elegilo de la lista. 🎾`
+}
+
+/** The player picked a booking they can move themselves → ask for the new day. */
+export function askRescheduleDate(label: string): string {
   return (
-    `✅ *¡Reserva confirmada!*\n\n` +
-    `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n` +
-    `🎾 ${ctx.selectedCourtName}\n\n` +
+    `🔄 Vamos a mover este turno:\n\n🎾 ${label}\n\n` +
+    `No lo cancelo: te lo paso a otro horario y *la seña que pagaste sigue valiendo*. ` +
+    `¿Para qué día lo querés?`
+  )
+}
+
+/** The club doesn't let players move bookings from WhatsApp at all. */
+export const RESCHEDULE_OFF = `Para cambiar o cancelar un turno hablá directamente con el club — ellos lo resuelven al toque. 🙏`
+
+/**
+ * The move needs a human: club policy, too close to the start, or the player already used
+ * their moves. Never a dead end — the club is told and answers on this same chat.
+ */
+export function rescheduleRequested(reason: 'club-policy' | 'too-late' | 'limit-reached'): string {
+  const why =
+    reason === 'too-late'
+      ? `Como falta poco para el turno, lo tiene que ver alguien del club.`
+      : reason === 'limit-reached'
+        ? `Ya moviste este turno una vez, así que lo tiene que ver alguien del club.`
+        : `Los cambios de turno los maneja el club directamente.`
+  return `${why}\n\n📩 Ya les pasé tu pedido — te responden por acá en un rato. 🎾`
+}
+
+/** The player can't make ANY other day — don't trap them in the flow; hand it to the club. */
+export const RESCHEDULE_NO_DAY_WORKS = `Entiendo 🙏 Le paso tu caso al club así lo ven ellos y te responden por acá. 🎾`
+
+/** The move summary, with the price difference stated BEFORE the player commits to it. */
+export function rescheduleConfirm(oldLabel: string, ctx: SessionContext, priceDiffCents: number): string {
+  const head =
+    `🔄 *¿Confirmo el cambio?*\n\n` +
+    `Antes: ${oldLabel}\n` +
+    `Ahora: ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel} · ${ctx.selectedCourtName}\n\n`
+
+  if (priceDiffCents > 0) {
+    return (
+      `${head}Ese horario sale ${fmtPrice(ctx.selectedSlotPrice!)}, o sea *${fmtPrice(priceDiffCents)} más* ` +
+      `que el que tenías. Tu seña sigue aplicada y la diferencia la abonás en el club. ¿Lo muevo?`
+    )
+  }
+  if (priceDiffCents < 0) {
+    return `${head}Ese horario sale ${fmtPrice(ctx.selectedSlotPrice!)} — te queda más barato. Tu seña sigue aplicada. ¿Lo muevo?`
+  }
+  return `${head}Mismo precio y tu seña sigue aplicada. ¿Lo muevo?`
+}
+
+export function rescheduleDone(ctx: SessionContext, priceDiffCents: number): string {
+  const diff =
+    priceDiffCents > 0
+      ? `\n\n💰 La diferencia de *${fmtPrice(priceDiffCents)}* la abonás en el club.`
+      : priceDiffCents < 0
+        ? `\n\n💰 Te queda a favor la diferencia — lo hablás en el mostrador.`
+        : ''
+  return (
+    `✅ *¡Listo, lo moví!*\n\n` +
+    `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n🎾 ${ctx.selectedCourtName}${diff}\n\n` +
     `¡Nos vemos en la cancha! 🎾`
   )
 }
+
+export const RESCHEDULE_ABORTED = `👍 Perfecto, te dejé el turno como estaba.\n\n${MENU}`
+/** The target band was taken (or the booking changed) between choosing and confirming. */
+export const RESCHEDULE_FAILED = `😕 No pude mover el turno — puede que alguien haya tomado ese horario justo recién. Probemos con otro.`
 
 export function transferPending(
   ctx: SessionContext,
@@ -296,6 +363,7 @@ function conciseBody(state: BotState, ctx: SessionContext, text: string): string
     case BotState.BOOK_COURT:
       return courtsPrompt(ctx)
     case BotState.BOOK_SLOT:
+    case BotState.RESCHEDULE_SLOT:
       return slotsPrompt(ctx)
     default:
       // BOOK_CONFIRM body is a summary, not an option list — keep it.
@@ -308,12 +376,17 @@ function conciseBody(state: BotState, ctx: SessionContext, text: string): string
  * body is made concise so the options aren't duplicated above the buttons. Menu buttons are
  * only attached to an actual menu presentation — a payment/advisor/terminal message that
  * merely lands on the MENU state keeps its plain text.
+ *
+ * `prefix` (an answer to a question, an apology) is prepended and always survives, because
+ * the concise body REPLACES the text: without this, the bot's actual words would vanish and
+ * the player would just see "Elegí un horario 👇" as the answer to their question.
  */
-export function composeBotReply(state: BotState, ctx: SessionContext, text: string): BotReply {
+export function composeBotReply(state: BotState, ctx: SessionContext, text: string, prefix?: string): BotReply {
+  const lead = prefix ? `${prefix}\n\n` : ''
   let interactive = buildInteractive(state, ctx)
   if ((state === BotState.MENU || state === BotState.IDLE) && !text.includes(MENU_PROMPT_MARKER)) {
     interactive = undefined
   }
-  if (!interactive) return { text }
-  return { text: conciseBody(state, ctx, text), interactive }
+  if (!interactive) return { text: `${lead}${text}` }
+  return { text: `${lead}${conciseBody(state, ctx, text)}`, interactive }
 }

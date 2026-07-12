@@ -92,6 +92,7 @@
       "ts"
     ],
     "rootDir": "src",
+    "globalSetup": "<rootDir>/../test/jest-global-setup.ts",
     "testRegex": ".*\\.spec\\.ts$",
     "moduleNameMapper": {
       "^generated/(.*)$": "<rootDir>/../generated/$1"

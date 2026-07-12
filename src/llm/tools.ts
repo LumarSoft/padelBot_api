@@ -27,8 +27,10 @@ export const TOOLS: ChatCompletionTool[] = [
           timePreference: {
             type: 'string',
             description:
-              'Hora preferida en formato HH:MM. ' +
-              'Mapeá expresiones como "6 de la tarde" → "18:00", "mediodía" → "12:00", "mañana temprano" → "09:00". ' +
+              'Hora preferida en formato HH:MM (reloj de 24 h). ' +
+              'Mapeá expresiones como "6 de la tarde" → "18:00" o "mediodía" → "12:00". ' +
+              'Para expresiones vagas ("temprano", "a la noche") usá una franja real del club ' +
+              'de las listadas en el system prompt — nunca inventes un horario. ' +
               'Omitir si no se mencionó hora.',
           },
         },

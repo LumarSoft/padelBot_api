@@ -1099,8 +1099,19 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 | cancellationWindowHours | int    | No       | 0–168; cancelling ≥ N h before the slot credits the deposit to the player, later forfeits it |
 | requireDniMatch         | bool   | No       | only relevant in `AUTO` mode       |
 | paymentVerificationMode | enum   | No       | `AUTO` \| `RECEIPT`                |
+| playerReschedule        | enum   | No       | `SELF` \| `REQUEST` \| `OFF` — what a player may do from WhatsApp |
+| playerRescheduleCutoffHours | int | No     | 0–168; below this many hours before the slot, `SELF` degrades to `REQUEST`. 0 = no cutoff |
+| maxPlayerReschedules    | int    | No       | 0–10; how many times ONE booking may be moved by the player |
 
 `AUTO` reconciles the deposit automatically via MercadoPago; `RECEIPT` makes the bot ask the player for a receipt photo that an admin verifies manually from the panel (the poller skips RECEIPT clubs).
+
+**Player-side reschedule policy.** The bot never *cancels* a booking — it **moves** it. Rescheduling keeps the deposit alive on the same booking, frees the old court for the waitlist to resell, and takes no money out of the club, which is why a player can be allowed to do it alone. A real cancellation moves money (credit vs forfeit, per `cancellationWindowHours`) and stays a decision of the club, from the panel.
+
+- `SELF` — the bot moves the booking to another free band on its own.
+- `REQUEST` — the bot moves nothing: it notifies the staff (push) and the club decides.
+- `OFF` — not offered; the player is sent to the club.
+
+`SELF` degrades to `REQUEST` automatically when the booking is inside `playerRescheduleCutoffHours` (a court freed that late can't be resold) or when the player has already used up `maxPlayerReschedules`. A player who says no other day works for them also lands in `REQUEST` — no path ends in silence.
 
 ```json
 { "transferAlias": "padel.club.mp", "transferHolder": "Padel Club SRL", "paymentVerificationMode": "RECEIPT" }

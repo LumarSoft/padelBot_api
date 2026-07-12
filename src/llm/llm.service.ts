@@ -3,13 +3,17 @@ import OpenAI from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
 import { todayKey } from '../availability/lib/datetime'
+import { courtScheduleSelect } from '../availability/lib/schedule'
 import { BotState, HandlerResult, SessionContext } from '../bot/types'
 import { matchCourt, matchSlot } from '../bot/lib/match'
 import { availabilityResult, bandsToSlotOptions, courtsFromBands, resolveBand } from '../bot/lib/booking-flow'
+import { stepPrompt } from '../bot/lib/step-prompt'
 import {
   ASK_DATE,
   ASK_NAME,
-  MENU,
+  DATE_OUT_OF_RANGE,
+  NOT_UNDERSTOOD,
+  TOO_MANY_MESSAGES,
   courtBusyAtTime,
   courtFullToday,
   noAvailabilityWithSuggestions,
@@ -52,17 +56,32 @@ export class LlmService {
     clubId: string,
     waId: string,
   ): Promise<HandlerResult> {
-    // Per-user budget: if exceeded, steer back to the menu instead of calling OpenAI.
+    // Per-user budget: if exceeded, hold the player on their step instead of calling OpenAI.
     if (this.isRateLimited(waId)) {
       this.logger.warn(`LLM rate limit hit for ${waId}`)
-      return { reply: MENU, state: BotState.MENU, ctx }
+      return this.inPlace(TOO_MANY_MESSAGES, state, ctx)
     }
     try {
       return await this.callOpenAI(state, message, ctx, clubId, waId)
     } catch (err) {
       this.logger.error('LLM fallback error', err)
-      return { reply: MENU, state: BotState.MENU, ctx }
+      return this.inPlace(NOT_UNDERSTOOD, state, ctx)
     }
+  }
+
+  /**
+   * Says something without moving the player: the answer (or apology) goes above the current
+   * step's prompt, and the FSM stays where it was.
+   *
+   * This is the difference between a bot that survives a question and one that doesn't. An
+   * OpenAI hiccup — or a player asking "¿es techada?" while staring at the booking summary —
+   * used to reset the state to MENU, silently throwing away the booking they were one tap
+   * from confirming. Only a step that can't be rebuilt falls back to the menu.
+   */
+  private inPlace(text: string, state: BotState, ctx: SessionContext): HandlerResult {
+    const step = stepPrompt(state, ctx)
+    if (!step) return { reply: text, state: BotState.MENU, ctx }
+    return { prefix: text, reply: step, state, ctx }
   }
 
   /** Sliding-window check; records the call when allowed. Prunes idle users as it goes. */
@@ -95,12 +114,17 @@ export class LlmService {
   ): Promise<HandlerResult> {
     const [club, courts] = await Promise.all([
       this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } }),
-      this.prisma.court.findMany({ where: { clubId }, select: { name: true }, orderBy: { name: 'asc' } }),
+      this.prisma.court.findMany({
+        where: { clubId },
+        // The real schedule, not just the names: the prompt describes THIS club's bands.
+        select: { name: true, ...courtScheduleSelect },
+        orderBy: { name: 'asc' },
+      }),
     ])
 
     const systemPrompt = buildSystemPrompt({
       clubName: club?.name ?? 'el club',
-      courtNames: courts.map(c => c.name),
+      courts,
       currentDate: formatCurrentDate(),
       state,
       playerName: ctx.playerName,
@@ -144,16 +168,17 @@ export class LlmService {
       const call = choice.message.tool_calls[0]
       if (call.type === 'function') {
         this.logger.log(`LLM tool call: ${call.function.name} — args: ${call.function.arguments}`)
-        return this.dispatchToolCall(call.function.name, call.function.arguments, ctx, clubId)
+        return this.dispatchToolCall(call.function.name, call.function.arguments, state, ctx, clubId)
       }
     }
 
-    // No tool call → text response (general question, clarification, etc.)
+    // No tool call → the LLM answered a question (price, courts, "¿es techada?"). Say it and
+    // keep the player exactly where they were.
     const text = choice.message.content?.trim()
-    if (!text) return { reply: MENU, state: BotState.MENU, ctx }
+    if (!text) return this.inPlace(NOT_UNDERSTOOD, state, ctx)
 
     this.logger.log(`LLM text reply (state=${state})`)
-    return { reply: text, state: BotState.MENU, ctx }
+    return this.inPlace(text, state, ctx)
   }
 
   // ── Tool dispatcher ────────────────────────────────────────────────────────
@@ -161,15 +186,24 @@ export class LlmService {
   private dispatchToolCall(
     name: string,
     argsJson: string,
+    state: BotState,
     ctx: SessionContext,
     clubId: string,
   ): Promise<HandlerResult> {
-    const args = JSON.parse(argsJson) as BookingToolArgs
+    let args: BookingToolArgs
+    try {
+      args = JSON.parse(argsJson) as BookingToolArgs
+    } catch {
+      this.logger.error(`LLM returned unparseable tool args: ${argsJson}`)
+      return Promise.resolve(this.inPlace(NOT_UNDERSTOOD, state, ctx))
+    }
+
     switch (name) {
       case 'navigate_booking':
-        return this.handleNavigateBooking(args, ctx, clubId)
+        return this.handleNavigateBooking(args, state, ctx, clubId)
       default:
-        return Promise.resolve({ reply: MENU, state: BotState.MENU, ctx })
+        this.logger.error(`LLM called an unknown tool: ${name}`)
+        return Promise.resolve(this.inPlace(NOT_UNDERSTOOD, state, ctx))
     }
   }
 
@@ -177,6 +211,7 @@ export class LlmService {
 
   private async handleNavigateBooking(
     args: BookingToolArgs,
+    state: BotState,
     ctx: SessionContext,
     clubId: string,
   ): Promise<HandlerResult> {
@@ -185,21 +220,30 @@ export class LlmService {
       return { reply: ASK_DATE, state: BotState.BOOK_DATE, ctx }
     }
 
-    const bands = await this.availability.availableBandsForDate(clubId, args.date)
+    // The date comes from a language model: it can be malformed ("2026-13-45"), in the past,
+    // or years away. Feeding any of those to availability yields empty grids and "undefined
+    // NaN/NaN" in the player's message, so it never gets past here unchecked.
+    const date = validBookingDate(args.date)
+    if (!date) {
+      this.logger.warn(`LLM proposed an unusable date: ${args.date}`)
+      return { prefix: DATE_OUT_OF_RANGE, reply: ASK_DATE, state: BotState.BOOK_DATE, ctx }
+    }
+
+    const bands = await this.availability.availableBandsForDate(clubId, date)
     if (bands.length === 0) {
       // Proactively offer the nearest days with availability instead of dead-ending.
-      const suggestions = await this.availability.nextAvailableDates(clubId, args.date, { excludeDateKey: args.date })
+      const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
       return {
-        reply: noAvailabilityWithSuggestions(args.date, suggestions),
+        reply: noAvailabilityWithSuggestions(date, suggestions),
         state: BotState.BOOK_DATE,
-        ctx: { ...ctx, waitlistOfferDate: args.date },
+        ctx: { ...ctx, waitlistOfferDate: date },
       }
     }
 
     const needsName = !ctx.playerName
     const base: SessionContext = {
       ...ctx,
-      selectedDate: args.date,
+      selectedDate: date,
       dayAvailability: bands,
       slotOptions: bandsToSlotOptions(bands),
     }
@@ -215,7 +259,7 @@ export class LlmService {
         // The requested court is fully booked today → say so plainly (don't silently switch
         // courts) and show what's free across the club.
         if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: base }
-        return { reply: courtFullToday(matchedCourt.name, bands, args.date), state: BotState.BOOK_SLOT, ctx: base }
+        return { reply: courtFullToday(matchedCourt.name, bands, date), state: BotState.BOOK_SLOT, ctx: base }
       }
 
       const courtCtx: SessionContext = {
@@ -243,7 +287,7 @@ export class LlmService {
       if (args.timePreference) {
         if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: courtCtx }
         return {
-          reply: courtBusyAtTime(matchedCourt.name, courtCtx.slotOptions!, args.date),
+          reply: courtBusyAtTime(matchedCourt.name, courtCtx.slotOptions!, date),
           state: BotState.BOOK_SLOT,
           ctx: courtCtx,
         }
@@ -251,7 +295,7 @@ export class LlmService {
 
       if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: courtCtx }
       return {
-        reply: slotsList(courtCtx.slotOptions!, matchedCourt.name, args.date),
+        reply: slotsList(courtCtx.slotOptions!, matchedCourt.name, date),
         state: BotState.BOOK_SLOT,
         ctx: courtCtx,
       }
@@ -273,12 +317,12 @@ export class LlmService {
       }
       // Time not free → show what is.
       if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: base }
-      return { reply: timeNotAvailable(bands, args.date), state: BotState.BOOK_SLOT, ctx: base }
+      return { reply: timeNotAvailable(bands, date), state: BotState.BOOK_SLOT, ctx: base }
     }
 
     // No court, no time → show the day's availability grouped by court.
     if (needsName) return { reply: ASK_NAME, state: BotState.BOOK_NAME, ctx: base }
-    return availabilityResult(ctx, bands, args.date)
+    return availabilityResult(ctx, bands, date)
   }
 
   // ── Cost accounting ─────────────────────────────────────────────────────────
@@ -331,4 +375,32 @@ interface BookingToolArgs {
   date?: string
   courtName?: string
   timePreference?: string
+}
+
+/** How far ahead a booking may be made — beyond this, the LLM hallucinated a year. */
+const MAX_BOOKING_HORIZON_DAYS = 120
+
+/**
+ * Validates a date proposed by the LLM: a real "YYYY-MM-DD" calendar day, today or later in
+ * the club's timezone, and inside the booking horizon. Returns the key, or null to re-ask.
+ *
+ * Nothing downstream re-checks this: an unusable date reaches availability as an empty grid
+ * and the player as "undefined NaN/NaN".
+ */
+export function validBookingDate(raw: string, today: string = todayKey()): string | null {
+  const key = raw.trim()
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key)
+  if (!m) return null
+
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  // Rejects impossible days the regex happily accepts (2026-02-31, 2026-13-01…).
+  const probe = new Date(Date.UTC(y, mo - 1, d))
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return null
+
+  // Lexicographic comparison is date order for YYYY-MM-DD.
+  if (key < today) return null
+
+  const [ty, tm, td] = today.split('-').map(Number)
+  const daysAhead = (probe.getTime() - Date.UTC(ty, tm - 1, td)) / 86_400_000
+  return daysAhead <= MAX_BOOKING_HORIZON_DAYS ? key : null
 }

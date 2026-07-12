@@ -4,7 +4,7 @@ import { CryptoService } from '../common/crypto/crypto.service'
 import { MercadoPagoService } from '../mercadopago/mercadopago.service'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
 import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
-import { DepositMode, PaymentVerificationMode } from 'generated/prisma/client'
+import { DepositMode, PaymentVerificationMode, PlayerRescheduleMode } from 'generated/prisma/client'
 import { SubscriptionState, subscriptionSelect, subscriptionState } from './lib/subscription'
 
 export interface TransferConfig {
@@ -15,6 +15,10 @@ export interface TransferConfig {
   requireDniMatch: boolean
   paymentVerificationMode: PaymentVerificationMode
   cancellationWindowHours: number
+  /** What a player may do from WhatsApp when they can't make it (the bot moves, never cancels). */
+  playerReschedule: PlayerRescheduleMode
+  playerRescheduleCutoffHours: number | null
+  maxPlayerReschedules: number
 }
 
 export interface ClubProfile {
@@ -104,6 +108,9 @@ export class ClubsService {
         depositMode: true,
         depositPercent: true,
         cancellationWindowHours: true,
+        playerReschedule: true,
+        playerRescheduleCutoffHours: true,
+        maxPlayerReschedules: true,
         requireDniMatch: true,
         paymentVerificationMode: true,
       },
@@ -121,6 +128,12 @@ export class ClubsService {
         ...(dto.depositMode !== undefined ? { depositMode: dto.depositMode } : {}),
         ...(dto.depositPercent !== undefined ? { depositPercent: dto.depositPercent } : {}),
         ...(dto.cancellationWindowHours !== undefined ? { cancellationWindowHours: dto.cancellationWindowHours } : {}),
+        ...(dto.playerReschedule !== undefined ? { playerReschedule: dto.playerReschedule } : {}),
+        // 0 from the panel means "no cutoff" — stored as null.
+        ...(dto.playerRescheduleCutoffHours !== undefined
+          ? { playerRescheduleCutoffHours: dto.playerRescheduleCutoffHours || null }
+          : {}),
+        ...(dto.maxPlayerReschedules !== undefined ? { maxPlayerReschedules: dto.maxPlayerReschedules } : {}),
         ...(dto.requireDniMatch !== undefined ? { requireDniMatch: dto.requireDniMatch } : {}),
         ...(dto.paymentVerificationMode !== undefined ? { paymentVerificationMode: dto.paymentVerificationMode } : {}),
       },

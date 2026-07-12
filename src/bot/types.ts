@@ -7,6 +7,29 @@ export enum BotState {
   BOOK_SLOT = 'BOOK_SLOT',
   BOOK_CONFIRM = 'BOOK_CONFIRM',
   BOOK_DNI = 'BOOK_DNI',
+  /** Listing the player's upcoming bookings so they can pick one to move. */
+  MY_BOOKINGS = 'MY_BOOKINGS',
+  /** Choosing the new day for a booking being moved. */
+  RESCHEDULE_DATE = 'RESCHEDULE_DATE',
+  /** Choosing the new hour for a booking being moved. */
+  RESCHEDULE_SLOT = 'RESCHEDULE_SLOT',
+  /** Confirming the move, with the price difference spelled out. */
+  RESCHEDULE_CONFIRM = 'RESCHEDULE_CONFIRM',
+}
+
+/** Tapping one of the player's bookings feeds back "turno:<bookingId>" through the FSM. */
+export const MY_BOOKING_PREFIX = 'turno:'
+
+/** One of the player's upcoming bookings, as offered in the "Mis turnos" list. */
+export interface MyBookingOption {
+  id: string
+  /** Full line for the plain-text list: "sábado 18/07 · 18:00–19:30 · Cancha 1". */
+  label: string
+  /** Short enough for a WhatsApp list row title (24 chars): "sábado 18/07 · 18:00". */
+  short: string
+  courtName: string
+  /** True while the deposit hasn't been reconciled yet. */
+  pending: boolean
 }
 
 export interface CourtOption {
@@ -69,6 +92,13 @@ export interface SessionContext {
   selectedSlotPrice?: number
   /** Set when the bot offered the waitlist for a full day — "avisame" joins it. */
   waitlistOfferDate?: string
+  /** The player's upcoming bookings, as last listed — drives the "Mis turnos" botonera. */
+  myBookings?: MyBookingOption[]
+  /** The booking being moved, and how it reads today (shown as the "Antes:" line). */
+  rescheduleBookingId?: string
+  rescheduleFromLabel?: string
+  /** Price of the slot being moved away from — the difference the player is told about. */
+  rescheduleFromPriceCents?: number
   /** The player's habitual slot, stamped on the welcome so "repetir" re-books it. */
   habit?: { weekday: number; bandStart: string; courtId: string; courtName: string }
 }
@@ -77,6 +107,13 @@ export interface HandlerResult {
   reply: string
   state: BotState
   ctx: SessionContext
+  /**
+   * Prose to send ABOVE the step's prompt — an answer to a question, an apology, a
+   * correction. Kept separate from `reply` because when a botonera is attached the body is
+   * replaced by a concise prompt (the options are already in the buttons); anything the bot
+   * actually *said* would be dropped with it. The prefix always survives.
+   */
+  prefix?: string
 }
 
 // ── WhatsApp interactive (botoneras) ─────────────────────────────────────────

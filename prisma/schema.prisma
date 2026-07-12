@@ -63,7 +63,25 @@ model Club {
 
   /// Hours before the slot start within which a cancellation forfeits the deposit.
   /// Cancelling EARLIER than this window turns the paid deposit into player credit.
+  /// Applies to cancellations made from the PANEL — the bot never cancels (see below).
   cancellationWindowHours Int @default(24)
+
+  /// What a player can do from WhatsApp when they can't make it. Deliberately NOT a
+  /// cancellation: rescheduling keeps the deposit alive on the same booking, frees the old
+  /// slot for the waitlist to resell, and costs the club nothing — so it can be self-service
+  /// without any money leaving. A real cancellation stays a decision of the club, in the panel.
+  ///   SELF    = the bot moves the booking to another free slot on its own.
+  ///   REQUEST = the bot doesn't move anything: it notifies the staff and the club decides.
+  ///   OFF     = the bot doesn't offer it; the player is sent to the club.
+  playerReschedule PlayerRescheduleMode @default(SELF)
+
+  /// Hours before the slot below which SELF degrades to REQUEST: too close to the start, a
+  /// freed court can no longer be resold, so a human decides. Null = no cutoff.
+  playerRescheduleCutoffHours Int? @default(6)
+
+  /// How many times ONE booking may be rescheduled by the player. Without a cap a booking can
+  /// be pushed forward forever, which is also how a player would dodge the deposit window.
+  maxPlayerReschedules Int @default(1)
 
   /// When true, the bot asks the player's DNI at booking, the transfer amount is a clean
   /// round number (no centavos tag), and a transfer auto-confirms only if the payer's DNI
@@ -126,6 +144,13 @@ enum DepositMode {
 enum PaymentVerificationMode {
   AUTO
   RECEIPT
+}
+
+/// How much a player can reschedule their own booking from WhatsApp. See Club.playerReschedule.
+enum PlayerRescheduleMode {
+  SELF
+  REQUEST
+  OFF
 }
 
 /// A physical court the club offers slots on.
@@ -369,6 +394,9 @@ model Booking {
   /// When the pre-match WhatsApp reminder was sent (BookingRemindersService, ~1h before
   /// the slot). Null until sent; guards the reminder cron from re-sending on every sweep.
   reminderSentAt     DateTime?
+  /// Times the PLAYER moved this booking from WhatsApp (capped by Club.maxPlayerReschedules).
+  /// Admin reschedules from the panel don't count — the club can always override.
+  rescheduleCount    Int               @default(0)
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 

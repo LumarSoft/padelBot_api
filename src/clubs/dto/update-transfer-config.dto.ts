@@ -1,5 +1,5 @@
 import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
-import { DepositMode, PaymentVerificationMode } from 'generated/prisma/client'
+import { DepositMode, PaymentVerificationMode, PlayerRescheduleMode } from 'generated/prisma/client'
 
 export class UpdateTransferConfigDto {
   /** MercadoPago alias/CVU players transfer the deposit to. Empty string clears it. */
@@ -45,4 +45,30 @@ export class UpdateTransferConfigDto {
   @Min(0)
   @Max(168)
   cancellationWindowHours?: number
+
+  /**
+   * What a player may do from WhatsApp when they can't make it. The bot never cancels — it
+   * MOVES the booking, which keeps the deposit alive and frees the court for the waitlist.
+   * SELF = the bot moves it; REQUEST = the staff is notified and decides; OFF = not offered.
+   */
+  @IsOptional()
+  @IsEnum(PlayerRescheduleMode)
+  playerReschedule?: PlayerRescheduleMode
+
+  /**
+   * Hours before the slot below which SELF degrades to REQUEST — too close to the start, a
+   * freed court can no longer be resold, so a human decides. 0 = no cutoff.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(168)
+  playerRescheduleCutoffHours?: number
+
+  /** How many times ONE booking may be moved by the player (0 = never on their own). */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(10)
+  maxPlayerReschedules?: number
 }

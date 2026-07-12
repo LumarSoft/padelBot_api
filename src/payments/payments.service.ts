@@ -8,6 +8,7 @@ import { WhatsAppService } from '../whatsapp/whatsapp.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { dniFromIdentification, dniMatches } from '../common/identity'
 import { schedulerEnabled } from '../common/scheduling'
+import { formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
 
 /** One incoming transfer enriched with what the auto-reconciler would do with it. */
 export interface MoneyInDiagnostic {
@@ -507,20 +508,38 @@ export class PaymentsService {
       if (!line) return
 
       const { startsAt, endsAt, court } = booking.slot
-      const date = startsAt.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })
-      const start = startsAt.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false })
-      const end = endsAt.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false })
-
+      // Wall-clock formatting must go through the CLUB_TIMEZONE helpers: `toLocale*` would
+      // render the API host's timezone and tell the player the wrong hour on a UTC server.
       const msg =
         `✅ *¡Reserva confirmada!*\n\n` +
-        `📅 ${date} · ${start} - ${end}\n` +
+        `📅 ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}\n` +
         `🎾 ${court.name}\n\n` +
         `Tu reserva quedó asegurada. ¡Nos vemos en la cancha! 🎾`
 
-      await this.whatsapp.sendTextWithRetry(line, booking.playerPhone, msg)
+      const delivered = await this.whatsapp.sendTextWithRetry(line, booking.playerPhone, msg)
+      if (!delivered) {
+        await this.alertUndelivered(booking.clubId, booking.playerPhone, 'la CONFIRMACIÓN de la seña')
+      }
     } catch (err) {
       this.logger.error('Failed to send payment-confirmed WA message', err)
     }
+  }
+
+  /**
+   * A critical message that never reached the player is a silent failure: the money is in,
+   * the booking is CONFIRMED, and the only person who doesn't know is the one who paid.
+   * Push the club's staff so they can call the player, and tell ops — a burst of these is
+   * how a WhatsApp outage or a revoked Meta token looks from the outside.
+   */
+  private async alertUndelivered(clubId: string, playerPhone: string, what: string): Promise<void> {
+    await this.notifications.notifyClub(clubId, {
+      title: '⚠️ Un mensaje no llegó al jugador',
+      body: `WhatsApp no le entregó ${what} al ${playerPhone}. Conviene que lo llamen para confirmarlo a mano.`,
+    })
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } })
+    await this.alertOps(
+      `🔴 PadelBot: WhatsApp NO entregó ${what} al jugador ${playerPhone} del club "${club?.name ?? clubId}" tras 3 intentos.`,
+    )
   }
 
   private async sendPaymentFailedMessage(playerPhone: string | null, clubId: string): Promise<void> {
@@ -528,11 +547,12 @@ export class PaymentsService {
     try {
       const line = await this.findActiveLine(clubId)
       if (!line) return
-      await this.whatsapp.sendTextWithRetry(
+      const delivered = await this.whatsapp.sendTextWithRetry(
         line,
         playerPhone,
         `😕 Tu pago no pudo procesarse y la reserva fue cancelada. Podés intentar reservar nuevamente cuando quieras. 🎾`,
       )
+      if (!delivered) await this.alertUndelivered(clubId, playerPhone, 'el aviso de que su pago fue RECHAZADO')
     } catch (err) {
       this.logger.error('Failed to send payment-failed WA message', err)
     }
@@ -543,11 +563,13 @@ export class PaymentsService {
     try {
       const line = await this.findActiveLine(clubId)
       if (!line) return
-      await this.whatsapp.sendTextWithRetry(
+      const delivered = await this.whatsapp.sendTextWithRetry(
         line,
         playerPhone,
         `⏳ El tiempo para abonar tu reserva venció y el turno quedó libre. Si querés reservarlo de nuevo, escribime y lo gestionamos. 🎾`,
       )
+      // Not knowing the slot was released is how a player shows up to a court someone else booked.
+      if (!delivered) await this.alertUndelivered(clubId, playerPhone, 'el aviso de que su reserva VENCIÓ')
     } catch (err) {
       this.logger.error('Failed to send payment-expired WA message', err)
     }

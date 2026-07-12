@@ -1,5 +1,6 @@
 import { BandCourt, BandOption, BotState, CourtOption, HandlerResult, SessionContext, SlotOption } from '../types'
 import { confirmBooking, courtsAtTimeList, dayAvailabilityList, timeNotAvailable } from '../messages'
+import { looksLikeTime } from './match'
 
 // Time-first booking flow: the player picks a TIME from the day's availability and the bot
 // assigns a free court (auto when there's one, or asks only when several courts share that
@@ -13,6 +14,7 @@ export function bandsToSlotOptions(bands: BandOption[]): SlotOption[] {
     bandStart: b.bandStart,
     label: b.label,
     price: Math.min(...b.courts.map(c => c.price)),
+    sortMinutes: b.sortMinutes,
   }))
 }
 
@@ -125,8 +127,8 @@ export function isAnyCourt(msg: string): boolean {
   )
 }
 
-/** A rough "this looks like a clock time" check (and not a court reference). */
+/** True when the player named an hour (and isn't talking about a court). */
 export function mentionsTime(msg: string): boolean {
   if (/cancha/i.test(msg)) return false
-  return /\d{1,2}/.test(msg)
+  return looksLikeTime(msg)
 }

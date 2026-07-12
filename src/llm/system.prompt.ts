@@ -1,9 +1,15 @@
 import { CLUB_TIMEZONE } from '../availability/lib/datetime'
+import { CourtSchedule, generateBands } from '../availability/lib/schedule'
 import { BotState, SessionContext } from '../bot/types'
+
+/** A court as the prompt needs it: its name plus its real schedule config. */
+export interface PromptCourt extends CourtSchedule {
+  name: string
+}
 
 export interface SystemPromptParams {
   clubName: string
-  courtNames: string[]
+  courts: PromptCourt[]
   currentDate: string
   state: BotState
   playerName?: string
@@ -20,11 +26,10 @@ const STATIC_PREFIX = `Sos *PadelBot*, el asistente virtual de un club de pádel
 Gestionás reservas por WhatsApp de forma clara, rápida y confiable: reservar un turno
 y responder preguntas generales del club.
 
-━━━ ESQUEMA DE FRANJAS (horario de operación, NO disponibilidad real) ━━━
-  09:00–10:30 · 10:30–12:00 · 12:00–13:30 · 13:30–15:00 · 15:00–16:30
-  16:30–18:00 · 18:00–19:30 · 19:30–21:00 · 21:00–22:30 · 22:30–00:00
-⚠️ Es el esquema fijo del club, no qué hay libre. La disponibilidad real solo la sabés
-al llamar a navigate_booking; nunca la respondas de memoria ni listes estas franjas como turnos libres.
+⚠️ Cada club tiene SU propio horario y duración de turno — más abajo van los de este club.
+Nunca supongas un esquema de franjas: usá solo el que te pasan. Y ese esquema es el horario de
+operación, NO la disponibilidad: qué está libre solo lo sabés llamando a navigate_booking.
+Jamás listes franjas como si fueran turnos libres.
 
 ━━━ REGLAS ABSOLUTAS ━━━
 1. Nunca confirmes una reserva sin confirmación explícita del jugador.
@@ -48,6 +53,10 @@ cancha sola (solo pregunta cuál si el mismo horario está libre en varias). Pas
 el jugador pide una cancha puntual; si menciona una hora, pasá siempre timePreference.
 Texto (sin función) → saludos, agradecimientos y preguntas generales sin fecha específica.
 
+⚠️ Ver o CANCELAR turnos ya reservados lo maneja el sistema, no vos. Si el jugador quiere ver
+sus turnos, cancelar uno, o dice que no va a poder ir, decile que responda *mis turnos* y él
+solo elige cuál. Nunca le digas que le escriba al club para eso, ni prometas cancelarlo vos.
+
 ━━━ CASOS ESPECIALES ━━━
 • "¿Cuánto cuesta?" → el precio aparece al elegir el turno; no lo inventes.
 • "¿Cancha cubierta?" → respondé con los nombres que conocés, sin inventar características.
@@ -56,13 +65,9 @@ Texto (sin función) → saludos, agradecimientos y preguntas generales sin fech
 • Lenguaje inapropiado o datos de terceros → redirigí con calma; no compartas datos ajenos.`
 
 export function buildSystemPrompt(params: SystemPromptParams): string {
-  const { clubName, courtNames, currentDate, state, playerName, ctx } = params
-
-  const courtsBlock =
-    courtNames.length > 0 ? courtNames.map((n, i) => `  ${i + 1}. ${n}`).join('\n') : '  (Sin canchas configuradas)'
+  const { clubName, courts, currentDate, state, playerName, ctx } = params
 
   const playerLine = playerName ? `Jugador actual: *${playerName}*` : 'Nombre del jugador: desconocido'
-
   const stateCtx = buildStateContext(state, ctx)
 
   // STATIC_PREFIX first (cacheable), variable data last.
@@ -71,8 +76,8 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
 ━━━ DATOS DEL CLUB ━━━
 Club: *${clubName}*
 Fecha y hora actual: ${currentDate}
-Canchas:
-${courtsBlock}
+Canchas y franjas (esquema, NO disponibilidad):
+${describeSchedule(courts)}
 
 ━━━ CONVERSACIÓN ACTUAL ━━━
 ${playerLine}
@@ -80,6 +85,31 @@ ${stateCtx}`
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * The club's REAL bands, per court, straight from its configuration.
+ *
+ * This used to be a constant in the static prefix (09:00–00:00, 90-minute bands). Every club
+ * that opens earlier, closes later or rents 60-minute turns had an LLM reasoning about a grid
+ * that doesn't exist — and mapping "mañana temprano" onto a band the club never offers. The
+ * bands are derived from the same schedule module the availability layer uses, so the prompt
+ * can't drift from reality.
+ *
+ * Per-weekday overrides (`weeklyHours`) are deliberately NOT expanded here: the default hours
+ * are enough for the LLM to map "las 6 de la tarde" onto a plausible band start, and the real
+ * answer for any given day always comes back from navigate_booking.
+ */
+function describeSchedule(courts: PromptCourt[]): string {
+  if (courts.length === 0) return '  (Sin canchas configuradas)'
+
+  return courts
+    .map(court => {
+      const starts = generateBands(court.openTime, court.closeTime, court.slotDurationMinutes).map(b => b.start)
+      if (starts.length === 0) return `  • ${court.name}: sin franjas configuradas`
+      return `  • ${court.name} (turnos de ${court.slotDurationMinutes} min): ${starts.join(' · ')}`
+    })
+    .join('\n')
+}
 
 function buildStateContext(state: BotState, ctx: SessionContext): string {
   const parts: string[] = []

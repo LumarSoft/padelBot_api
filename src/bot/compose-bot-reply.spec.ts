@@ -8,7 +8,7 @@ import { BandOption, BotState, SessionContext } from './types'
 describe('composeBotReply', () => {
   it('shows the menu button and a concise body (no enumerated list) on the menu', () => {
     const r = composeBotReply(BotState.MENU, {}, welcome('Mateo'))
-    expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['1'])
+    expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['1', '2'])
     expect(r.text).toContain('Tocá una opción')
     expect(r.text).not.toContain('1️⃣')
     // the greeting prefix is preserved

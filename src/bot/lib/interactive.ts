@@ -1,4 +1,6 @@
-import { BotState, Interactive, InteractiveButton, InteractiveRow, SessionContext } from '../types'
+import { dayLabelFromKey, dayMonthFromKey, shiftDateKey, todayKey } from '../../availability/lib/datetime'
+import { PART_OF_DAY_LABELS, PART_OF_DAY_PREFIX, partsWithBands } from './part-of-day'
+import { BotState, Interactive, InteractiveButton, InteractiveRow, MY_BOOKING_PREFIX, SessionContext } from '../types'
 
 // Builds the WhatsApp botonera that fits the step the player is on, derived purely from the
 // resulting FSM state + context. Each option's `id` is the exact text the FSM already
@@ -15,9 +17,12 @@ const ROW_DESC_MAX = 72
 
 const truncate = (s: string, max: number): string => (s.length <= max ? s : s.slice(0, max - 1).trimEnd() + '…')
 
-/** The single main action — id matches what `onMenu` already expects. */
+/** The main actions — ids match what `onMenu` already expects. */
 const MENU_BUTTONS: Interactive = {
-  buttons: [{ id: '1', title: 'Reservar' }],
+  buttons: [
+    { id: '1', title: '🎾 Reservar' },
+    { id: '2', title: '🗓️ Mis turnos' },
+  ],
 }
 
 /** Yes/No for the booking summary — ids feed `normalizeYesNo`. */
@@ -26,6 +31,27 @@ const CONFIRM_BOOKING_BUTTONS: Interactive = {
     { id: 'si', title: '✅ Confirmar' },
     { id: 'no', title: '✖️ Mejor no' },
   ],
+}
+
+/** Yes/No on moving a booking — worded so a mis-tap doesn't move somebody's court. */
+const CONFIRM_RESCHEDULE_BUTTONS: Interactive = {
+  buttons: [
+    { id: 'si', title: '🔄 Sí, movelo' },
+    { id: 'no', title: '↩️ Dejalo igual' },
+  ],
+}
+
+/** The player's upcoming bookings — id = "turno:<bookingId>", resolved by the FSM. */
+function myBookingsInteractive(ctx: SessionContext): Interactive | undefined {
+  const bookings = ctx.myBookings ?? []
+  return chooseInteractive(
+    bookings.map(b => ({
+      id: `${MY_BOOKING_PREFIX}${b.id}`,
+      title: truncate(b.short, ROW_TITLE_MAX),
+      description: b.pending ? `${b.courtName} · falta la seña` : b.courtName,
+    })),
+    'Ver mis turnos',
+  )
 }
 
 /**
@@ -52,6 +78,32 @@ function chooseInteractive(options: InteractiveRow[], listButton: string): Inter
   return undefined
 }
 
+/** How many days ahead the date picker offers. */
+const DATE_PICKER_DAYS = 7
+
+/**
+ * The next few days as a one-tap list. Ids are "DD/MM", which `parseDateExpression` already
+ * understands, so a tap costs nothing: no LLM call, no new FSM branch. Typing "el sábado"
+ * still works — this just means most players never have to.
+ */
+function datesInteractive(): Interactive {
+  const today = todayKey()
+  const rows: InteractiveRow[] = []
+
+  for (let i = 0; i < DATE_PICKER_DAYS; i++) {
+    const key = shiftDateKey(today, i)
+    const label = dayLabelFromKey(key) // "domingo 12/07"
+    const title = i === 0 ? 'Hoy' : i === 1 ? 'Mañana' : label
+    rows.push({
+      id: dayMonthFromKey(key), // "12/07"
+      title: truncate(title, ROW_TITLE_MAX),
+      ...(i <= 1 ? { description: label } : {}),
+    })
+  }
+
+  return { list: { button: 'Elegí un día', rows } }
+}
+
 function courtsInteractive(ctx: SessionContext): Interactive | undefined {
   const courts = ctx.courtOptions ?? []
   // id = court name → matchCourt resolves it; exact-match wins over substrings.
@@ -63,6 +115,19 @@ function courtsInteractive(ctx: SessionContext): Interactive | undefined {
 
 function slotsInteractive(ctx: SessionContext): Interactive | undefined {
   const slots = ctx.slotOptions ?? []
+
+  // More free bands than a WhatsApp list can hold (a club with 60-minute turns easily has 16):
+  // offer the parts of the day instead, and list that part's hours on the next tap. Without
+  // this the player gets no botonera at all and every reply falls through to the LLM.
+  if (slots.length > MAX_ROWS) {
+    const parts = partsWithBands(ctx.dayAvailability ?? [])
+    if (parts.length > 1) {
+      return {
+        buttons: parts.map(p => ({ id: `${PART_OF_DAY_PREFIX}${p}`, title: PART_OF_DAY_LABELS[p] })),
+      }
+    }
+  }
+
   // id = band start ("18:00") → matchSlot resolves it by the hour.
   return chooseInteractive(
     slots.map(s => ({
@@ -81,14 +146,22 @@ export function buildInteractive(state: BotState, ctx: SessionContext): Interact
     case BotState.MENU:
       return MENU_BUTTONS
     case BotState.BOOK_DATE:
-      // No buttons here on purpose — the player types a date / "hoy" / "mañana" / "el sábado".
-      return undefined
+      return datesInteractive()
     case BotState.BOOK_COURT:
       return courtsInteractive(ctx)
     case BotState.BOOK_SLOT:
       return slotsInteractive(ctx)
     case BotState.BOOK_CONFIRM:
       return CONFIRM_BOOKING_BUTTONS
+    case BotState.MY_BOOKINGS:
+      return myBookingsInteractive(ctx)
+    // A move reuses the booking flow's pickers — same ids, same parsing, no LLM.
+    case BotState.RESCHEDULE_DATE:
+      return datesInteractive()
+    case BotState.RESCHEDULE_SLOT:
+      return slotsInteractive(ctx)
+    case BotState.RESCHEDULE_CONFIRM:
+      return CONFIRM_RESCHEDULE_BUTTONS
     default:
       // BOOK_NAME, BOOK_DNI → free-text answers, no botonera.
       return undefined

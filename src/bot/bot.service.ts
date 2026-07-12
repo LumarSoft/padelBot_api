@@ -2,24 +2,47 @@ import { ForbiddenException, Injectable, Logger } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { BookingsService } from '../bookings/bookings.service'
 import { AvailabilityService } from '../availability/availability.service'
-import { dayLabelFromKey, shiftDateKey, todayKey, wallTimeToUtc, weekdayOfKey } from '../availability/lib/datetime'
+import {
+  dayLabelFromKey,
+  dayMonthFromKey,
+  formatTime,
+  formatTimeRange,
+  shiftDateKey,
+  toDateKey,
+  todayKey,
+  wallTimeToUtc,
+  weekdayOfKey,
+} from '../availability/lib/datetime'
 import { LlmService } from '../llm/llm.service'
 import { ConversationSessionService, keepName } from './conversation-session.service'
 import { matchCourt, matchSlot } from './lib/match'
+import { parseDateExpression } from './lib/date-parse'
+import { stepPrompt } from './lib/step-prompt'
 import {
   assignCheapestForBand,
   availabilityResult,
+  bandsToSlotOptions,
   isAnyCourt,
   mentionsTime,
   resolveBand,
   resolveCourtAtBand,
 } from './lib/booking-flow'
+import { PART_OF_DAY_NAMES, bandsInPart, parsePartOfDay } from './lib/part-of-day'
 import { subscriptionSelect, subscriptionState } from '../clubs/lib/subscription'
 import { WaitlistService } from '../waitlist/waitlist.service'
 import { PlayersService } from '../players/players.service'
+import { NotificationsService } from '../notifications/notifications.service'
 import { WhatsAppMediaService } from '../whatsapp/whatsapp-media.service'
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
-import { BotReply, BotState, HandlerResult, InboundMedia, SessionContext } from './types'
+import {
+  BotReply,
+  BotState,
+  HandlerResult,
+  InboundMedia,
+  MY_BOOKING_PREFIX,
+  MyBookingOption,
+  SessionContext,
+} from './types'
 import {
   ASK_DATE,
   ASK_DNI,
@@ -28,17 +51,26 @@ import {
   ATTACHMENT_NO_PENDING,
   BOOKING_ABORTED,
   BOOKING_FAILED,
+  NO_UPCOMING_BOOKINGS,
+  RESCHEDULE_ABORTED,
+  RESCHEDULE_FAILED,
+  RESCHEDULE_NO_DAY_WORKS,
+  RESCHEDULE_OFF,
   PAYMENT_CLAIM_NO_PENDING,
   PAYMENT_UNAVAILABLE,
   RECEIPT_ATTACHMENT_FAILED,
   RECEIPT_ATTACHMENT_NO_PENDING,
   RECEIPT_CLAIM_ASK_PHOTO,
   TECHNICAL_ERROR,
+  askRescheduleDate,
   composeBotReply,
   confirmBooking,
-  courtsAtTimeList,
   dayAvailabilityList,
+  myBookingsList,
   noAvailabilityWithSuggestions,
+  rescheduleConfirm,
+  rescheduleDone,
+  rescheduleRequested,
   paymentClaimAck,
   receiptReceivedAck,
   slotsList,
@@ -56,6 +88,18 @@ const WEEKDAY_LABELS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'v
 /** "¿Cómo llegar?" in its usual forms — answered from Club.locationInfo. */
 const LOCATION_QUESTION = /c[oó]mo lleg|direcci[oó]n|ubicaci[oó]n|d[oó]nde (est[aá]n|queda)/i
 
+/**
+ * "Mis turnos" / "quiero cancelar" — answered from the player's own bookings, no LLM. These
+ * are among the most common messages a club gets, and until now the bot had no answer for
+ * them: they fell through to a model with no tool to cancel anything.
+ */
+/** "No puedo ningún otro día" — the escape hatch out of the reschedule flow, into a human. */
+const NO_DAY_WORKS =
+  /\bning[uú]n (otro )?d[ií]a\b|\bno puedo ning|\bno me sirve ning|\bno voy a poder ir\b|\bmejor cancel/i
+
+const MY_BOOKINGS_INTENT =
+  /\bmis (turnos|reservas)\b|\bque turnos tengo\b|\bqué turnos tengo\b|\bcancelar\b|\banular\b|\bdar de baja\b|\bno voy a (poder )?(ir|jugar)\b/i
+
 @Injectable()
 export class BotService {
   private readonly logger = new Logger(BotService.name)
@@ -70,6 +114,7 @@ export class BotService {
     private readonly receiptStorage: ReceiptStorageService,
     private readonly waitlist: WaitlistService,
     private readonly players: PlayersService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async handleMessage(waId: string, clubId: string, body: string): Promise<BotReply | null> {
@@ -103,6 +148,18 @@ export class BotService {
       return { text: '🧹 Listo, borré la conversación. Empezamos de cero — escribime *hola* cuando quieras. 🎾' }
     }
 
+    // Always persist the incoming message for admin visibility.
+    await this.sessionService.saveMessage(session.id, 'USER', msg)
+
+    // In HUMAN mode the admin handles the reply — bot stays silent. Every branch that can
+    // speak to the player MUST sit below this guard: an admin who took over the chat is
+    // mid-conversation with the player, and a bot message on top of theirs is a mess only
+    // the club can clean up.
+    if (session.mode === 'HUMAN') {
+      this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
+      return null
+    }
+
     // "avisame" right after a no-availability reply → join that day's waitlist.
     const sessionCtx = session.context
     if (sessionCtx.waitlistOfferDate && /\bavis(a|á)me\b|\bavisarme\b/i.test(msg)) {
@@ -111,19 +168,9 @@ export class BotService {
       const reply =
         `🔔 ¡Listo! Si se libera un turno el *${dayLabelFromKey(dateKey)}* te aviso al toque por acá. ` +
         `Mientras tanto podés reservar otro día cuando quieras. 🎾`
-      await this.sessionService.saveMessage(session.id, 'USER', msg)
       await this.sessionService.saveMessage(session.id, 'BOT', reply)
       await this.sessionService.update(session.id, BotState.MENU, { ...keepName(sessionCtx) })
       return { text: reply }
-    }
-
-    // Always persist the incoming message for admin visibility.
-    await this.sessionService.saveMessage(session.id, 'USER', msg)
-
-    // In HUMAN mode the admin handles the reply — bot stays silent.
-    if (session.mode === 'HUMAN') {
-      this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
-      return null
     }
 
     const state = session.state as BotState
@@ -137,22 +184,26 @@ export class BotService {
         ? await this.paymentClaimReply(clubId, waId, session.context)
         : await this.dispatch(state, msg, session.context, clubId, waId))
 
+    // What the bot actually said (answer + step prompt) — the history and the admin's chat
+    // view must show that, not just the step prompt.
+    const said = fullReply(result)
+
     // Keep last 8 messages (4 turns) so the LLM has short-term conversational context.
     const prevHistory = session.context.history ?? []
     const newHistory = [
       ...prevHistory,
       { role: 'user' as const, content: msg },
-      { role: 'assistant' as const, content: result.reply },
+      { role: 'assistant' as const, content: said },
     ].slice(-8)
 
     await this.sessionService.update(session.id, result.state, { ...result.ctx, history: newHistory })
-    await this.sessionService.saveMessage(session.id, 'BOT', result.reply)
+    await this.sessionService.saveMessage(session.id, 'BOT', said)
     // The actual WhatsApp send is logged at the transport layer (WhatsAppService), which also
     // captures system messages (payment notifications) — so we don't log the reply twice here.
     // Pair the reply with the botonera that fits the next step (menu, courts, slots, yes/no…)
     // and trim the body so options aren't listed twice. Tapping a button feeds its id back
     // through this same handler, so the FSM is unchanged.
-    return composeBotReply(result.state, result.ctx, result.reply)
+    return composeBotReply(result.state, result.ctx, result.reply, result.prefix)
   }
 
   /**
@@ -402,6 +453,14 @@ export class BotService {
         return this.onBookConfirm(msg, ctx, clubId, waId)
       case BotState.BOOK_DNI:
         return this.onBookDni(msg, ctx, clubId, waId)
+      case BotState.MY_BOOKINGS:
+        return this.onMyBookings(msg, ctx, clubId, waId)
+      case BotState.RESCHEDULE_DATE:
+        return this.onRescheduleDate(msg, ctx, clubId, waId)
+      case BotState.RESCHEDULE_SLOT:
+        return this.onRescheduleSlot(msg, ctx, clubId, waId)
+      case BotState.RESCHEDULE_CONFIRM:
+        return this.onRescheduleConfirm(msg, ctx, clubId, waId)
       default:
         return Promise.resolve({ reply: welcome(ctx.playerName), state: BotState.MENU, ctx })
     }
@@ -437,14 +496,14 @@ export class BotService {
       const step = stepPrompt(state, ctx)
       if (step) {
         const hi = ctx.playerName ? `👋 ¡Hola, ${ctx.playerName}!` : '👋 ¡Hola!'
-        return { reply: `${hi} Seguimos con lo que estábamos 🎾\n\n${step}`, state, ctx }
+        return { prefix: `${hi} Seguimos con lo que estábamos 🎾`, reply: step, state, ctx }
       }
     }
 
     if (isThanks(msg)) {
       if (menuLike) return { reply: thanksReply(ctx.playerName), state: BotState.MENU, ctx }
       const step = stepPrompt(state, ctx)
-      if (step) return { reply: `¡De nada! 🎾\n\n${step}`, state, ctx }
+      if (step) return { prefix: '¡De nada! 🎾', reply: step, state, ctx }
     }
 
     return null
@@ -464,14 +523,217 @@ export class BotService {
 
   private async onMenu(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     if (msg === '1') return { reply: ASK_DATE, state: BotState.BOOK_DATE, ctx }
+    if (msg === '2' || MY_BOOKINGS_INTENT.test(msg)) return this.showMyBookings(clubId, waId, ctx)
     // Natural language → LLM interprets intent
     return this.fallback(BotState.MENU, msg, ctx, clubId, waId)
   }
 
+  /**
+   * "Mis turnos": the player's own upcoming bookings, tappable. Deterministic on purpose —
+   * "quiero cancelar el turno del sábado" is a common message and it used to reach the LLM,
+   * which had no tool to do anything about it and answered something vague.
+   */
+  private async showMyBookings(clubId: string, waId: string, ctx: SessionContext): Promise<HandlerResult> {
+    const bookings = await this.bookingsService.findUpcomingForPlayer(clubId, waId)
+    if (bookings.length === 0) {
+      return { reply: NO_UPCOMING_BOOKINGS, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    const options: MyBookingOption[] = bookings.map(b => ({
+      id: b.id,
+      label: `${dayLabelFromKey(toDateKey(b.slot.startsAt))} · ${formatTimeRange(b.slot.startsAt, b.slot.endsAt)} · ${b.slot.court.name}`,
+      short: `${dayMonthFromKey(toDateKey(b.slot.startsAt))} · ${formatTime(b.slot.startsAt)}`,
+      courtName: b.slot.court.name,
+      pending: b.status === 'PENDING_PAYMENT',
+    }))
+
+    return {
+      reply: myBookingsList(options),
+      state: BotState.MY_BOOKINGS,
+      ctx: { ...ctx, myBookings: options, rescheduleBookingId: undefined },
+    }
+  }
+
+  /**
+   * The player picked one of their bookings. The bot never cancels it — it offers to MOVE it,
+   * which keeps their deposit alive, frees the old court for the waitlist, and costs the club
+   * nothing. Whether they may do that alone is the club's policy.
+   */
+  private async onMyBookings(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
+    const picked = matchMyBooking(msg, ctx.myBookings ?? [])
+    if (!picked) {
+      // Not a booking reference — maybe they want to book instead. Let the LLM read it.
+      return this.fallback(BotState.MY_BOOKINGS, msg, ctx, clubId, waId)
+    }
+
+    const policy = await this.bookingsService.reschedulePolicyForPlayer(clubId, picked.id, waId)
+    if (!policy) return { reply: RESCHEDULE_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
+
+    if (policy.mode === 'OFF') {
+      return { reply: RESCHEDULE_OFF, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+    if (policy.mode === 'REQUEST') {
+      await this.askClubToHandle(clubId, waId, picked.label, policy.reason)
+      return {
+        reply: rescheduleRequested(policy.reason as 'club-policy' | 'too-late' | 'limit-reached'),
+        state: BotState.MENU,
+        ctx: keepName(ctx),
+      }
+    }
+
+    return {
+      reply: askRescheduleDate(picked.label),
+      state: BotState.RESCHEDULE_DATE,
+      ctx: {
+        ...keepName(ctx),
+        rescheduleBookingId: picked.id,
+        rescheduleFromLabel: picked.label,
+        rescheduleFromPriceCents: policy.priceCents,
+      },
+    }
+  }
+
+  /** The new day for a booking being moved. Same parsing (and same free botonera) as booking. */
+  private async onRescheduleDate(
+    msg: string,
+    ctx: SessionContext,
+    clubId: string,
+    waId: string,
+  ): Promise<HandlerResult> {
+    // "No puedo ningún día" → never trap them in the flow: hand it to a human. A player who
+    // gives up on the chat just doesn't show up, which is worse for the club than being told.
+    if (NO_DAY_WORKS.test(msg)) return this.handOverToClub(clubId, waId, ctx)
+
+    const date = parseDateExpression(msg)
+    if (!date) return this.fallback(BotState.RESCHEDULE_DATE, msg, ctx, clubId, waId)
+
+    const bands = await this.availability.availableBandsForDate(clubId, date)
+    if (bands.length === 0) {
+      const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
+      return {
+        reply: noAvailabilityWithSuggestions(date, suggestions),
+        state: BotState.RESCHEDULE_DATE,
+        ctx: { ...ctx, waitlistOfferDate: date },
+      }
+    }
+
+    return {
+      reply: dayAvailabilityList(bands, date),
+      state: BotState.RESCHEDULE_SLOT,
+      ctx: { ...ctx, selectedDate: date, dayAvailability: bands, slotOptions: bandsToSlotOptions(bands) },
+    }
+  }
+
+  /** The new hour. A move doesn't ask which court — the cheapest free one is assigned. */
+  private async onRescheduleSlot(
+    msg: string,
+    ctx: SessionContext,
+    clubId: string,
+    waId: string,
+  ): Promise<HandlerResult> {
+    if (NO_DAY_WORKS.test(msg)) return this.handOverToClub(clubId, waId, ctx)
+
+    const bands = ctx.dayAvailability ?? []
+
+    const part = parsePartOfDay(msg)
+    if (part && bands.length) {
+      const inPart = bandsInPart(bands, part)
+      return {
+        prefix: `Horarios de la *${PART_OF_DAY_NAMES[part]}* 👇`,
+        reply: dayAvailabilityList(inPart, ctx.selectedDate!),
+        state: BotState.RESCHEDULE_SLOT,
+        ctx: { ...ctx, slotOptions: bandsToSlotOptions(inPart) },
+      }
+    }
+
+    const slot = matchSlot(msg, bands.length ? bandsToSlotOptions(bands) : (ctx.slotOptions ?? []))
+    if (!slot) {
+      if (mentionsTime(msg) && bands.length) {
+        return {
+          reply: timeNotAvailable(bands, ctx.selectedDate!),
+          state: BotState.RESCHEDULE_SLOT,
+          ctx: { ...ctx, slotOptions: bandsToSlotOptions(bands) },
+        }
+      }
+      return this.fallback(BotState.RESCHEDULE_SLOT, msg, ctx, clubId, waId)
+    }
+
+    // Assign the cheapest free court for that hour — a move is not the moment to make the
+    // player pick a court they didn't ask about.
+    const assigned = assignCheapestForBand(ctx, slot.bandStart)
+    if (assigned.state !== BotState.BOOK_CONFIRM) {
+      // The band is gone (someone took it while they were deciding) → assigned re-shows what's free.
+      return { ...assigned, state: BotState.RESCHEDULE_SLOT }
+    }
+
+    const next = assigned.ctx
+    const priceDiff = (next.selectedSlotPrice ?? 0) - (ctx.rescheduleFromPriceCents ?? 0)
+    return {
+      reply: rescheduleConfirm(ctx.rescheduleFromLabel ?? 'tu turno', next, priceDiff),
+      state: BotState.RESCHEDULE_CONFIRM,
+      ctx: next,
+    }
+  }
+
+  /** Final yes/no on the move. Only an explicit "sí" touches the booking. */
+  private async onRescheduleConfirm(
+    msg: string,
+    ctx: SessionContext,
+    clubId: string,
+    waId: string,
+  ): Promise<HandlerResult> {
+    const answer = normalizeYesNo(msg)
+    if (!answer) {
+      // Usually a question ("¿y la diferencia?"). The LLM may answer it; the step is re-asked
+      // underneath and only the "sí" below moves anything.
+      return this.fallback(BotState.RESCHEDULE_CONFIRM, msg, ctx, clubId, waId)
+    }
+    if (answer === 'n' || !ctx.rescheduleBookingId) {
+      return { reply: RESCHEDULE_ABORTED, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    const moved = await this.bookingsService.rescheduleToBandByPlayer(clubId, ctx.rescheduleBookingId, waId, {
+      courtId: ctx.selectedCourtId!,
+      dateKey: ctx.selectedDate!,
+      bandStart: ctx.selectedBandStart!,
+    })
+    if (!moved) return { reply: RESCHEDULE_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
+
+    this.logger.log(`🔄 ${waId}: movió la reserva ${ctx.rescheduleBookingId}`)
+    return { reply: rescheduleDone(ctx, moved.priceDiffCents), state: BotState.MENU, ctx: keepName(ctx) }
+  }
+
+  /** The player can't make any other day → the club takes it from here. */
+  private async handOverToClub(clubId: string, waId: string, ctx: SessionContext): Promise<HandlerResult> {
+    await this.askClubToHandle(clubId, waId, ctx.rescheduleFromLabel ?? 'un turno', 'no-day-works')
+    return { reply: RESCHEDULE_NO_DAY_WORKS, state: BotState.MENU, ctx: keepName(ctx) }
+  }
+
+  /**
+   * Puts the ball in the club's court: a push to the staff with who, which booking and why.
+   * This is the escape hatch of the whole reschedule flow — every path that the bot can't
+   * resolve on its own ends here, and none of them ends in silence.
+   */
+  private async askClubToHandle(clubId: string, waId: string, label: string, reason: string): Promise<void> {
+    const why =
+      reason === 'too-late'
+        ? 'falta poco para el turno'
+        : reason === 'limit-reached'
+          ? 'ya lo movió una vez'
+          : reason === 'no-day-works'
+            ? 'no le sirve ningún otro día'
+            : 'la política del club lo requiere'
+    await this.notifications.notifyClub(clubId, {
+      title: '🔄 Un jugador pide cambiar un turno',
+      body: `${label} — ${why}. Respondele desde Conversaciones (${waId}).`,
+    })
+  }
+
   private async onBookDate(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    const date = parseDateDMY(msg)
+    // "25/06", "hoy", "mañana", "el sábado"… all resolved here, for free. Only genuinely
+    // ambiguous phrasing ("el finde largo", "para la semana del 20") reaches the LLM.
+    const date = parseDateExpression(msg)
     if (!date) {
-      // Could be "mañana", "el sábado", etc. → LLM resolves
       return this.fallback(BotState.BOOK_DATE, msg, ctx, clubId, waId)
     }
 
@@ -582,16 +844,37 @@ export class BotService {
   }
 
   private async onBookSlot(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
-    const slot = matchSlot(msg, ctx.slotOptions ?? [])
+    const bands = ctx.dayAvailability ?? []
 
+    // The player tapped a part of the day (offered when the free bands don't fit a list) →
+    // narrow the botonera to that part's hours. The day's availability stays whole, so typing
+    // "a las 10" after tapping "Tarde" still books the morning band instead of dead-ending.
+    const part = parsePartOfDay(msg)
+    if (part && bands.length) {
+      const inPart = bandsInPart(bands, part)
+      return {
+        prefix: `Horarios de la *${PART_OF_DAY_NAMES[part]}* 👇`,
+        reply: dayAvailabilityList(inPart, ctx.selectedDate!),
+        state: BotState.BOOK_SLOT,
+        ctx: { ...ctx, slotOptions: bandsToSlotOptions(inPart) },
+      }
+    }
+
+    // Match against the WHOLE day, not just what's currently on the botonera.
+    const slot = matchSlot(msg, bands.length ? bandsToSlotOptions(bands) : (ctx.slotOptions ?? []))
     if (slot) {
       // A real free band → auto-assign a court, or ask which one if several are free.
       return resolveBand(ctx, slot.bandStart)
     }
 
     // A specific hour that isn't in the list → it's just not free; show what is.
-    if (mentionsTime(msg) && ctx.dayAvailability?.length) {
-      return { reply: timeNotAvailable(ctx.dayAvailability, ctx.selectedDate!), state: BotState.BOOK_SLOT, ctx }
+    if (mentionsTime(msg) && bands.length) {
+      return {
+        reply: timeNotAvailable(bands, ctx.selectedDate!),
+        state: BotState.BOOK_SLOT,
+        // Re-offer the full day so the botonera isn't stuck on a part the player left.
+        ctx: { ...ctx, slotOptions: bandsToSlotOptions(bands) },
+      }
     }
 
     // Non-time phrasings ("el último", "el más temprano", a court name) → LLM resolves.
@@ -777,32 +1060,6 @@ function logSnippet(text: string, max = 140): string {
   return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + '…'
 }
 
-/**
- * Parses "DD/MM" or "D/M" into "YYYY-MM-DD".
- * If the date has already passed this year, assumes next year.
- * Today is resolved in the club timezone so the year rollover is consistent
- * with how the rest of the bot reasons about dates.
- */
-function parseDateDMY(input: string): string | null {
-  const m = input.trim().match(/^(\d{1,2})[/-](\d{1,2})$/)
-  if (!m) return null
-
-  const day = parseInt(m[1], 10)
-  const month = parseInt(m[2], 10)
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null
-
-  // Validate the calendar day (rejects 31/02, etc.) using a UTC probe.
-  const probe = new Date(Date.UTC(2000, month - 1, day))
-  if (probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return null
-
-  const [todayY, todayM, todayD] = todayKey().split('-').map(Number)
-  let year = todayY
-  const isBeforeToday = month < todayM || (month === todayM && day < todayD)
-  if (isBeforeToday) year += 1
-
-  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-}
-
 /** A file extension for a stored receipt, derived from its mime type (defaults to .jpg). */
 function extensionFor(mimeType: string): string {
   if (mimeType.includes('png')) return '.png'
@@ -858,37 +1115,28 @@ function isPaymentClaim(msg: string): boolean {
   )
 }
 
+/** Everything the bot said this turn: the prose answer (if any) plus the step's prompt. */
+function fullReply(result: HandlerResult): string {
+  return result.prefix ? `${result.prefix}\n\n${result.reply}` : result.reply
+}
+
 /**
- * The re-prompt for the current flow step, rebuilt from the session context — used to
- * keep a player oriented after a cheap greeting/thanks mid-flow without an LLM call.
- * Returns null when the step can't be rebuilt (let the LLM handle it instead).
+ * Resolves which of the player's bookings a message refers to: the tapped row id
+ * ("turno:<id>"), or — when they typed instead of tapping — the only booking whose day they
+ * named. With several bookings on the same day we do NOT guess: cancelling the wrong court is
+ * worse than asking again.
  */
-function stepPrompt(state: BotState, ctx: SessionContext): string | null {
-  switch (state) {
-    case BotState.BOOK_DATE:
-      return ASK_DATE
-    case BotState.BOOK_COURT: {
-      // The "free on several courts at this time" step → re-show that list.
-      if (!ctx.selectedBandStart || !ctx.selectedDate) return null
-      const band = ctx.dayAvailability?.find(b => b.bandStart === ctx.selectedBandStart)
-      return band
-        ? courtsAtTimeList(
-            band.courts.map(c => ({ name: c.name, price: c.price })),
-            band.label,
-            ctx.selectedDate,
-          )
-        : null
-    }
-    case BotState.BOOK_SLOT:
-      if (!ctx.selectedDate) return null
-      // Explicit single court → its slot list; otherwise the day's availability.
-      if (ctx.selectedCourtName && ctx.slotOptions?.length) {
-        return slotsList(ctx.slotOptions, ctx.selectedCourtName, ctx.selectedDate)
-      }
-      return ctx.dayAvailability?.length ? dayAvailabilityList(ctx.dayAvailability, ctx.selectedDate) : null
-    default:
-      return null
+function matchMyBooking(msg: string, bookings: MyBookingOption[]): MyBookingOption | undefined {
+  const tapped = msg.trim().toLowerCase()
+  if (tapped.startsWith(MY_BOOKING_PREFIX)) {
+    const id = msg.trim().slice(MY_BOOKING_PREFIX.length)
+    return bookings.find(b => b.id === id)
   }
+
+  const dateKey = parseDateExpression(msg)
+  if (!dateKey) return undefined
+  const dayMatches = bookings.filter(b => b.short.startsWith(dayMonthFromKey(dateKey)))
+  return dayMatches.length === 1 ? dayMatches[0] : undefined
 }
 
 /** True for short "thanks" messages — cheap to answer without the LLM. */
