@@ -6,15 +6,7 @@
  * step "done" is always derived from real data (see OnboardingService.getStatus), so a club
  * configured by hand shows up as done without ever opening the wizard.
  */
-export const SETUP_STEP_IDS = [
-  'complejo',
-  'canchas',
-  'pagos',
-  'whatsapp',
-  'fijos',
-  'equipo',
-  'kiosco',
-] as const
+export const SETUP_STEP_IDS = ['complejo', 'canchas', 'pagos', 'whatsapp', 'fijos', 'equipo', 'kiosco'] as const
 
 export type SetupStepId = (typeof SETUP_STEP_IDS)[number]
 

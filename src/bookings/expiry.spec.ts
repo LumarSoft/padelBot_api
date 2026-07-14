@@ -61,6 +61,7 @@ function setup(wonTheRace = true) {
     {} as never,
     notifications as never,
     {} as never,
+    { repriceSlot: jest.fn(), repriceFutureSlots: jest.fn() } as never,
   )
   return { service, prisma, tx, events }
 }

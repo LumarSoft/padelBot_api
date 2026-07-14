@@ -1,7 +1,12 @@
-import { IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator'
+import { IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator'
 
-const VALID_SLOT_STARTS = ['09:00', '10:30', '12:00', '13:30', '15:00', '16:30', '18:00', '19:30', '21:00', '22:30']
-const VALID_SLOT_ENDS = ['10:30', '12:00', '13:30', '15:00', '16:30', '18:00', '19:30', '21:00', '22:30', '00:00']
+/**
+ * "HH:MM" wall-clock band edge. NOT a fixed 90-minute grid: `Court.slotDurationMinutes` is per
+ * court (60 for fútbol 5, 90 for pádel…), so a hardcoded list of valid times rejects perfectly
+ * real bands. The service validates the pair against the court's own schedule
+ * (`assertValidSlotPair`), which is the only source of truth for what bands exist.
+ */
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
 
 export class CreateRecurringBookingDto {
   @IsString()
@@ -13,10 +18,10 @@ export class CreateRecurringBookingDto {
   @Max(6)
   dayOfWeek: number
 
-  @IsIn(VALID_SLOT_STARTS)
+  @Matches(HHMM, { message: 'slotStart debe tener el formato HH:MM' })
   slotStart: string
 
-  @IsIn(VALID_SLOT_ENDS)
+  @Matches(HHMM, { message: 'slotEnd debe tener el formato HH:MM' })
   slotEnd: string
 
   @IsString()

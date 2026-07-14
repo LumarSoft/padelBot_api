@@ -1,16 +1,5 @@
 import { Type } from 'class-transformer'
-import {
-  IsEmail,
-  IsIn,
-  IsInt,
-  IsOptional,
-  IsString,
-  Matches,
-  Max,
-  MaxLength,
-  Min,
-  MinLength,
-} from 'class-validator'
+import { IsEmail, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator'
 import {
   BIGGEST_PAINS,
   CHARGES_DEPOSIT,

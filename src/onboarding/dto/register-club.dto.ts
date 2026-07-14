@@ -1,4 +1,10 @@
-import { IsEmail, IsString, MaxLength, MinLength } from 'class-validator'
+import { IsEmail, IsString, Matches, MaxLength, MinLength } from 'class-validator'
+import {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_PATTERN,
+  PASSWORD_RULE_MESSAGE,
+} from '../../common/password'
 
 export class RegisterClubDto {
   @IsString()
@@ -15,7 +21,8 @@ export class RegisterClubDto {
   email: string
 
   @IsString()
-  @MinLength(8)
-  @MaxLength(72)
+  @MinLength(PASSWORD_MIN_LENGTH, { message: PASSWORD_RULE_MESSAGE })
+  @MaxLength(PASSWORD_MAX_LENGTH)
+  @Matches(PASSWORD_PATTERN, { message: PASSWORD_RULE_MESSAGE })
   password: string
 }

@@ -3,7 +3,7 @@ import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { bandDateTimes, bandsForDate, courtScheduleSelect, findBandInSchedule } from '../availability/lib/schedule'
-import { shiftDateKey } from '../availability/lib/datetime'
+import { dayRangeUtc, formatTime, shiftDateKey } from '../availability/lib/datetime'
 import { CreateSlotDto } from './dto/create-slot.dto'
 import { UpdateSlotDto } from './dto/update-slot.dto'
 import { QuerySlotsDto } from './dto/query-slots.dto'
@@ -197,6 +197,51 @@ export class SlotsService {
     ])
 
     return { blocked: toCreate.length + toBlockIds.length, created: toCreate.length, skipped }
+  }
+
+  /**
+   * The inverse of `bulkBlock`: frees every BLOCKED turno of the chosen courts inside the date
+   * range (optionally only certain hours). Undoing a block one cell at a time was the actual
+   * pain — a tournament weekend is hundreds of cells.
+   *
+   * Only BLOCKED slots are touched, so a booking that snuck into the range can't be freed by
+   * accident. Matching is done on the slot's real wall-clock start rather than on the court's
+   * current schedule, so a band that was blocked before the schedule changed is still
+   * reachable — otherwise those slots would be stuck blocked forever.
+   */
+  async bulkUnblock(clubId: string, dto: BulkBlockSlotsDto): Promise<{ unblocked: number }> {
+    const courtIds = [...new Set(dto.courtIds)]
+    const courts = await this.prisma.court.findMany({
+      where: { clubId, id: { in: courtIds } },
+      select: { id: true },
+    })
+    if (courts.length !== courtIds.length) {
+      throw new BadRequestException('Una o más canchas no pertenecen a este complejo')
+    }
+
+    const dates = this.enumerateDates(dto.fromDate, dto.toDate)
+    const from = dayRangeUtc(dates[0]).gte
+    const to = dayRangeUtc(dates[dates.length - 1]).lt
+
+    const blocked = await this.prisma.slot.findMany({
+      where: {
+        clubId,
+        courtId: { in: courtIds },
+        status: SlotStatus.BLOCKED,
+        startsAt: { gte: from, lt: to },
+      },
+      select: { id: true, startsAt: true },
+    })
+
+    const hours = dto.slotStarts?.length ? new Set(dto.slotStarts) : null
+    const ids = (hours ? blocked.filter(slot => hours.has(formatTime(slot.startsAt))) : blocked).map(s => s.id)
+    if (ids.length === 0) return { unblocked: 0 }
+
+    const { count } = await this.prisma.slot.updateMany({
+      where: { id: { in: ids }, clubId, status: SlotStatus.BLOCKED },
+      data: { status: SlotStatus.AVAILABLE },
+    })
+    return { unblocked: count }
   }
 
   private enumerateDates(from: string, to: string): string[] {

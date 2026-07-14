@@ -65,10 +65,7 @@ export class ClubsController {
    */
   @Post('me/mercadopago/connect')
   @HttpCode(HttpStatus.OK)
-  connectMercadoPago(
-    @CurrentUser() user: AuthenticatedUser,
-    @Body() dto: ConnectMercadoPagoDto,
-  ): { url: string } {
+  connectMercadoPago(@CurrentUser() user: AuthenticatedUser, @Body() dto: ConnectMercadoPagoDto): { url: string } {
     this.assertOwner(user)
     return { url: this.clubsService.buildConnectUrl(user.clubId, dto.origin) }
   }

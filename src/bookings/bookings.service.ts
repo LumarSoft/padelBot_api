@@ -24,6 +24,7 @@ import { BookingAction, BookingEventsService } from '../events/booking-events.se
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { PlayersService } from '../players/players.service'
+import { SlotPricingService } from '../pricing/slot-pricing.service'
 
 /** Booking a schedule band that may not have a materialized Slot row yet. */
 export interface BookBandInput {
@@ -162,6 +163,7 @@ export class BookingsService {
     private readonly receiptStorage: ReceiptStorageService,
     private readonly notifications: NotificationsService,
     private readonly players: PlayersService,
+    private readonly slotPricing: SlotPricingService,
   ) {}
 
   async findAll(clubId: string, query: QueryBookingsDto) {
@@ -380,6 +382,10 @@ export class BookingsService {
       throw new ConflictException('La reserva cambió de estado mientras la cancelábamos. Volvé a abrirla y fijate.')
     }
 
+    // Back on sale: the band must quote today's price, not the one this reservation was sold
+    // at (the club may have raised prices since). The waitlist offer below goes out with it.
+    const priceCents = (await this.slotPricing.repriceSlot(booking.slotId, clubId)) ?? updated.slot.priceCents
+
     this.emitBookingChange('cancelled', updated)
     this.events.emitSlotFreed({
       type: 'slot.freed',
@@ -388,7 +394,7 @@ export class BookingsService {
       courtName: updated.slot.court.name,
       startsAt: updated.slot.startsAt,
       endsAt: updated.slot.endsAt,
-      priceCents: updated.slot.priceCents,
+      priceCents,
     })
     return updated
   }
@@ -462,6 +468,9 @@ export class BookingsService {
         select: bookingSelect,
       })
     })
+
+    // The hour the player gave back goes on sale again — at today's price.
+    await this.slotPricing.repriceSlot(booking.slotId, clubId)
 
     this.emitBookingChange('rescheduled', updated)
     return updated
@@ -1377,7 +1386,9 @@ export class BookingsService {
       if (!updated) return null
 
       this.emitBookingChange('rescheduled', updated)
-      // The hour the player gave back — offer it to whoever is waiting for it.
+      // The hour the player gave back — back on sale at today's price, then offered to
+      // whoever is waiting for it.
+      await this.slotPricing.repriceSlot(booking.slotId, clubId)
       const freed = await this.prisma.slot.findUnique({
         where: { id: booking.slotId },
         select: { startsAt: true, endsAt: true, priceCents: true, court: { select: { id: true, name: true } } },
@@ -1599,7 +1610,7 @@ export class BookingsService {
     playerId: string | null
     creditAppliedCents: number
   }): Promise<boolean> {
-    return this.prisma.$transaction(async tx => {
+    const released = await this.prisma.$transaction(async tx => {
       const { count } = await tx.booking.updateMany({
         where: { id: booking.id, status: 'PENDING_PAYMENT' },
         data: { status: 'CANCELLED' },
@@ -1618,6 +1629,10 @@ export class BookingsService {
       }
       return true
     })
+
+    // The band is on sale again: quote it at today's price, not the one the abandoned hold had.
+    if (released) await this.slotPricing.repriceSlot(booking.slotId)
+    return released
   }
 
   /**

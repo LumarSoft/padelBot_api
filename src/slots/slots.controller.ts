@@ -36,6 +36,12 @@ export class SlotsController {
     return this.slotsService.bulkBlock(user.clubId, dto)
   }
 
+  @Post('bulk-unblock')
+  @HttpCode(HttpStatus.OK)
+  bulkUnblock(@CurrentUser() user: AuthenticatedUser, @Body() dto: BulkBlockSlotsDto) {
+    return this.slotsService.bulkUnblock(user.clubId, dto)
+  }
+
   @Get(':id')
   findOne(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     return this.slotsService.findOne(user.clubId, id)

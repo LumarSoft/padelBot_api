@@ -576,6 +576,37 @@ Blocks many slots at once (e.g. a tournament): every selected court, for every d
 
 `400 Bad Request` — a court is not in this club, or `toDate` is before `fromDate`
 
+### POST /slots/bulk-unblock
+
+The inverse of `bulk-block`: frees every `BLOCKED` slot of the selected courts inside the date range (optionally only on the chosen time bands). Only `BLOCKED` slots are touched, so a booking inside the range can never be freed by accident. Slots are matched by their real wall-clock start, so bands that were blocked before the court's schedule changed are still reachable.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field      | Type     | Required | Constraints                                                  |
+| ---------- | -------- | -------- | ------------------------------------------------------------ |
+| courtIds   | string[] | Yes      | non-empty; all must belong to the club                       |
+| fromDate   | ISO 8601 | Yes      | inclusive start date (`YYYY-MM-DD`)                          |
+| toDate     | ISO 8601 | Yes      | inclusive end date; on/after `fromDate`                       |
+| slotStarts | string[] | No       | `HH:MM` band starts; omit to unblock the whole day            |
+
+```json
+{
+  "courtIds": ["clx...", "cly..."],
+  "fromDate": "2026-07-10",
+  "toDate": "2026-07-12"
+}
+```
+
+`200 OK`
+
+```json
+{ "unblocked": 18 }
+```
+
+`400 Bad Request` — a court is not in this club, or `toDate` is before `fromDate`
+
 ## Bookings
 
 All booking routes are scoped to the authenticated user's club. Bookings link a player (name + phone) to a specific slot. Creating a booking transitions the slot from `AVAILABLE` to `BOOKED`; cancelling it transitions it back to `AVAILABLE`.

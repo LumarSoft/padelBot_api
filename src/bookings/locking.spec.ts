@@ -87,6 +87,7 @@ function setup(lockWon = true) {
     {} as never,
     notifications as never,
     players as never,
+    { repriceSlot: jest.fn(), repriceFutureSlots: jest.fn() } as never,
   )
   return { service, prisma, tx }
 }

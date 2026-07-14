@@ -1,6 +1,11 @@
-import { ArrayNotEmpty, IsArray, IsIn, IsISO8601, IsOptional, IsString } from 'class-validator'
+import { ArrayNotEmpty, IsArray, IsISO8601, IsOptional, IsString, Matches } from 'class-validator'
 
-const VALID_SLOT_STARTS = ['09:00', '10:30', '12:00', '13:30', '15:00', '16:30', '18:00', '19:30', '21:00', '22:30']
+/**
+ * "HH:MM" wall-clock band start. NOT a fixed 90-minute grid: `Court.slotDurationMinutes` is
+ * per court (60 for fútbol 5, 90 for pádel…), so a hardcoded list of valid starts rejects
+ * perfectly real bands. The service matches these against each court's own schedule.
+ */
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
 
 export class BulkBlockSlotsDto {
   @IsArray()
@@ -16,9 +21,9 @@ export class BulkBlockSlotsDto {
   @IsISO8601()
   toDate: string
 
-  /** Subset of valid slot start times to block. Omit to block the whole day. */
+  /** Subset of slot start times to act on. Omit for the whole day. */
   @IsOptional()
   @IsArray()
-  @IsIn(VALID_SLOT_STARTS, { each: true })
+  @Matches(HHMM, { each: true, message: 'Cada horario debe tener el formato HH:MM' })
   slotStarts?: string[]
 }

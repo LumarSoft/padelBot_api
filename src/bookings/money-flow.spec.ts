@@ -34,7 +34,14 @@ function prismaMock(): PrismaMock {
 }
 
 function makeService(prisma: PrismaMock): BookingsService {
-  return new BookingsService(prisma as never, {} as never, {} as never, {} as never, {} as never)
+  return new BookingsService(
+    prisma as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    { repriceSlot: jest.fn(), repriceFutureSlots: jest.fn() } as never,
+  )
 }
 
 describe('BookingsService.allocateTransferAmount', () => {

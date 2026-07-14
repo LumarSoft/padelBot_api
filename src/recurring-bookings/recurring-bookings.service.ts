@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { SlotPricingService } from '../pricing/slot-pricing.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { shiftDateKey, todayKey, toDateKey, wallTimeToUtc, weekdayOfKey } from '../availability/lib/datetime'
 import {
@@ -39,7 +40,10 @@ const MAX_WEEKS_AHEAD = 104
 
 @Injectable()
 export class RecurringBookingsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly slotPricing: SlotPricingService,
+  ) {}
 
   findAll(clubId: string) {
     return this.prisma.recurringBooking.findMany({
@@ -98,12 +102,19 @@ export class RecurringBookingsService {
   }
 
   async update(clubId: string, id: string, dto: UpdateRecurringBookingDto) {
-    await this.findOne(clubId, id)
-    return this.prisma.recurringBooking.update({
+    const before = await this.findOne(clubId, id)
+    const rb = await this.prisma.recurringBooking.update({
       where: { id },
       data: dto,
       select: recurringBookingSelect,
     })
+
+    // Renegotiating the fijo's price must show up on its upcoming turnos in the agenda —
+    // the slots carry a snapshot of it.
+    if (dto.priceCents !== undefined && dto.priceCents !== before.priceCents) {
+      await this.slotPricing.repriceFutureSlots(clubId, rb.courtId)
+    }
+    return rb
   }
 
   async remove(clubId: string, id: string) {

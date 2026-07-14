@@ -71,10 +71,7 @@ export class OnboardingController {
   /** Saves the wizard's position so an interrupted setup resumes where it left off. */
   @Patch('progress')
   @UseGuards(JwtAuthGuard)
-  saveProgress(
-    @CurrentUser() user: AuthenticatedUser,
-    @Body() dto: SaveSetupProgressDto,
-  ): Promise<SetupProgress> {
+  saveProgress(@CurrentUser() user: AuthenticatedUser, @Body() dto: SaveSetupProgressDto): Promise<SetupProgress> {
     this.assertOwner(user)
     return this.onboardingService.saveProgress(user.clubId, dto)
   }

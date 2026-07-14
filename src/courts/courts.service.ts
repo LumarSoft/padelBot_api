@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { Cron } from '@nestjs/schedule'
 import { Prisma } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { SlotPricingService } from '../pricing/slot-pricing.service'
 import { parseWeeklyHours, WeeklyHours } from '../availability/lib/schedule'
 import { todayKey } from '../availability/lib/datetime'
 import { schedulerEnabled } from '../common/scheduling'
@@ -18,6 +19,9 @@ const courtSelect = {
   slotDurationMinutes: true,
   weeklyHours: true,
   courtType: true,
+  // The panel resolves a band's price client-side (agenda cells with no slot yet), so it
+  // needs the same exceptions the bot uses — otherwise it quotes the default price.
+  priceRules: { select: { dayOfWeek: true, startTime: true, priceCents: true } },
   createdAt: true,
   updatedAt: true,
 } as const
@@ -26,7 +30,10 @@ const courtSelect = {
 export class CourtsService {
   private readonly logger = new Logger(CourtsService.name)
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly slotPricing: SlotPricingService,
+  ) {}
 
   findAll(clubId: string) {
     return this.prisma.court.findMany({
@@ -65,9 +72,9 @@ export class CourtsService {
   }
 
   async update(clubId: string, id: string, dto: UpdateCourtDto) {
-    await this.findOne(clubId, id)
+    const before = await this.findOne(clubId, id)
     const weeklyHours = dto.weeklyHours === undefined ? undefined : this.validateWeeklyHours(dto.weeklyHours)
-    return this.prisma.court.update({
+    const court = await this.prisma.court.update({
       where: { id },
       data: {
         name: dto.name,
@@ -85,11 +92,25 @@ export class CourtsService {
       },
       select: courtSelect,
     })
+
+    // The new price must govern every turno still to be sold — otherwise the agenda keeps
+    // quoting the old one on the slots that were already materialized.
+    if (dto.priceCents !== undefined && dto.priceCents !== before.priceCents) {
+      // Los fijos que estaban al precio de lista siguen a la lista; el que tiene un precio
+      // negociado (distinto del de la cancha) se respeta — ese número es un acuerdo con el jugador.
+      await this.prisma.recurringBooking.updateMany({
+        where: { clubId, courtId: id, priceCents: before.priceCents },
+        data: { priceCents: dto.priceCents },
+      })
+      await this.slotPricing.repriceFutureSlots(clubId, id)
+    }
+    return court
   }
 
   /**
-   * Adjusts EVERY price of the club by a percentage in one shot — courts' default
-   * prices and their per-band price rules. In Argentina prices move monthly; doing it
+   * Adjusts EVERY price of the club by a percentage in one shot — courts' default prices,
+   * their per-band price rules, and the turnos fijos (a fijo left at last month's price is
+   * money the club silently stops charging). In Argentina prices move monthly; doing it
    * court by court is guaranteed friction. Amounts round to the nearest $100 so the
    * bot keeps asking clean numbers. `dryRun` returns the preview without writing.
    */
@@ -109,7 +130,7 @@ export class CourtsService {
     // Nearest $100 (10_000 cents), never below $0.
     const adjust = (cents: number) => Math.max(0, Math.round((cents * factor) / 10000) * 10000)
 
-    const [courts, rules] = await Promise.all([
+    const [courts, rules, recurring] = await Promise.all([
       this.prisma.court.findMany({
         where: { clubId },
         select: { id: true, name: true, priceCents: true },
@@ -117,6 +138,10 @@ export class CourtsService {
       }),
       this.prisma.courtPriceRule.findMany({
         where: { clubId },
+        select: { id: true, priceCents: true },
+      }),
+      this.prisma.recurringBooking.findMany({
+        where: { clubId, isActive: true },
         select: { id: true, priceCents: true },
       }),
     ])
@@ -128,6 +153,7 @@ export class CourtsService {
       afterCents: adjust(c.priceCents),
     }))
     const ruleChanges = rules.map(r => ({ id: r.id, afterCents: adjust(r.priceCents) }))
+    const recurringChanges = recurring.map(r => ({ id: r.id, afterCents: adjust(r.priceCents) }))
 
     if (!dto.dryRun) {
       await this.prisma.$transaction([
@@ -137,7 +163,11 @@ export class CourtsService {
         ...ruleChanges.map(r =>
           this.prisma.courtPriceRule.update({ where: { id: r.id }, data: { priceCents: r.afterCents } }),
         ),
+        ...recurringChanges.map(r =>
+          this.prisma.recurringBooking.update({ where: { id: r.id }, data: { priceCents: r.afterCents } }),
+        ),
       ])
+      await this.slotPricing.repriceFutureSlots(clubId)
     }
 
     return {
@@ -145,6 +175,7 @@ export class CourtsService {
       percent: dto.percent,
       courts: courtChanges,
       priceRulesUpdated: ruleChanges.length,
+      recurringBookingsUpdated: recurringChanges.length,
     }
   }
 

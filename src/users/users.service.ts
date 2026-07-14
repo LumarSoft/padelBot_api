@@ -110,8 +110,15 @@ export class UsersService {
     if (!user) throw new NotFoundException('Usuario no encontrado')
   }
 
-  /** URL-safe 12-char temporary password (~71 bits of entropy). */
+  /**
+   * URL-safe temporary password (~71 bits of entropy) that satisfies the product's password
+   * policy by construction — a random base64url string has no digit ~12% of the time, and
+   * handing someone a temp password the rules would reject is a trap.
+   */
   private generateTempPassword(): string {
-    return randomBytes(9).toString('base64url')
+    const letters = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ'
+    const digits = '23456789'
+    const pick = (alphabet: string) => alphabet[randomBytes(1)[0] % alphabet.length]
+    return `${randomBytes(9).toString('base64url')}${pick(letters)}${pick(digits)}`
   }
 }
