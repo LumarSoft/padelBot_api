@@ -41,13 +41,22 @@ const CONFIRM_RESCHEDULE_BUTTONS: Interactive = {
   ],
 }
 
-/** The player's upcoming bookings — id = "turno:<bookingId>", resolved by the FSM. */
+/**
+ * The player's upcoming bookings — id = "turno:<bookingId>", resolved by the FSM.
+ *
+ * Two courts booked in the same band render the same "14/07 · 19:30" — routine for a group of
+ * eight. The court is what tells them apart, so it joins the title as soon as the hour alone
+ * stops being an answer to "which one?".
+ */
 function myBookingsInteractive(ctx: SessionContext): Interactive | undefined {
   const bookings = ctx.myBookings ?? []
+  const seen = new Map<string, number>()
+  for (const b of bookings) seen.set(b.short, (seen.get(b.short) ?? 0) + 1)
+
   return chooseInteractive(
     bookings.map(b => ({
       id: `${MY_BOOKING_PREFIX}${b.id}`,
-      title: truncate(b.short, ROW_TITLE_MAX),
+      title: truncate((seen.get(b.short) ?? 0) > 1 ? `${b.short} · ${b.courtName}` : b.short, ROW_TITLE_MAX),
       description: b.pending ? `${b.courtName} · falta la seña` : b.courtName,
     })),
     'Ver mis turnos',
@@ -57,11 +66,19 @@ function myBookingsInteractive(ctx: SessionContext): Interactive | undefined {
 /**
  * Picks buttons (≤3 short options) or a list (≤10) for a set of choices, or undefined when
  * it doesn't fit — then the plain text (which already lists them) is sent as-is.
+ *
+ * Buttons carry no description, so two options that render the same title are indistinguishable
+ * to the player — and Meta rejects the whole message with "Duplicate button title" (400), which
+ * means the bot answers with *silence*. A padel group booking two courts in the same band hits
+ * this on their very first "mis turnos". When titles collide we fall through to the list, whose
+ * rows do carry a description (the court) to tell them apart.
  */
 function chooseInteractive(options: InteractiveRow[], listButton: string): Interactive | undefined {
   if (options.length === 0) return undefined
 
-  if (options.length <= MAX_BUTTONS && options.every(o => o.title.length <= BUTTON_TITLE_MAX)) {
+  const titlesAreUnique = new Set(options.map(o => o.title)).size === options.length
+
+  if (options.length <= MAX_BUTTONS && titlesAreUnique && options.every(o => o.title.length <= BUTTON_TITLE_MAX)) {
     const buttons: InteractiveButton[] = options.map(o => ({ id: o.id, title: o.title }))
     return { buttons }
   }

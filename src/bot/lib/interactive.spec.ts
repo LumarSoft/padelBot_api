@@ -19,6 +19,7 @@ describe('buildInteractive', () => {
         id: 'b1',
         label: 'sábado 18/07 · 18:00–19:30 · Cancha 1',
         short: '18/07 · 18:00',
+        bandStart: '18:00',
         courtName: 'Cancha 1',
         pending: false,
       },
@@ -26,6 +27,7 @@ describe('buildInteractive', () => {
         id: 'b2',
         label: 'domingo 19/07 · 20:00–21:30 · Cancha 2',
         short: '19/07 · 20:00',
+        bandStart: '20:00',
         courtName: 'Cancha 2',
         pending: true,
       },
@@ -33,6 +35,34 @@ describe('buildInteractive', () => {
     const i = buildInteractive(BotState.MY_BOOKINGS, ctx({ myBookings }))
     // Two options → buttons; the id carries the booking so nothing is guessed from the text.
     expect(i?.buttons?.map(b => b.id)).toEqual(['turno:b1', 'turno:b2'])
+  })
+
+  it('keeps two courts in the same band distinguishable', () => {
+    // A group of eight books two courts at the same hour. Both render "14/07 · 19:30", and Meta
+    // rejects the whole message with "Duplicate button title" — the bot answers with silence.
+    const sameBand = [
+      {
+        id: 'b1',
+        label: 'martes 14/07 · 19:30–21:00 · Cancha 1',
+        short: '14/07 · 19:30',
+        bandStart: '19:30',
+        courtName: 'Cancha 1',
+        pending: false,
+      },
+      {
+        id: 'b2',
+        label: 'martes 14/07 · 19:30–21:00 · Cancha 2',
+        short: '14/07 · 19:30',
+        bandStart: '19:30',
+        courtName: 'Cancha 2',
+        pending: false,
+      },
+    ]
+    const i = buildInteractive(BotState.MY_BOOKINGS, ctx({ myBookings: sameBand }))
+
+    const titles = (i?.buttons ?? i?.list?.rows ?? []).map(o => o.title)
+    expect(new Set(titles).size).toBe(titles.length)
+    expect(titles).toEqual(['14/07 · 19:30 · Cancha 1', '14/07 · 19:30 · Cancha 2'])
   })
 
   it('asks for an explicit yes/no before moving a booking', () => {
