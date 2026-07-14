@@ -15,7 +15,7 @@ import {
 } from '../availability/lib/datetime'
 import { LlmService } from '../llm/llm.service'
 import { ConversationSessionService, keepName } from './conversation-session.service'
-import { matchCourt, matchSlot } from './lib/match'
+import { matchByTime, matchCourt, matchSlot } from './lib/match'
 import { parseDateExpression } from './lib/date-parse'
 import { stepPrompt } from './lib/step-prompt'
 import {
@@ -23,7 +23,6 @@ import {
   availabilityResult,
   bandsToSlotOptions,
   isAnyCourt,
-  mentionsTime,
   resolveBand,
   resolveCourtAtBand,
 } from './lib/booking-flow'
@@ -75,7 +74,6 @@ import {
   receiptReceivedAck,
   slotsList,
   thanksReply,
-  timeNotAvailable,
   transferPending,
   welcome,
 } from './messages'
@@ -543,6 +541,7 @@ export class BotService {
       id: b.id,
       label: `${dayLabelFromKey(toDateKey(b.slot.startsAt))} · ${formatTimeRange(b.slot.startsAt, b.slot.endsAt)} · ${b.slot.court.name}`,
       short: `${dayMonthFromKey(toDateKey(b.slot.startsAt))} · ${formatTime(b.slot.startsAt)}`,
+      bandStart: formatTime(b.slot.startsAt),
       courtName: b.slot.court.name,
       pending: b.status === 'PENDING_PAYMENT',
     }))
@@ -648,14 +647,10 @@ export class BotService {
 
     const slot = matchSlot(msg, bands.length ? bandsToSlotOptions(bands) : (ctx.slotOptions ?? []))
     if (!slot) {
-      if (mentionsTime(msg) && bands.length) {
-        return {
-          reply: timeNotAvailable(bands, ctx.selectedDate!),
-          state: BotState.RESCHEDULE_SLOT,
-          ctx: { ...ctx, slotOptions: bandsToSlotOptions(bands) },
-        }
-      }
-      return this.fallback(BotState.RESCHEDULE_SLOT, msg, ctx, clubId, waId)
+      // Same as BOOK_SLOT: the LLM answers anything the matcher couldn't place, reading the
+      // real availability rather than asserting from a failed regex.
+      const withFullDay = bands.length ? { ...ctx, slotOptions: bandsToSlotOptions(bands) } : ctx
+      return this.fallback(BotState.RESCHEDULE_SLOT, msg, withFullDay, clubId, waId)
     }
 
     // Assign the cheapest free court for that hour — a move is not the moment to make the
@@ -867,18 +862,13 @@ export class BotService {
       return resolveBand(ctx, slot.bandStart)
     }
 
-    // A specific hour that isn't in the list → it's just not free; show what is.
-    if (mentionsTime(msg) && bands.length) {
-      return {
-        reply: timeNotAvailable(bands, ctx.selectedDate!),
-        state: BotState.BOOK_SLOT,
-        // Re-offer the full day so the botonera isn't stuck on a part the player left.
-        ctx: { ...ctx, slotOptions: bandsToSlotOptions(bands) },
-      }
-    }
-
-    // Non-time phrasings ("el último", "el más temprano", a court name) → LLM resolves.
-    return this.fallback(BotState.BOOK_SLOT, msg, ctx, clubId, waId)
+    // Anything the matcher couldn't place — an hour that isn't free, "el último", a court name,
+    // a question — goes to the LLM, which reads the real availability with navigate_booking.
+    // The canned "no me queda lugar" used to answer here, and it was confidently wrong whenever
+    // the matcher misread the hour: it told a player 18:00 was taken while it sat there free.
+    // Re-offer the whole day so the botonera isn't stuck on a part the player left.
+    const withFullDay = bands.length ? { ...ctx, slotOptions: bandsToSlotOptions(bands) } : ctx
+    return this.fallback(BotState.BOOK_SLOT, msg, withFullDay, clubId, waId)
   }
 
   private async onBookConfirm(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
@@ -1133,10 +1123,23 @@ function matchMyBooking(msg: string, bookings: MyBookingOption[]): MyBookingOpti
     return bookings.find(b => b.id === id)
   }
 
+  // Narrow by day first when the player named one, so "el del martes a las 21" doesn't collide
+  // with a 21:00 booking on another day.
   const dateKey = parseDateExpression(msg)
-  if (!dateKey) return undefined
-  const dayMatches = bookings.filter(b => b.short.startsWith(dayMonthFromKey(dateKey)))
-  return dayMatches.length === 1 ? dayMatches[0] : undefined
+  const sameDay = dateKey ? bookings.filter(b => b.short.startsWith(dayMonthFromKey(dateKey))) : bookings
+  if (sameDay.length === 0) return undefined
+  if (dateKey && sameDay.length === 1) return sameDay[0]
+
+  // "moveme el de las 21" / "el de las nueve de la noche" — they told us which one; making them
+  // tap a button to say it again is the bot failing to listen.
+  const byTime = matchByTime(msg, sameDay, b => b.bandStart)
+  if (byTime) {
+    // Two courts in the same band: the hour alone doesn't say which, so let the LLM ask.
+    const sameBand = sameDay.filter(b => b.bandStart === byTime.bandStart)
+    return sameBand.length === 1 ? byTime : undefined
+  }
+
+  return undefined
 }
 
 /** True for short "thanks" messages — cheap to answer without the LLM. */

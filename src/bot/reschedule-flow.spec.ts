@@ -24,6 +24,7 @@ const myBookings: MyBookingOption[] = [
     id: 'b1',
     label: 'sábado 18/07 · 18:00–19:30 · Cancha 1',
     short: '18/07 · 18:00',
+    bandStart: '18:00',
     courtName: 'Cancha 1',
     pending: false,
   },
@@ -96,6 +97,17 @@ describe('the club decides what the player may do', () => {
 
     expect(result.state).toBe(BotState.RESCHEDULE_DATE)
     expect(result.reply).toContain('la seña que pagaste sigue valiendo')
+    expect(result.ctx.rescheduleBookingId).toBe('b1')
+  })
+
+  it('picks the booking the player named out loud, without making them tap', async () => {
+    // "moveme el de las 6 de la tarde" identifies b1 as precisely as tapping it does. Answering
+    // "respondé *mis turnos*" to a player who already told us which one is the bot not listening.
+    const { service } = setup()
+
+    const result = await step(service, BotState.MY_BOOKINGS, 'moveme el de las 6 de la tarde', { myBookings })
+
+    expect(result.state).toBe(BotState.RESCHEDULE_DATE)
     expect(result.ctx.rescheduleBookingId).toBe('b1')
   })
 

@@ -27,6 +27,8 @@ export interface MyBookingOption {
   label: string
   /** Short enough for a WhatsApp list row title (24 chars): "sábado 18/07 · 18:00". */
   short: string
+  /** Start of the band, "HH:MM" — lets a player say "el de las 9 de la noche" instead of tapping. */
+  bandStart: string
   courtName: string
   /** True while the deposit hasn't been reconciled yet. */
   pending: boolean

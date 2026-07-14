@@ -16,6 +16,8 @@ const slots: SlotOption[] = [
   { bandStart: '09:00', label: '09:00–10:30', price: 20000 },
   { bandStart: '18:00', label: '18:00–19:30', price: 25000 },
   { bandStart: '19:30', label: '19:30–21:00', price: 25000 },
+  { bandStart: '20:00', label: '20:00–21:30', price: 25000 },
+  { bandStart: '21:00', label: '21:00–22:30', price: 25000 },
 ]
 
 describe('matchCourt', () => {
@@ -72,6 +74,42 @@ describe('matchSlot', () => {
   it('defers non-numeric phrasings to the LLM', () => {
     expect(matchSlot('el último', slots)).toBeUndefined()
     expect(matchSlot('el más temprano', slots)).toBeUndefined()
+  })
+
+  it('reads the half of the day, which is what carries AM/PM out loud', () => {
+    // The regression that mattered: reading the 9 and dropping "de la noche" confirmed a
+    // player at 09:00 for a game they asked to play at 21:00.
+    expect(matchSlot('a las 9 de la noche', slots)?.bandStart).toBe('21:00')
+    expect(matchSlot('a las 6 de la tarde', slots)?.bandStart).toBe('18:00')
+    expect(matchSlot('a las 9 de la mañana', slots)?.bandStart).toBe('09:00')
+    expect(matchSlot('9 de la mañana', slots)?.bandStart).toBe('09:00')
+  })
+
+  it('understands the hour spelled out', () => {
+    expect(matchSlot('a las seis de la tarde', slots)?.bandStart).toBe('18:00')
+    expect(matchSlot('seis de la tarde', slots)?.bandStart).toBe('18:00')
+    expect(matchSlot('las nueve de la noche', slots)?.bandStart).toBe('21:00')
+    expect(matchSlot('a las nueve', slots)?.bandStart).toBe('09:00')
+  })
+
+  it('understands fractions of an hour', () => {
+    expect(matchSlot('a las 19 y media', slots)?.bandStart).toBe('19:30')
+    expect(matchSlot('siete y media de la tarde', slots)?.bandStart).toBe('19:30')
+  })
+
+  it('guesses PM only when the morning reading does not exist', () => {
+    // The club opens at 09:00, so "a las 8" can only be 20:00 — but only because 08:00 is
+    // not on offer. An hour that DOES exist in the morning is never second-guessed.
+    expect(matchSlot('a las 8', slots)?.bandStart).toBe('20:00')
+    expect(matchSlot('a las 9', slots)?.bandStart).toBe('09:00')
+  })
+
+  it('never turns a stray number into an hour', () => {
+    // "somos 4" must not book 16:00, and a bare count must not book at all.
+    expect(matchSlot('somos 4', slots)).toBeUndefined()
+    expect(matchSlot('una cancha por favor', slots)).toBeUndefined()
+    // An hour named elsewhere still wins over the stray count.
+    expect(matchSlot('somos 4 y jugamos a las 18', slots)?.bandStart).toBe('18:00')
   })
 })
 
