@@ -1,4 +1,16 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, UseGuards } from '@nestjs/common'
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseIntPipe,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common'
 import { Throttle } from '@nestjs/throttler'
 import { ClubSignupRequest } from 'generated/prisma/client'
 import { OpsAuthGuard } from './guards/ops-auth.guard'
@@ -6,7 +18,7 @@ import { CurrentAdmin } from './decorators/current-admin.decorator'
 import { AuthenticatedOpsAdmin } from './types/ops-jwt'
 import { OpsAuthService, OpsLoginResult } from './ops-auth.service'
 import { OpsLeadsService, LeadsSummary } from './ops-leads.service'
-import { OpsClubsService, OpsClubRow } from './ops-clubs.service'
+import { OpsClubsService, OpsClubRow, ClubUserRow } from './ops-clubs.service'
 import { OpsMetricsService, BusinessMetrics, BotMetrics } from './ops-metrics.service'
 import { OpsHealthService, OpsHealth } from './ops-health.service'
 import { SubscriptionState } from '../clubs/lib/subscription'
@@ -96,6 +108,24 @@ export class OpsController {
   @UseGuards(OpsAuthGuard)
   updateSubscription(@Param('id') id: string, @Body() dto: UpdateSubscriptionDto): Promise<SubscriptionState> {
     return this.clubs.updateSubscription(id, dto)
+  }
+
+  /** The club's panel users, so support can pick whose password to reset. */
+  @Get('clubs/:id/users')
+  @UseGuards(OpsAuthGuard)
+  listClubUsers(@Param('id') id: string): Promise<ClubUserRow[]> {
+    return this.clubs.listUsers(id)
+  }
+
+  /** Resets a club user's password to a fresh temporary one (returned once). */
+  @Post('clubs/:id/users/:userId/reset-password')
+  @UseGuards(OpsAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  resetClubUserPassword(
+    @Param('id') id: string,
+    @Param('userId', ParseIntPipe) userId: number,
+  ): Promise<{ email: string; tempPassword: string }> {
+    return this.clubs.resetUserPassword(id, userId)
   }
 
   // ── Metrics ───────────────────────────────────────────────────────────────

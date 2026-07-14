@@ -1,8 +1,9 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
-import { SubscriptionStatus } from 'generated/prisma/client'
+import { Role, SubscriptionStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { subscriptionState, SubscriptionState } from '../clubs/lib/subscription'
 import { shiftDateKey, todayKey } from '../availability/lib/datetime'
+import { generateTempPassword, hashPassword } from '../common/password'
 import { UpdateSubscriptionDto } from './dto/update-subscription.dto'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -46,6 +47,18 @@ export interface OpsClubRow {
 
   /** What this club costs us in OpenAI over the same window (micro-USD). */
   llmCostMicroUsd: number
+}
+
+/** One panel user of a club, as ops sees it when handling a password-reset support request. */
+export interface ClubUserRow {
+  id: number
+  name: string
+  email: string
+  role: Role
+  isActive: boolean
+  /** True while on a temporary password: they'll be forced to change it on next login. */
+  mustChangePassword: boolean
+  lastLoginAt: Date | null
 }
 
 @Injectable()
@@ -208,5 +221,47 @@ export class OpsClubsService {
 
     this.logger.log(`Subscription of ${club.name} (${clubId}) set to ${dto.status}`)
     return subscriptionState(updated)
+  }
+
+  /** The panel users of one club, so ops can pick whose password to reset. */
+  async listUsers(clubId: string): Promise<ClubUserRow[]> {
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { id: true } })
+    if (!club) throw new NotFoundException('Club no encontrado')
+
+    return this.prisma.user.findMany({
+      where: { clubId },
+      orderBy: [{ role: 'asc' }, { name: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        isActive: true,
+        mustChangePassword: true,
+        lastLoginAt: true,
+      },
+    })
+  }
+
+  /**
+   * Support action: resets a club user's password to a fresh temporary one and flags it so
+   * they must change it on their next login. The temp password is returned ONCE — ops passes
+   * it to the club out-of-band (WhatsApp/phone); we never store or email it in plaintext.
+   */
+  async resetUserPassword(clubId: string, userId: number): Promise<{ email: string; tempPassword: string }> {
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, clubId },
+      select: { id: true, email: true },
+    })
+    if (!user) throw new NotFoundException('Usuario no encontrado en este club')
+
+    const tempPassword = generateTempPassword()
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { password: await hashPassword(tempPassword), mustChangePassword: true },
+    })
+
+    this.logger.log(`Ops reset password for ${user.email} (club ${clubId})`)
+    return { email: user.email, tempPassword }
   }
 }

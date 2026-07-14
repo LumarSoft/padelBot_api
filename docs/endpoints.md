@@ -34,7 +34,8 @@ whose claims include the user's `clubId` (the tenant). The token must be sent as
     "name": "Admin Demo",
     "clubId": "clx...",
     "clubName": "Club Demo Pádel",
-    "role": "owner"
+    "role": "owner",
+    "mustChangePassword": false
   }
 }
 ```
@@ -73,7 +74,8 @@ Returns the authenticated user resolved from the JWT.
     "name": "Admin Demo",
     "clubId": "clx...",
     "clubName": "Club Demo Pádel",
-    "role": "owner"
+    "role": "owner",
+    "mustChangePassword": false
   }
 }
 ```
@@ -82,6 +84,35 @@ Returns the authenticated user resolved from the JWT.
 
 ```json
 { "statusCode": 401, "message": "Unauthorized" }
+```
+
+### POST /auth/me/complete-initial-password
+
+First-login password set for a user still on a temporary password (`mustChangePassword`).
+Unlike `POST /users/me/change-password`, it does NOT require the current password — the caller
+just authenticated with the temporary one. It returns a fresh token with the flag cleared, so
+the session continues without a re-login.
+
+**Auth required:** Yes (`Authorization: Bearer <token>`)
+
+**Request body**
+
+| Field       | Type   | Required | Constraints          |
+| ----------- | ------ | -------- | -------------------- |
+| newPassword | string | Yes      | Min length 8, max 72 |
+
+```json
+{ "newPassword": "mi-nueva-clave" }
+```
+
+**Responses**
+
+`200 OK` — same shape as `POST /auth/login` (fresh `token` + `user` with `mustChangePassword: false`).
+
+`403 Forbidden` — the account is not on a temporary password.
+
+```json
+{ "statusCode": 403, "message": "Tu contraseña ya fue establecida. Usá \"Cambiar contraseña\"." }
 ```
 
 ## Onboarding
@@ -1743,6 +1774,54 @@ Manual billing from the UI — the same thing `npm run subscription` does from t
 `404 Not Found`
 ```json
 { "message": "Club no encontrado", "statusCode": 404 }
+```
+
+### GET /ops/clubs/:id/users
+
+The panel users of one club, so support can pick whose password to reset.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK`
+```json
+[
+  {
+    "id": 12,
+    "name": "Juan Pérez",
+    "email": "juan@club.com",
+    "role": "OWNER",
+    "isActive": true,
+    "mustChangePassword": false,
+    "lastLoginAt": "2026-07-12T14:30:00.000Z"
+  }
+]
+```
+
+`404 Not Found`
+```json
+{ "message": "Club no encontrado", "statusCode": 404 }
+```
+
+### POST /ops/clubs/:id/users/:userId/reset-password
+
+Resets a club user's password to a fresh temporary one and flags `mustChangePassword` so they
+must change it on their next login. The temp password is returned ONCE — ops passes it to the
+club out-of-band; it is never stored or emailed in plaintext.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK`
+```json
+{ "email": "juan@club.com", "tempPassword": "k9Fq2xPvT7mA" }
+```
+
+`404 Not Found`
+```json
+{ "message": "Usuario no encontrado en este club", "statusCode": 404 }
 ```
 
 ### GET /ops/metrics/business

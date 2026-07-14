@@ -127,6 +127,9 @@ export class OnboardingService {
             name: dto.ownerName.trim(),
             password: passwordHash,
             role: Role.OWNER,
+            // The password here is set by whoever provisions the club (ops), not chosen by
+            // the owner — so force a change on first login, same as a STAFF temp password.
+            mustChangePassword: true,
           },
         })
       })

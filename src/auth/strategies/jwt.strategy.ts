@@ -26,6 +26,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       clubId: payload.clubId,
       clubName: payload.clubName,
       role: payload.role,
+      mustChangePassword: payload.mustChangePassword,
     }
   }
 }
