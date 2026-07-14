@@ -6,6 +6,12 @@ import { PrismaClient } from '../generated/prisma/client'
 const DEMO_EMAIL = 'admin@clubdemo.com'
 const DEMO_PASSWORD = 'padel1234'
 
+// Lumarsoft operator for the ops console (`/ops`). A PlatformAdmin has no clubId and sees
+// every tenant, so it is minted here (and via `npm run ops:admin`) rather than any UI.
+// The console still requires OPS_JWT_SECRET to be set at runtime, or every request 503s.
+const OPS_EMAIL = 'lumar@gmail.com'
+const OPS_PASSWORD = 'lumar123'
+
 async function main(): Promise<void> {
   const adapter = new PrismaMariaDb(process.env.DATABASE_URL!)
   const prisma = new PrismaClient({ adapter })
@@ -42,6 +48,13 @@ async function main(): Promise<void> {
       console.log('  Seeded 2 courts.')
     }
 
+    const opsPassword = await bcrypt.hash(OPS_PASSWORD, 10)
+    await prisma.platformAdmin.upsert({
+      where: { email: OPS_EMAIL },
+      update: { password: opsPassword, name: 'Lumarsoft', isActive: true },
+      create: { email: OPS_EMAIL, password: opsPassword, name: 'Lumarsoft' },
+    })
+
     // Re-register the WhatsApp line if a PHONE_NUMBER_ID is configured.
     const phoneNumberId = process.env.PHONE_NUMBER_ID
     if (phoneNumberId) {
@@ -56,6 +69,7 @@ async function main(): Promise<void> {
     console.log('Seed complete.')
     console.log(`  Club:  ${club.name} (${club.slug})`)
     console.log(`  Login: ${DEMO_EMAIL} / ${DEMO_PASSWORD}`)
+    console.log(`  Ops:   ${OPS_EMAIL} / ${OPS_PASSWORD}  (consola /ops)`)
   } finally {
     await prisma.$disconnect()
   }
