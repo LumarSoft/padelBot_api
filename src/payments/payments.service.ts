@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common'
 import { Cron, CronExpression, Interval } from '@nestjs/schedule'
 import { PrismaService } from '../prisma/prisma.service'
 import { BookingsService } from '../bookings/bookings.service'
@@ -36,6 +36,10 @@ export interface MoneyInDiagnostic {
     dniMatches: boolean
   } | null
 }
+
+/** Centavos matter here: the reconciler's whole trick is that two señas differ by cents. */
+const formatPesos = (cents: number): string =>
+  `$${(cents / 100).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 
 /** How far back the poller scans for transfers — a bit over the payment window. */
 const POLL_WINDOW_MS = ((Number(process.env.PAYMENT_WINDOW_MIN) || 30) + 5) * 60 * 1000
@@ -342,6 +346,12 @@ export class PaymentsService {
   /**
    * Admin manually confirms a transfer (front-desk verified the money landed) and
    * the player is notified. Club-scoped and idempotent.
+   *
+   * When a concrete detected transfer is being ASSIGNED (`paymentRef`), the money is real but
+   * its AMOUNT still has to cover the deposit. Assigning used to confirm on the reference alone:
+   * a $2.500 transfer dropped onto a $10.000 seña marked the deposit fully paid and the club ate
+   * the $7.500. The auto-reconciler never had this hole — it only ever matches an exact amount —
+   * so the guard belongs here, in front of the manual path.
    */
   async confirmPaymentManually(
     clubId: string,
@@ -351,9 +361,49 @@ export class PaymentsService {
       payer?: { cuit?: string | null; email?: string | null; mpUserId?: string | null }
     },
   ): Promise<{ confirmed: boolean }> {
+    if (payment?.paymentRef) await this.assertTransferCoversDeposit(clubId, bookingId, payment.paymentRef)
+
     const confirmedId = await this.bookingsService.confirmPaymentManual(clubId, bookingId, payment)
     if (confirmedId) await this.sendPaymentConfirmedMessage(confirmedId)
     return { confirmed: confirmedId !== null }
+  }
+
+  /**
+   * Refuses to confirm a deposit with a transfer that doesn't cover it. Fails closed: if the
+   * amount can't be read from MercadoPago, the assignment is blocked rather than trusted — the
+   * whole point of this check is that we do not take an unverified amount's word for it.
+   */
+  private async assertTransferCoversDeposit(clubId: string, bookingId: string, paymentRef: string): Promise<void> {
+    const booking = await this.prisma.booking.findFirst({
+      where: { id: bookingId, clubId },
+      select: { depositCents: true, transferAmountCents: true },
+    })
+    if (!booking) throw new NotFoundException('Reserva no encontrada')
+
+    const requiredCents = booking.transferAmountCents ?? booking.depositCents
+    if (!requiredCents) return
+
+    const token = await this.clubsService.getValidMpAccessToken(clubId)
+
+    let paidCents: number
+    try {
+      const mpPayment = await this.mp.getPayment(paymentRef, token ?? undefined)
+      paidCents = mpPayment.amountCents
+    } catch (err) {
+      this.logger.error(`Could not read MP payment ${paymentRef} while assigning booking ${bookingId}`, err)
+      throw new BadRequestException(
+        'No pude verificar el importe de esa transferencia en MercadoPago. Probá de nuevo en un momento.',
+      )
+    }
+
+    if (paidCents < requiredCents) {
+      const missing = formatPesos(requiredCents - paidCents)
+      throw new BadRequestException(
+        `Esa transferencia es de ${formatPesos(paidCents)} y la seña es de ${formatPesos(requiredCents)}: ` +
+          `faltan ${missing}. No la asigno como seña completa — pedile al jugador que transfiera la diferencia, ` +
+          `o rechazá la reserva.`,
+      )
+    }
   }
 
   /** Admin manually rejects a pending transfer (money never arrived); slot is released. */
