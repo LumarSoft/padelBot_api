@@ -389,7 +389,7 @@ export class BotService {
   }
 
   /**
-   * Returns the fallback reply when the club's PadelBot subscription is blocked
+   * Returns the fallback reply when the club's GTP subscription is blocked
    * (cancelled, or trial/payment lapsed beyond the grace window), else null.
    * The player is redirected to the club itself — the club's relationship with
    * its players must survive our billing.

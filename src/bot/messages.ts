@@ -32,7 +32,7 @@ export const MENU =
  * "hola" is answered with a warm, predefined message — no LLM call needed.
  */
 export function welcome(name?: string): string {
-  const hi = name ? `👋 ¡Hola de nuevo, ${name}! 🎾` : `👋 ¡Hola! Soy *PadelBot*, el asistente del club 🎾`
+  const hi = name ? `👋 ¡Hola de nuevo, ${name}! 🎾` : `👋 ¡Hola! Soy *GTP*, el asistente del club 🎾`
   return `${hi}\n\n${MENU}`
 }
 

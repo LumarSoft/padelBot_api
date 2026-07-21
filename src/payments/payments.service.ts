@@ -462,7 +462,7 @@ export class PaymentsService {
   private recordPollSuccess(): void {
     this.lastPollOkAt = new Date()
     if (this.globalOutageAlerted) {
-      void this.alertOps('✅ PadelBot: el poller de pagos se recuperó y volvió a conciliar normalmente.')
+      void this.alertOps('✅ GTP: el poller de pagos se recuperó y volvió a conciliar normalmente.')
     }
     this.consecutivePollFailures = 0
     this.globalOutageAlerted = false
@@ -473,7 +473,7 @@ export class PaymentsService {
     if (this.consecutivePollFailures >= ALERT_FAILURE_THRESHOLD && !this.globalOutageAlerted) {
       this.globalOutageAlerted = true
       await this.alertOps(
-        `🔴 PadelBot: el poller de pagos falló ${this.consecutivePollFailures} veces seguidas. ` +
+        `🔴 GTP: el poller de pagos falló ${this.consecutivePollFailures} veces seguidas. ` +
           `Las confirmaciones automáticas están CORTADAS hasta que se resuelva. Último error: ${String(err)}`,
       )
     }
@@ -501,7 +501,7 @@ export class PaymentsService {
     })
     const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } })
     await this.alertOps(
-      `🔴 PadelBot: la conciliación de MercadoPago del club "${club?.name ?? clubId}" falló ${failures} veces seguidas (${reason}).`,
+      `🔴 GTP: la conciliación de MercadoPago del club "${club?.name ?? clubId}" falló ${failures} veces seguidas (${reason}).`,
     )
   }
 
@@ -588,7 +588,7 @@ export class PaymentsService {
     })
     const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } })
     await this.alertOps(
-      `🔴 PadelBot: WhatsApp NO entregó ${what} al jugador ${playerPhone} del club "${club?.name ?? clubId}" tras 3 intentos.`,
+      `🔴 GTP: WhatsApp NO entregó ${what} al jugador ${playerPhone} del club "${club?.name ?? clubId}" tras 3 intentos.`,
     )
   }
 

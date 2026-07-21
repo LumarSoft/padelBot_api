@@ -1128,7 +1128,7 @@ Per-club settings. The transfer config holds the MercadoPago alias/CVU players s
 
 ### GET /clubs/me/subscription
 
-Effective PadelBot subscription state for the panel's banner. Derived from the stored
+Effective GTP subscription state for the panel's banner. Derived from the stored
 status + dates: an ACTIVE club whose paid period lapsed behaves as past-due on its own,
 with a grace window (`SUBSCRIPTION_GRACE_DAYS`, default 7) before the bot answers a
 fallback message. The panel itself is never blocked.

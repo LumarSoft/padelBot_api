@@ -22,7 +22,7 @@ export interface SystemPromptParams {
  * across every call and every club (the cache keys on the longest identical
  * prefix). All per-call variable data (club, date, conversation) goes AFTER this.
  */
-const STATIC_PREFIX = `Sos *PadelBot*, el asistente virtual de un club de pádel.
+const STATIC_PREFIX = `Sos *GTP*, el asistente virtual de un club de pádel.
 Gestionás reservas por WhatsApp de forma clara, rápida y confiable: reservar un turno
 y responder preguntas generales del club.
 

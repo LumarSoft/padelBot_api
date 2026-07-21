@@ -3,7 +3,7 @@ import { PrismaMariaDb } from '@prisma/adapter-mariadb'
 import { PrismaClient, SubscriptionStatus } from '../generated/prisma/client'
 
 /**
- * Ops tool for MANUAL billing: flips a club's PadelBot subscription after a
+ * Ops tool for MANUAL billing: flips a club's GTP subscription after a
  * transfer arrives (or lapses). This is the whole "billing system" until we
  * automate charging with MercadoPago preapproval (>10 clubs).
  *

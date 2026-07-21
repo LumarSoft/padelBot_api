@@ -7,7 +7,7 @@ datasource db {
   provider = "mysql"
 }
 
-/// PadelBot's own subscription lifecycle for a club (billed manually for now; the
+/// GTP's own subscription lifecycle for a club (billed manually for now; the
 /// status is what gates the product). See `src/clubs/lib/subscription.ts`.
 enum SubscriptionStatus {
   TRIAL
@@ -22,7 +22,7 @@ model Club {
   name      String
   slug      String   @unique
 
-  /// PadelBot subscription state. New clubs start on TRIAL (see trialEndsAt).
+  /// GTP subscription state. New clubs start on TRIAL (see trialEndsAt).
   subscriptionStatus SubscriptionStatus @default(TRIAL)
   /// Commercial plan ("base" / "pro"); informational for now.
   plan               String             @default("base")
