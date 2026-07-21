@@ -4,10 +4,10 @@ Backend y **bot conversacional multitenant** para clubes de pádel. Construido c
 
 Este repo es uno de los dos que componen el producto:
 
-| Repo | Rol |
-| ---- | --- |
-| **`padelbot_api`** (este) | API REST + bot multitenant. Atiende a los jugadores por mensajería, gestiona turnos y expone los endpoints que consume el panel. |
-| **`padelbot_admin`** | Panel de administración (Next.js) para que cada club gestione sus turnos, supervise y dirija las conversaciones del bot. |
+| Repo                 | Rol                                                                                                                              |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **`padelbot_api`**   | API REST + bot multitenant. Atiende a los jugadores por mensajería, gestiona turnos y expone los endpoints que consume el panel. |
+| **`padelbot_admin`** | Panel de administración (Next.js) para que cada club gestione sus turnos, supervise y dirija las conversaciones del bot.         |
 
 ---
 
@@ -18,7 +18,7 @@ PadelBot es un **SaaS multitenant** que se vende a varios clubes de pádel. Cada
 - Cada club conecta su canal de mensajería (WhatsApp como principal) y obtiene un **bot** que atiende a sus jugadores: consulta de disponibilidad, reserva de turnos, cancelaciones, recordatorios, etc.
 - El bot es **híbrido**:
   - **Camino feliz por opciones/menús** (máquina de estados): determinístico, rápido y barato. Es el comportamiento por defecto y cubre el grueso de las reservas.
-  - **Fallback con LLM (OpenAI)**: cuando el jugador escribe en lenguaje natural o el flujo por menús no alcanza, interviene el LLM con *function calling* para entender la intención y ejecutar acciones (consultar/reservar/cancelar) sobre los datos del club.
+  - **Fallback con LLM (OpenAI)**: cuando el jugador escribe en lenguaje natural o el flujo por menús no alcanza, interviene el LLM con _function calling_ para entender la intención y ejecutar acciones (consultar/reservar/cancelar) sobre los datos del club.
 - Desde el panel (`padelbot_admin`), el club puede **ver las conversaciones, interrumpirlas y tomar el control** (handoff humano), además de administrar qué turnos ofrece, verlos y editarlos.
 
 > El objetivo es que el mismo código sirva a N clubes sin mezclar datos entre ellos. Todo lo que toca la base de datos debe estar **filtrado por tenant**.
@@ -83,7 +83,7 @@ Puntos clave de diseño:
 - **Capa de canales abstracta**: un `ChannelAdapter` por proveedor (WhatsApp primero; Telegram/web después). El motor de conversación no sabe de qué canal viene el mensaje.
 - **Canal actual — WhatsApp vía webhook de Meta**: por ahora el único canal es WhatsApp Cloud API. Meta envía los mensajes entrantes a nuestro **webhook** (con verificación por `WHATSAPP_VERIFY_TOKEN` en el handshake `GET`) y nosotros respondemos llamando a la Graph API de WhatsApp. El `ChannelAdapter` de WhatsApp encapsula esto; el resto del bot es agnóstico del canal.
 - **Máquina de estados primero**: el flujo de reserva común se resuelve con opciones/botones, sin gastar tokens de LLM.
-- **LLM como fallback** con *function calling*: las "tools" del LLM son funciones del backend que **siempre** reciben el `clubId` resuelto del lado servidor. El LLM nunca ejecuta SQL ni recibe datos crudos de otros clubes.
+- **LLM como fallback** con _function calling_: las "tools" del LLM son funciones del backend que **siempre** reciben el `clubId` resuelto del lado servidor. El LLM nunca ejecuta SQL ni recibe datos crudos de otros clubes.
 - **Estado de conversación persistido por tenant**: cada conversación (jugador ↔ bot) se guarda con su historial y estado. Esto habilita el **handoff humano**: un operador del club puede pausar el bot, escribir manualmente y reanudar.
 - **Idempotencia y webhooks**: la recepción de mensajes (webhook de WhatsApp) debe ser idempotente.
 
@@ -94,7 +94,7 @@ Puntos clave de diseño:
 Punto de partida para `prisma/schema.prisma` (a refinar por el equipo). Todo modelo de negocio cuelga de `Club`:
 
 - **`Club`** — el tenant. Datos del club, config del canal (credenciales WhatsApp), zona horaria, estado de la suscripción.
-- **`User`** — usuario del **panel** (staff del club). Tiene `clubId`, `email`, `password` (hash), `role`. Es quien hace login en `padelbot_admin`. *(El modelo `User` actual hay que extenderlo con `clubId` y `role`.)*
+- **`User`** — usuario del **panel** (staff del club). Tiene `clubId`, `email`, `password` (hash), `role`. Es quien hace login en `padelbot_admin`. _(El modelo `User` actual hay que extenderlo con `clubId` y `role`.)_
 - **`Court`** — cancha del club.
 - **`Slot` / `TimeSlot`** — turno que ofrece el club (cancha + fecha/hora + duración + precio + estado disponible/reservado/bloqueado). "Administrar qué turnos da el club" = CRUD sobre esto.
 - **`Player`** — jugador final (cliente del club) identificado por su canal (p. ej. teléfono de WhatsApp). Pertenece a un `Club`.

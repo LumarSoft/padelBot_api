@@ -1,0 +1,13 @@
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is not installed — refusing to commit without a secret scan."
+  echo "Install it with: brew install gitleaks"
+  exit 1
+fi
+
+gitleaks protect --staged --no-banner --redact
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "pre-commit: gitleaks found a potential secret in your staged changes — commit blocked."
+  echo "If this is a false positive, add its fingerprint to .gitleaksignore after verifying it by hand."
+  exit 1
+fi

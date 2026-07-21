@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing'
 import { AppController } from './app.controller'
 import { AppService } from './app.service'
+import { PrismaService } from './prisma/prisma.service'
 
 describe('AppController', () => {
   let appController: AppController
@@ -8,7 +9,7 @@ describe('AppController', () => {
   beforeEach(async () => {
     const app: TestingModule = await Test.createTestingModule({
       controllers: [AppController],
-      providers: [AppService],
+      providers: [AppService, { provide: PrismaService, useValue: { $queryRaw: jest.fn() } }],
     }).compile()
 
     appController = app.get<AppController>(AppController)
@@ -17,6 +18,12 @@ describe('AppController', () => {
   describe('root', () => {
     it('should return "Hello World!"', () => {
       expect(appController.getHello()).toBe('Hello World!')
+    })
+  })
+
+  describe('health', () => {
+    it('reports ok when the DB is reachable', async () => {
+      expect(await appController.getHealth()).toMatchObject({ status: 'ok', db: 'up' })
     })
   })
 })

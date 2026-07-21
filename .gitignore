@@ -35,16 +35,17 @@ lerna-debug.log*
 !.vscode/launch.json
 !.vscode/extensions.json
 
-# dotenv environment variable files
-.env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
+# dotenv environment variable files — block ALL variants (backups, .bak, .old, etc.)
+# by default, and explicitly allow-list only the template.
+.env*
+!.env.example
 
 # temp directory
 .temp
 .tmp
+
+# Locally-stored receipt images (RECEIPT_STORAGE_DRIVER=local)
+/storage
 
 # Runtime data
 pids
