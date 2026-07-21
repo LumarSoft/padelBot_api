@@ -744,6 +744,25 @@ money goes and records it on the booking as `depositOutcome`: cancelled
 become the player's `creditCents`, applied automatically to their next booking); later →
 `FORFEITED`. Unpaid bookings just restore any player credit they had consumed.
 
+### DELETE /bookings/:id
+
+Soft-deletes a booking so it drops out of the club's lists (mobile/panel). Only a
+`CANCELLED` reservation can be removed — the row stays in the DB (audit/stats) with
+`deletedAt` set, and all read paths (`GET /bookings`, `GET /bookings/:id`) filter it out.
+Available to staff and owner.
+
+**Auth required:** Yes
+
+`204 No Content` — the booking was soft-deleted
+
+`400 Bad Request` — the booking is not cancelled (only cancelled reservations can be deleted)
+
+```json
+{ "statusCode": 400, "message": "Solo se pueden eliminar reservas canceladas" }
+```
+
+`404 Not Found` — booking not found (or already deleted)
+
 ### PATCH /bookings/:id/reschedule
 
 Moves a booking to a different slot. The old slot becomes `AVAILABLE`; the new slot becomes `BOOKED`. Both changes happen in a single transaction.

@@ -397,6 +397,9 @@ model Booking {
   /// Times the PLAYER moved this booking from WhatsApp (capped by Club.maxPlayerReschedules).
   /// Admin reschedules from the panel don't count — the club can always override.
   rescheduleCount    Int               @default(0)
+  /// Soft-delete: set when the club removes a CANCELLED reservation from its lists. The row
+  /// stays for audit/stats; null = live. Read paths (findAll/findOne) filter deletedAt: null.
+  deletedAt          DateTime?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
