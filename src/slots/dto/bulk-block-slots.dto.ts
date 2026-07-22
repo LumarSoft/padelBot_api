@@ -1,4 +1,14 @@
-import { ArrayNotEmpty, IsArray, IsISO8601, IsOptional, IsString, Matches } from 'class-validator'
+import {
+  ArrayNotEmpty,
+  IsArray,
+  IsISO8601,
+  IsInt,
+  IsOptional,
+  IsString,
+  Matches,
+  Max,
+  Min,
+} from 'class-validator'
 
 /**
  * "HH:MM" wall-clock band start. NOT a fixed 90-minute grid: `Court.slotDurationMinutes` is
@@ -26,4 +36,16 @@ export class BulkBlockSlotsDto {
   @IsArray()
   @Matches(HHMM, { each: true, message: 'Cada horario debe tener el formato HH:MM' })
   slotStarts?: string[]
+
+  /**
+   * Restrict the date range to these weekdays (0 = Sunday … 6 = Saturday). Omit (or empty)
+   * to act on every day in the range. Lets a recurring tournament — "todos los sábados a la
+   * mañana" — block a whole month without touching the weekdays in between.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsInt({ each: true })
+  @Min(0, { each: true })
+  @Max(6, { each: true })
+  daysOfWeek?: number[]
 }

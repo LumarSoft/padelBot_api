@@ -3,7 +3,7 @@ import { Prisma, SlotStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { bandDateTimes, bandsForDate, courtScheduleSelect, findBandInSchedule } from '../availability/lib/schedule'
-import { dayRangeUtc, formatTime, shiftDateKey } from '../availability/lib/datetime'
+import { dayRangeUtc, formatTime, shiftDateKey, toDateKey, weekdayOfKey } from '../availability/lib/datetime'
 import { CreateSlotDto } from './dto/create-slot.dto'
 import { UpdateSlotDto } from './dto/update-slot.dto'
 import { QuerySlotsDto } from './dto/query-slots.dto'
@@ -130,7 +130,11 @@ export class SlotsService {
     }
     const priceByCourt = new Map(courts.map(c => [c.id, c.priceCents]))
 
-    const dates = this.enumerateDates(dto.fromDate, dto.toDate)
+    const dates = this.filterByWeekday(
+      this.enumerateDates(dto.fromDate, dto.toDate),
+      dto.daysOfWeek,
+    )
+    if (dates.length === 0) return { blocked: 0, created: 0, skipped: 0 }
 
     const targets: { courtId: string; startsAt: Date; endsAt: Date }[] = []
     for (const date of dates) {
@@ -234,7 +238,11 @@ export class SlotsService {
     })
 
     const hours = dto.slotStarts?.length ? new Set(dto.slotStarts) : null
-    const ids = (hours ? blocked.filter(slot => hours.has(formatTime(slot.startsAt))) : blocked).map(s => s.id)
+    const days = dto.daysOfWeek?.length ? new Set(dto.daysOfWeek) : null
+    const ids = blocked
+      .filter(slot => !hours || hours.has(formatTime(slot.startsAt)))
+      .filter(slot => !days || days.has(weekdayOfKey(toDateKey(slot.startsAt))))
+      .map(s => s.id)
     if (ids.length === 0) return { unblocked: 0 }
 
     const { count } = await this.prisma.slot.updateMany({
@@ -261,6 +269,13 @@ export class SlotsService {
       cursor = shiftDateKey(cursor, 1)
     }
     return dates
+  }
+
+  /** Keep only the dates whose weekday is in `daysOfWeek` (0 = Sunday … 6 = Saturday). */
+  private filterByWeekday(dates: string[], daysOfWeek?: number[]): string[] {
+    if (!daysOfWeek?.length) return dates
+    const days = new Set(daysOfWeek)
+    return dates.filter(date => days.has(weekdayOfKey(date)))
   }
 
   private assertValidRange(startsAt: Date, endsAt: Date): void {

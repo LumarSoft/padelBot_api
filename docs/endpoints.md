@@ -589,13 +589,15 @@ Blocks many slots at once (e.g. a tournament): every selected court, for every d
 | fromDate   | ISO 8601 | Yes      | inclusive start date (`YYYY-MM-DD`)                      |
 | toDate     | ISO 8601 | Yes      | inclusive end date; on/after `fromDate`                  |
 | slotStarts | string[] | No       | subset of valid slot starts; omit to block the whole day |
+| daysOfWeek | number[] | No       | restrict the range to these weekdays (0 = Sun … 6 = Sat); omit to act on every day |
 
 ```json
 {
   "courtIds": ["clx...", "cly..."],
-  "fromDate": "2026-07-10",
-  "toDate": "2026-07-12",
-  "slotStarts": ["18:00", "19:30", "21:00"]
+  "fromDate": "2026-07-04",
+  "toDate": "2026-08-01",
+  "slotStarts": ["09:00", "10:30", "12:00"],
+  "daysOfWeek": [6]
 }
 ```
 
@@ -621,6 +623,7 @@ The inverse of `bulk-block`: frees every `BLOCKED` slot of the selected courts i
 | fromDate   | ISO 8601 | Yes      | inclusive start date (`YYYY-MM-DD`)                          |
 | toDate     | ISO 8601 | Yes      | inclusive end date; on/after `fromDate`                       |
 | slotStarts | string[] | No       | `HH:MM` band starts; omit to unblock the whole day            |
+| daysOfWeek | number[] | No       | restrict the range to these weekdays (0 = Sun … 6 = Sat); omit for every day |
 
 ```json
 {
