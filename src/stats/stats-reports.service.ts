@@ -202,7 +202,7 @@ export class StatsReportsService {
           const summary = await this.weeklySummary(club.id, fromKey, toKey)
           if (summary.bookings === 0) continue // nothing to brag about — don't spam dead clubs
           await this.notifications.notifyClub(club.id, {
-            title: `📈 Tu semana en PadelBot`,
+            title: `📈 Tu semana en GTP`,
             body:
               `${summary.bookings} turnos (${summary.occupancyPct}% de ocupación), ` +
               `$${Math.round(summary.depositCents / 100).toLocaleString('es-AR')} en señas. ` +

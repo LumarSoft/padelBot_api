@@ -17,6 +17,7 @@ import { ClubsService } from './clubs.service'
 import { ConnectMercadoPagoDto } from './dto/connect-mercadopago.dto'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
 import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
+import { UpdateFaqDto } from './dto/update-faq.dto'
 
 @Controller('clubs')
 @UseGuards(JwtAuthGuard)
@@ -38,6 +39,19 @@ export class ClubsController {
   updateProfile(@CurrentUser() user: AuthenticatedUser, @Body() dto: UpdateClubProfileDto) {
     this.assertOwner(user)
     return this.clubsService.updateProfile(user.clubId, dto)
+  }
+
+  /** The club's bot FAQ (ordered), read by the panel's "Bot" section. */
+  @Get('me/faq')
+  getFaq(@CurrentUser() user: AuthenticatedUser) {
+    return this.clubsService.getFaq(user.clubId)
+  }
+
+  /** Replaces the whole FAQ list. Owner-only, like the rest of the bot/payment config. */
+  @Patch('me/faq')
+  updateFaq(@CurrentUser() user: AuthenticatedUser, @Body() dto: UpdateFaqDto) {
+    this.assertOwner(user)
+    return this.clubsService.updateFaq(user.clubId, dto.entries)
   }
 
   @Get('me/transfer-config')

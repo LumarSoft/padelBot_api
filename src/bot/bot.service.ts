@@ -98,6 +98,14 @@ const NO_DAY_WORKS =
 const MY_BOOKINGS_INTENT =
   /\bmis (turnos|reservas)\b|\bque turnos tengo\b|\bqué turnos tengo\b|\bcancelar\b|\banular\b|\bdar de baja\b|\bno voy a (poder )?(ir|jugar)\b/i
 
+/**
+ * "Quiero hablar con una persona" and its variants — an explicit request for a human. Routed
+ * deterministically to a staff hand-off (mode → HUMAN + push) instead of the LLM, which has no
+ * tool to switch modes and would just keep answering as the bot.
+ */
+const HUMAN_HANDOFF_INTENT =
+  /\bhablar con (una |un )?(persona|humano|alguien|encargad[oa]|due[nñ]o|operador|asesor|agente)\b|\b(con |una )?persona (real|de verdad)\b|\batenci[oó]n humana\b|\bun humano\b|\bquiero (hablar|comunicarme) con (alguien|una persona|un humano)\b/i
+
 @Injectable()
 export class BotService {
   private readonly logger = new Logger(BotService.name)
@@ -156,6 +164,12 @@ export class BotService {
     if (session.mode === 'HUMAN') {
       this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
       return null
+    }
+
+    // Explicit "quiero hablar con una persona" → hand the chat to staff and go quiet, so the
+    // player never gets stuck talking to a bot they've asked to get past.
+    if (HUMAN_HANDOFF_INTENT.test(msg)) {
+      return this.handoffToHuman(session.id, waId, clubId)
     }
 
     // "avisame" right after a no-availability reply → join that day's waitlist.
@@ -389,7 +403,7 @@ export class BotService {
   }
 
   /**
-   * Returns the fallback reply when the club's PadelBot subscription is blocked
+   * Returns the fallback reply when the club's GTP subscription is blocked
    * (cancelled, or trial/payment lapsed beyond the grace window), else null.
    * The player is redirected to the club itself — the club's relationship with
    * its players must survive our billing.
@@ -569,6 +583,9 @@ export class BotService {
     if (!policy) return { reply: RESCHEDULE_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
 
     if (policy.mode === 'OFF') {
+      // The club handles changes/cancellations itself — but don't send the player "off" the
+      // club's own WhatsApp: notify the staff so someone picks it up on this same chat.
+      await this.askClubToHandle(clubId, waId, picked.label, 'club-policy')
       return { reply: RESCHEDULE_OFF, state: BotState.MENU, ctx: keepName(ctx) }
     }
     if (policy.mode === 'REQUEST') {
@@ -696,6 +713,23 @@ export class BotService {
 
     this.logger.log(`🔄 ${waId}: movió la reserva ${ctx.rescheduleBookingId}`)
     return { reply: rescheduleDone(ctx, moved.priceDiffCents), state: BotState.MENU, ctx: keepName(ctx) }
+  }
+
+  /**
+   * The player explicitly asked for a human. We silence the bot (mode → HUMAN), push the staff
+   * so someone actually picks it up, and reassure the player — never leaving them talking to a
+   * bot they asked to get past. The chat stays HUMAN until an admin flips it back from the panel.
+   */
+  private async handoffToHuman(sessionId: string, waId: string, clubId: string): Promise<BotReply> {
+    await this.sessionService.setMode(sessionId, 'HUMAN')
+    await this.notifications.notifyClub(clubId, {
+      title: '🙋 Un jugador pide hablar con una persona',
+      body: `Respondele desde Conversaciones (${waId}).`,
+    })
+    const reply = 'Dale 🙌 Aviso al equipo del club para que te atiendan por acá. En un ratito te responden. 🎾'
+    await this.sessionService.saveMessage(sessionId, 'BOT', reply)
+    this.logger.log(`🙋 ${waId}: derivado a humano por pedido explícito`)
+    return { text: reply }
   }
 
   /** The player can't make any other day → the club takes it from here. */

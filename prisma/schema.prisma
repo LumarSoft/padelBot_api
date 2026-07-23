@@ -7,7 +7,7 @@ datasource db {
   provider = "mysql"
 }
 
-/// PadelBot's own subscription lifecycle for a club (billed manually for now; the
+/// GTP's own subscription lifecycle for a club (billed manually for now; the
 /// status is what gates the product). See `src/clubs/lib/subscription.ts`.
 enum SubscriptionStatus {
   TRIAL
@@ -22,7 +22,7 @@ model Club {
   name      String
   slug      String   @unique
 
-  /// PadelBot subscription state. New clubs start on TRIAL (see trialEndsAt).
+  /// GTP subscription state. New clubs start on TRIAL (see trialEndsAt).
   subscriptionStatus SubscriptionStatus @default(TRIAL)
   /// Commercial plan ("base" / "pro"); informational for now.
   plan               String             @default("base")
@@ -60,6 +60,12 @@ model Club {
   /// "Cómo llegar": address / landmarks / maps link the bot answers when asked. Null = the
   /// bot says it doesn't have the address loaded and suggests asking the club.
   locationInfo    String? @db.Text
+  /// The club's bot FAQ: an ordered array of { question, answer } the bot answers general club
+  /// questions from (services, payment methods, amenities, rules, paddle rental, parking…).
+  /// Stored as JSON (like setupProgress) and edited as a whole from the "Bot" section of the
+  /// panel. Each entry is injected into the LLM system prompt as a Q→A pair. Null/empty = the
+  /// bot only knows its courts/schedule and says it doesn't have that info for anything else.
+  botFaq          Json?
 
   /// Hours before the slot start within which a cancellation forfeits the deposit.
   /// Cancelling EARLIER than this window turns the paid deposit into player credit.
@@ -397,6 +403,9 @@ model Booking {
   /// Times the PLAYER moved this booking from WhatsApp (capped by Club.maxPlayerReschedules).
   /// Admin reschedules from the panel don't count — the club can always override.
   rescheduleCount    Int               @default(0)
+  /// Soft-delete: set when the club removes a CANCELLED reservation from its lists. The row
+  /// stays for audit/stats; null = live. Read paths (findAll/findOne) filter deletedAt: null.
+  deletedAt          DateTime?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 

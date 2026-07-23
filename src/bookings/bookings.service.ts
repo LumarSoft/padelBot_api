@@ -170,6 +170,7 @@ export class BookingsService {
     const bookings = await this.prisma.booking.findMany({
       where: {
         clubId,
+        deletedAt: null,
         ...(query.status ? { status: query.status } : {}),
         ...(query.playerPhone ? { playerPhone: query.playerPhone } : {}),
         ...(query.search
@@ -206,11 +207,28 @@ export class BookingsService {
 
   async findOne(clubId: string, id: string) {
     const booking = await this.prisma.booking.findFirst({
-      where: { id, clubId },
+      where: { id, clubId, deletedAt: null },
       select: bookingSelect,
     })
     if (!booking) throw new NotFoundException(`Booking ${id} not found`)
     return withPlayers(withReceiptFlag(booking))
+  }
+
+  /**
+   * Soft-deletes a booking so it drops out of the club's lists (mobile/panel). Only a
+   * CANCELLED reservation can be removed — an active or pending one must go through its
+   * lifecycle first. The row is kept in the DB (audit/stats) with `deletedAt` set; read
+   * paths filter it out. `findOne` already scopes by club and rejects an already-deleted id.
+   */
+  async remove(clubId: string, id: string): Promise<void> {
+    const booking = await this.findOne(clubId, id)
+    if (booking.status !== 'CANCELLED') {
+      throw new BadRequestException('Solo se pueden eliminar reservas canceladas')
+    }
+    await this.prisma.booking.update({
+      where: { id },
+      data: { deletedAt: new Date() },
+    })
   }
 
   async book(clubId: string, dto: CreateBookingDto, bookedByUserId?: number) {

@@ -74,6 +74,13 @@ export class BookingsController {
     return this.bookingsService.cancel(user.clubId, id)
   }
 
+  /** Soft-deletes a CANCELLED reservation so it drops out of the club's lists (staff or owner). */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  remove(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.bookingsService.remove(user.clubId, id)
+  }
+
   /** The turno's bill: per-player owed/paid/remaining, seña credited to J1, settled state. */
   @Get(':id/account')
   getAccount(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {

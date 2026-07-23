@@ -589,13 +589,15 @@ Blocks many slots at once (e.g. a tournament): every selected court, for every d
 | fromDate   | ISO 8601 | Yes      | inclusive start date (`YYYY-MM-DD`)                      |
 | toDate     | ISO 8601 | Yes      | inclusive end date; on/after `fromDate`                  |
 | slotStarts | string[] | No       | subset of valid slot starts; omit to block the whole day |
+| daysOfWeek | number[] | No       | restrict the range to these weekdays (0 = Sun … 6 = Sat); omit to act on every day |
 
 ```json
 {
   "courtIds": ["clx...", "cly..."],
-  "fromDate": "2026-07-10",
-  "toDate": "2026-07-12",
-  "slotStarts": ["18:00", "19:30", "21:00"]
+  "fromDate": "2026-07-04",
+  "toDate": "2026-08-01",
+  "slotStarts": ["09:00", "10:30", "12:00"],
+  "daysOfWeek": [6]
 }
 ```
 
@@ -621,6 +623,7 @@ The inverse of `bulk-block`: frees every `BLOCKED` slot of the selected courts i
 | fromDate   | ISO 8601 | Yes      | inclusive start date (`YYYY-MM-DD`)                          |
 | toDate     | ISO 8601 | Yes      | inclusive end date; on/after `fromDate`                       |
 | slotStarts | string[] | No       | `HH:MM` band starts; omit to unblock the whole day            |
+| daysOfWeek | number[] | No       | restrict the range to these weekdays (0 = Sun … 6 = Sat); omit for every day |
 
 ```json
 {
@@ -743,6 +746,25 @@ money goes and records it on the booking as `depositOutcome`: cancelled
 `cancellationWindowHours`+ before the slot → `CREDITED` (deposit + any applied credit
 become the player's `creditCents`, applied automatically to their next booking); later →
 `FORFEITED`. Unpaid bookings just restore any player credit they had consumed.
+
+### DELETE /bookings/:id
+
+Soft-deletes a booking so it drops out of the club's lists (mobile/panel). Only a
+`CANCELLED` reservation can be removed — the row stays in the DB (audit/stats) with
+`deletedAt` set, and all read paths (`GET /bookings`, `GET /bookings/:id`) filter it out.
+Available to staff and owner.
+
+**Auth required:** Yes
+
+`204 No Content` — the booking was soft-deleted
+
+`400 Bad Request` — the booking is not cancelled (only cancelled reservations can be deleted)
+
+```json
+{ "statusCode": 400, "message": "Solo se pueden eliminar reservas canceladas" }
+```
+
+`404 Not Found` — booking not found (or already deleted)
 
 ### PATCH /bookings/:id/reschedule
 
@@ -1109,7 +1131,7 @@ Per-club settings. The transfer config holds the MercadoPago alias/CVU players s
 
 ### GET /clubs/me/subscription
 
-Effective PadelBot subscription state for the panel's banner. Derived from the stored
+Effective GTP subscription state for the panel's banner. Derived from the stored
 status + dates: an ACTIVE club whose paid period lapsed behaves as past-due on its own,
 with a grace window (`SUBSCRIPTION_GRACE_DAYS`, default 7) before the bot answers a
 fallback message. The panel itself is never blocked.
@@ -1128,6 +1150,60 @@ fallback message. The panel itself is never blocked.
   "botAllowed": true,
   "daysLeft": 14
 }
+```
+
+### GET /clubs/me/faq
+
+Returns the club's bot FAQ (ordered) — the question/answer pairs the WhatsApp bot answers
+general club questions from (services, payment methods, amenities, rules, paddle rental…).
+Empty array when none configured.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+[
+  { "question": "¿Alquilan paletas?", "answer": "Sí, a $2000 la hora en el mostrador." },
+  { "question": "¿Hay estacionamiento?", "answer": "Sí, gratis frente al club." }
+]
+```
+
+### PATCH /clubs/me/faq
+
+Replaces the whole FAQ list (edited as a set from the panel's "Bot" section). **Owner only.**
+Blank entries are dropped; order is preserved.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field   | Type    | Required | Constraints                                              |
+| ------- | ------- | -------- | -------------------------------------------------------- |
+| entries | array   | Yes      | Max 40 items                                             |
+| entries[].question | string | Yes | 2–160 chars                                          |
+| entries[].answer   | string | Yes | 1–600 chars                                          |
+
+```json
+{
+  "entries": [
+    { "question": "¿Alquilan paletas?", "answer": "Sí, a $2000 la hora." }
+  ]
+}
+```
+
+**Responses**
+
+`200 OK` — the saved (cleaned) list.
+
+```json
+[{ "question": "¿Alquilan paletas?", "answer": "Sí, a $2000 la hora." }]
+```
+
+`403 Forbidden` — the caller is not the club owner.
+
+```json
+{ "statusCode": 403, "message": "Only the club owner can change payment settings" }
 ```
 
 ### GET /clubs/me/transfer-config

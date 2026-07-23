@@ -144,13 +144,13 @@ describe('the club decides what the player may do', () => {
     expect(result.reply).toContain('Ya moviste este turno una vez')
   })
 
-  it('does not offer it at all when the club turned it off', async () => {
+  it('notifies staff on this chat (never sends the player off) when the club turned it off', async () => {
     const { service, notifications } = setup({ mode: 'OFF', reason: 'club-policy' })
 
     const result = await step(service, BotState.MY_BOOKINGS, 'turno:b1', { myBookings })
 
-    expect(result.reply).toContain('hablá directamente con el club')
-    expect(notifications.notifyClub).not.toHaveBeenCalled()
+    expect(result.reply).toContain('los maneja el club')
+    expect(notifications.notifyClub).toHaveBeenCalled()
   })
 })
 

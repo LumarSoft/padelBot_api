@@ -1,4 +1,4 @@
-# PadelBot API
+# GTP API
 
 Backend y **bot conversacional multitenant** para clubes de pádel. Construido con **NestJS v11**, **Prisma v7** y **MySQL/MariaDB**.
 
@@ -6,20 +6,20 @@ Este repo es uno de los dos que componen el producto:
 
 | Repo                 | Rol                                                                                                                              |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| **`padelbot_api`**   | API REST + bot multitenant. Atiende a los jugadores por mensajería, gestiona turnos y expone los endpoints que consume el panel. |
-| **`padelbot_admin`** | Panel de administración (Next.js) para que cada club gestione sus turnos, supervise y dirija las conversaciones del bot.         |
+| **`gtp_api`**   | API REST + bot multitenant. Atiende a los jugadores por mensajería, gestiona turnos y expone los endpoints que consume el panel. |
+| **`gtp_admin`** | Panel de administración (Next.js) para que cada club gestione sus turnos, supervise y dirija las conversaciones del bot.         |
 
 ---
 
 ## 1. La idea (visión de producto)
 
-PadelBot es un **SaaS multitenant** que se vende a varios clubes de pádel. Cada club es un **tenant** aislado dentro de la misma plataforma.
+GTP es un **SaaS multitenant** que se vende a varios clubes de pádel. Cada club es un **tenant** aislado dentro de la misma plataforma.
 
 - Cada club conecta su canal de mensajería (WhatsApp como principal) y obtiene un **bot** que atiende a sus jugadores: consulta de disponibilidad, reserva de turnos, cancelaciones, recordatorios, etc.
 - El bot es **híbrido**:
   - **Camino feliz por opciones/menús** (máquina de estados): determinístico, rápido y barato. Es el comportamiento por defecto y cubre el grueso de las reservas.
   - **Fallback con LLM (OpenAI)**: cuando el jugador escribe en lenguaje natural o el flujo por menús no alcanza, interviene el LLM con _function calling_ para entender la intención y ejecutar acciones (consultar/reservar/cancelar) sobre los datos del club.
-- Desde el panel (`padelbot_admin`), el club puede **ver las conversaciones, interrumpirlas y tomar el control** (handoff humano), además de administrar qué turnos ofrece, verlos y editarlos.
+- Desde el panel (`gtp_admin`), el club puede **ver las conversaciones, interrumpirlas y tomar el control** (handoff humano), además de administrar qué turnos ofrece, verlos y editarlos.
 
 > El objetivo es que el mismo código sirva a N clubes sin mezclar datos entre ellos. Todo lo que toca la base de datos debe estar **filtrado por tenant**.
 
@@ -94,7 +94,7 @@ Puntos clave de diseño:
 Punto de partida para `prisma/schema.prisma` (a refinar por el equipo). Todo modelo de negocio cuelga de `Club`:
 
 - **`Club`** — el tenant. Datos del club, config del canal (credenciales WhatsApp), zona horaria, estado de la suscripción.
-- **`User`** — usuario del **panel** (staff del club). Tiene `clubId`, `email`, `password` (hash), `role`. Es quien hace login en `padelbot_admin`. _(El modelo `User` actual hay que extenderlo con `clubId` y `role`.)_
+- **`User`** — usuario del **panel** (staff del club). Tiene `clubId`, `email`, `password` (hash), `role`. Es quien hace login en `gtp_admin`. _(El modelo `User` actual hay que extenderlo con `clubId` y `role`.)_
 - **`Court`** — cancha del club.
 - **`Slot` / `TimeSlot`** — turno que ofrece el club (cancha + fecha/hora + duración + precio + estado disponible/reservado/bloqueado). "Administrar qué turnos da el club" = CRUD sobre esto.
 - **`Player`** — jugador final (cliente del club) identificado por su canal (p. ej. teléfono de WhatsApp). Pertenece a un `Club`.
@@ -108,7 +108,7 @@ Punto de partida para `prisma/schema.prisma` (a refinar por el equipo). Todo mod
 
 ## 6. Endpoints que consume el panel
 
-El panel (`padelbot_admin`) necesitará, como mínimo:
+El panel (`gtp_admin`) necesitará, como mínimo:
 
 - **Auth**: `register` / `login` de usuarios del club (JWT). Cada token lleva el `clubId`.
 - **Slots/turnos**: CRUD de la oferta de turnos del club.

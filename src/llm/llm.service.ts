@@ -21,6 +21,7 @@ import {
   timeNotAvailable,
 } from '../bot/messages'
 import { buildSystemPrompt, formatCurrentDate } from './system.prompt'
+import { parseFaq } from '../clubs/clubs.service'
 import { TOOLS } from './tools'
 
 /** Per-user LLM call budget — protects against spam driving up OpenAI cost. */
@@ -112,12 +113,20 @@ export class LlmService {
     clubId: string,
     waId: string,
   ): Promise<HandlerResult> {
-    const [club, courts] = await Promise.all([
-      this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } }),
+    const [club, courts, products] = await Promise.all([
+      // botFaq is the club's own Q&A so "¿alquilan paletas?", "¿hay estacionamiento?",
+      // "¿puedo pagar en efectivo?" are answered from real config instead of "no lo tengo".
+      this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true, botFaq: true } }),
       this.prisma.court.findMany({
         where: { clubId },
         // The real schedule, not just the names: the prompt describes THIS club's bands.
         select: { name: true, ...courtScheduleSelect },
+        orderBy: { name: 'asc' },
+      }),
+      // Active products so the bot can quote paddle/ball rental, drinks, etc. by real price.
+      this.prisma.product.findMany({
+        where: { clubId, isActive: true },
+        select: { name: true, priceCents: true },
         orderBy: { name: 'asc' },
       }),
     ])
@@ -129,6 +138,8 @@ export class LlmService {
       state,
       playerName: ctx.playerName,
       ctx,
+      faq: parseFaq(club?.botFaq),
+      products,
     })
 
     const historyMessages: OpenAI.ChatCompletionMessageParam[] = (ctx.history ?? []).map(m => ({
@@ -176,6 +187,12 @@ export class LlmService {
     // keep the player exactly where they were.
     const text = choice.message.content?.trim()
     if (!text) return this.inPlace(NOT_UNDERSTOOD, state, ctx)
+
+    // Surface "no lo tengo"-type answers: they're the fastest signal of what players ask that
+    // the club's FAQ doesn't cover yet. Greppable so it can feed the FAQ (see BOT_AUDIT).
+    if (isNoAnswerReply(text)) {
+      this.logger.warn(`🤷 LLM sin dato — club=${clubId} pregunta="${logSnippet(message)}"`)
+    }
 
     this.logger.log(`LLM text reply (state=${state})`)
     return this.inPlace(text, state, ctx)
@@ -369,6 +386,27 @@ const MODEL_PRICES: Record<string, { input: number; output: number }> = {
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
   const prices = MODEL_PRICES[model] ?? MODEL_PRICES['gpt-4o-mini']
   return (inputTokens * prices.input + outputTokens * prices.output) / 1_000_000
+}
+
+/** One-line, length-capped version of a message for clean console logs. */
+function logSnippet(text: string, max = 140): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + '…'
+}
+
+/**
+ * True when the LLM's reply is a "I don't have that info" answer. Heuristic on purpose — it
+ * only drives a log line (never the player's experience), so a few false positives/negatives
+ * are fine. Diacritics stripped so "sé"/"información" match the accent-free stems.
+ */
+function isNoAnswerReply(text: string): boolean {
+  const t = text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+  return /no (lo )?(se|tengo|cuento con|dispongo)|no (tengo|cuento con) (esa|esta|la) (info|informacion|dato)|no estoy seguro|consultalo con el club|escribile al club|preguntale al club/.test(
+    t,
+  )
 }
 
 interface BookingToolArgs {
