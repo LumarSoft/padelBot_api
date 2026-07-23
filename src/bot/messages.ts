@@ -190,8 +190,8 @@ export function askRescheduleDate(label: string): string {
   )
 }
 
-/** The club doesn't let players move bookings from WhatsApp at all. */
-export const RESCHEDULE_OFF = `Para cambiar o cancelar un turno hablá directamente con el club — ellos lo resuelven al toque. 🙏`
+/** The club doesn't let players move bookings from WhatsApp — staff is notified to handle it here. */
+export const RESCHEDULE_OFF = `Los cambios y cancelaciones de turnos los maneja el club directamente 🙏\n\n📩 Ya les avisé de tu mensaje — te responden por acá en un rato. 🎾`
 
 /**
  * The move needs a human: club policy, too close to the start, or the player already used

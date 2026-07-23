@@ -1152,6 +1152,60 @@ fallback message. The panel itself is never blocked.
 }
 ```
 
+### GET /clubs/me/faq
+
+Returns the club's bot FAQ (ordered) — the question/answer pairs the WhatsApp bot answers
+general club questions from (services, payment methods, amenities, rules, paddle rental…).
+Empty array when none configured.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+[
+  { "question": "¿Alquilan paletas?", "answer": "Sí, a $2000 la hora en el mostrador." },
+  { "question": "¿Hay estacionamiento?", "answer": "Sí, gratis frente al club." }
+]
+```
+
+### PATCH /clubs/me/faq
+
+Replaces the whole FAQ list (edited as a set from the panel's "Bot" section). **Owner only.**
+Blank entries are dropped; order is preserved.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field   | Type    | Required | Constraints                                              |
+| ------- | ------- | -------- | -------------------------------------------------------- |
+| entries | array   | Yes      | Max 40 items                                             |
+| entries[].question | string | Yes | 2–160 chars                                          |
+| entries[].answer   | string | Yes | 1–600 chars                                          |
+
+```json
+{
+  "entries": [
+    { "question": "¿Alquilan paletas?", "answer": "Sí, a $2000 la hora." }
+  ]
+}
+```
+
+**Responses**
+
+`200 OK` — the saved (cleaned) list.
+
+```json
+[{ "question": "¿Alquilan paletas?", "answer": "Sí, a $2000 la hora." }]
+```
+
+`403 Forbidden` — the caller is not the club owner.
+
+```json
+{ "statusCode": 403, "message": "Only the club owner can change payment settings" }
+```
+
 ### GET /clubs/me/transfer-config
 
 Returns the caller's club transfer config.

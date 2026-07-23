@@ -60,6 +60,12 @@ model Club {
   /// "Cómo llegar": address / landmarks / maps link the bot answers when asked. Null = the
   /// bot says it doesn't have the address loaded and suggests asking the club.
   locationInfo    String? @db.Text
+  /// The club's bot FAQ: an ordered array of { question, answer } the bot answers general club
+  /// questions from (services, payment methods, amenities, rules, paddle rental, parking…).
+  /// Stored as JSON (like setupProgress) and edited as a whole from the "Bot" section of the
+  /// panel. Each entry is injected into the LLM system prompt as a Q→A pair. Null/empty = the
+  /// bot only knows its courts/schedule and says it doesn't have that info for anything else.
+  botFaq          Json?
 
   /// Hours before the slot start within which a cancellation forfeits the deposit.
   /// Cancelling EARLIER than this window turns the paid deposit into player credit.

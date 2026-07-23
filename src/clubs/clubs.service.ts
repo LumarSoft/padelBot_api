@@ -4,7 +4,7 @@ import { CryptoService } from '../common/crypto/crypto.service'
 import { MercadoPagoService } from '../mercadopago/mercadopago.service'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
 import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
-import { DepositMode, PaymentVerificationMode, PlayerRescheduleMode } from 'generated/prisma/client'
+import { DepositMode, PaymentVerificationMode, PlayerRescheduleMode, Prisma } from 'generated/prisma/client'
 import { SubscriptionState, subscriptionSelect, subscriptionState } from './lib/subscription'
 
 export interface TransferConfig {
@@ -26,6 +26,12 @@ export interface ClubProfile {
   slug: string
   botWelcomeExtra: string | null
   locationInfo: string | null
+}
+
+/** One bot FAQ entry: a player question and the answer the bot should give. */
+export interface FaqEntry {
+  question: string
+  answer: string
 }
 
 export interface MercadoPagoStatus {
@@ -97,6 +103,28 @@ export class ClubsService {
       },
     })
     return this.getProfile(clubId)
+  }
+
+  /** The club's bot FAQ (ordered), read by the panel's "Bot" section and by the LLM prompt. */
+  async getFaq(clubId: string): Promise<FaqEntry[]> {
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { botFaq: true } })
+    if (!club) throw new NotFoundException(`Club ${clubId} not found`)
+    return parseFaq(club.botFaq)
+  }
+
+  /**
+   * Replaces the whole FAQ list (the panel edits it as a set). Entries are trimmed and any
+   * blank ones dropped, so a half-filled row never reaches the bot. Order is preserved.
+   */
+  async updateFaq(clubId: string, entries: FaqEntry[]): Promise<FaqEntry[]> {
+    const cleaned = entries
+      .map(e => ({ question: e.question.trim(), answer: e.answer.trim() }))
+      .filter(e => e.question && e.answer)
+    await this.prisma.club.update({
+      where: { id: clubId },
+      data: { botFaq: cleaned.length > 0 ? cleaned : Prisma.DbNull },
+    })
+    return cleaned
   }
 
   async getTransferConfig(clubId: string): Promise<TransferConfig> {
@@ -274,4 +302,22 @@ export class ClubsService {
       origin: isConnectOrigin(parsed.origin) ? parsed.origin : 'configuracion',
     }
   }
+}
+
+/**
+ * Reads the FAQ out of the stored JSON, tolerating anything that isn't a clean array of
+ * {question, answer} (old/garbage data must never crash the panel or the bot). Blank entries
+ * are dropped so a half-saved row never surfaces.
+ */
+export function parseFaq(raw: Prisma.JsonValue | null | undefined): FaqEntry[] {
+  if (!Array.isArray(raw)) return []
+  const entries: FaqEntry[] = []
+  for (const item of raw) {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const question = typeof item.question === 'string' ? item.question.trim() : ''
+      const answer = typeof item.answer === 'string' ? item.answer.trim() : ''
+      if (question && answer) entries.push({ question, answer })
+    }
+  }
+  return entries
 }
