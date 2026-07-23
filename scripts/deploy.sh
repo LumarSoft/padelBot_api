@@ -12,7 +12,7 @@
 set -euo pipefail
 
 # --- config: ajustá el nombre del proceso pm2 si es distinto ---
-PM2_APP="${PM2_APP:-padelbot-api}"
+PM2_APP="${PM2_APP:-padelbot_api}"
 BRANCH="${BRANCH:-master}"
 
 cd "$(dirname "$0")/.."   # repo root (api/)
