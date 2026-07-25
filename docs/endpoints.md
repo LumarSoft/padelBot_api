@@ -58,7 +58,14 @@ whose claims include the user's `clubId` (the tenant). The token must be sent as
 
 ### GET /auth/me
 
-Returns the authenticated user resolved from the JWT.
+Authoritative session check: validates the caller's JWT **against the database** and returns
+fresh claims (name, club name, role, `mustChangePassword`). Clients call it on boot to decide
+whether a stored token is still a usable session.
+
+It re-reads the user instead of echoing the token's claims because a JWT keeps verifying after
+the reality it describes changed. A token whose user was deleted/deactivated — or that points at
+a club the user left — would otherwise look valid while every club-scoped endpoint answers `200`
+with empty data, leaving the client "logged in" on a session that shows nothing.
 
 **Auth required:** Yes (`Authorization: Bearer <token>`)
 
@@ -84,6 +91,13 @@ Returns the authenticated user resolved from the JWT.
 
 ```json
 { "statusCode": 401, "message": "Unauthorized" }
+```
+
+`401 Unauthorized` — the token verifies but no longer maps to an active user of that club
+(deleted, deactivated, or moved to another club). The client must re-login.
+
+```json
+{ "statusCode": 401, "message": "Tu sesión ya no es válida. Ingresá de nuevo." }
 ```
 
 ### POST /auth/me/complete-initial-password

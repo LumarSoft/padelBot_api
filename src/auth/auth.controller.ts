@@ -1,6 +1,5 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, UseGuards } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common'
 import { Throttle } from '@nestjs/throttler'
-import { Request } from 'express'
 import { AuthService, LoginResult } from './auth.service'
 import { LoginDto } from './dto/login.dto'
 import { CompleteInitialPasswordDto } from './dto/complete-initial-password.dto'
@@ -20,10 +19,15 @@ export class AuthController {
     return this.authService.login(dto)
   }
 
+  /**
+   * Session check clients call on boot. It re-reads the user from the DB instead of echoing the
+   * token's claims, so a token whose user/club no longer exists gets a `401` (and the client
+   * can force a re-login) rather than an "authenticated" session with no data behind it.
+   */
   @Get('me')
   @UseGuards(JwtAuthGuard)
-  me(@Req() request: Request): { user: AuthenticatedUser } {
-    return { user: request.user as AuthenticatedUser }
+  async me(@CurrentUser() user: AuthenticatedUser): Promise<{ user: AuthenticatedUser }> {
+    return { user: await this.authService.getSession(user) }
   }
 
   /**

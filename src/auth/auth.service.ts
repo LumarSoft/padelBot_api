@@ -23,6 +23,19 @@ interface TokenUser {
   mustChangePassword: boolean
 }
 
+/** Maps a user row to the claim shape returned to clients and encoded in the JWT. */
+function toAuthenticatedUser(user: TokenUser): AuthenticatedUser {
+  return {
+    id: String(user.id),
+    email: user.email,
+    name: user.name,
+    clubId: user.clubId,
+    clubName: user.club.name,
+    role: user.role.toLowerCase() as AuthRole,
+    mustChangePassword: user.mustChangePassword,
+  }
+}
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -74,6 +87,46 @@ export class AuthService {
   }
 
   /**
+   * Authoritative session check behind `GET /auth/me`, used by clients to validate a stored
+   * token on boot. A JWT is stateless, so its claims outlive the reality they describe: the
+   * user can be deactivated or deleted, or moved to another club, and the token keeps
+   * verifying until it expires. Trusting the claims there is what makes a client look logged
+   * in while every club-scoped endpoint answers `200` with empty data (they filter by the
+   * token's `clubId`) — a session that shows nothing and never gets a `401` to recover from.
+   *
+   * So re-read the user from the DB and reject the session when it no longer maps to an active
+   * user, or when the token's `clubId` no longer matches theirs (that token would keep scoping
+   * requests to the old tenant, so it has to be re-issued). Otherwise return FRESH claims, so
+   * a renamed user/club stops showing a stale name.
+   */
+  async getSession(tokenUser: AuthenticatedUser): Promise<AuthenticatedUser> {
+    const id = Number.parseInt(tokenUser.id, 10)
+    if (!Number.isInteger(id)) {
+      throw new UnauthorizedException('Tu sesión ya no es válida. Ingresá de nuevo.')
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        isActive: true,
+        clubId: true,
+        mustChangePassword: true,
+        club: { select: { name: true } },
+      },
+    })
+
+    if (!user || !user.isActive || user.clubId !== tokenUser.clubId) {
+      throw new UnauthorizedException('Tu sesión ya no es válida. Ingresá de nuevo.')
+    }
+
+    return toAuthenticatedUser(user)
+  }
+
+  /**
    * First-login password set for a user on a temporary password. Deliberately does NOT
    * require the current password — they just authenticated with it to reach this call, and
    * re-typing the throwaway temp password adds nothing. Guarded to `mustChangePassword`
@@ -112,15 +165,7 @@ export class AuthService {
 
   /** Builds the authenticated user + signed JWT from a user row. Single source of the claim shape. */
   private async issueToken(user: TokenUser): Promise<LoginResult> {
-    const authUser: AuthenticatedUser = {
-      id: String(user.id),
-      email: user.email,
-      name: user.name,
-      clubId: user.clubId,
-      clubName: user.club.name,
-      role: user.role.toLowerCase() as AuthRole,
-      mustChangePassword: user.mustChangePassword,
-    }
+    const authUser = toAuthenticatedUser(user)
 
     const payload: JwtPayload = {
       sub: authUser.id,
