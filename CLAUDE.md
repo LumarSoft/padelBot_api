@@ -47,7 +47,7 @@ npx prisma studio        # visual DB browser
 
 ## Product & domain
 
-This is **GTP**, a multi-tenant SaaS for padel clubs in Rosario, Argentina (see `../docs/BITACORA.md` for the product story). A WhatsApp bot attends players, books courts and reconciles the deposit ("seña") transfer automatically; owners manage everything from the Next.js panel (`../padelBot_admin`). The data model and tenant boundaries live in `prisma/schema.prisma` — **read it first**; it is the source of truth.
+This is **GTP**, a multi-tenant SaaS for padel clubs in Rosario, Argentina (see `../docs/BITACORA.md` for the product story). A WhatsApp bot attends players, books courts and reconciles the deposit ("seña") transfer automatically; owners manage everything from the Next.js panel (`../front`). The data model and tenant boundaries live in `prisma/schema.prisma` — **read it first**; it is the source of truth.
 
 **Multi-tenant of record:** `Club` is the tenant. Every relevant row (`Court`, `Slot`, `Booking`, `RecurringBooking`, `WhatsAppLine`, `ConversationSession`, `User`) carries a `clubId` and is isolated per club. **Never** write a query that can cross tenants — always scope by the caller's `clubId` from the JWT.
 

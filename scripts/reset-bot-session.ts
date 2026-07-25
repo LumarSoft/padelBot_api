@@ -10,7 +10,7 @@ import { PrismaClient } from '../generated/prisma/client'
  * of that lives on that row. The club, courts and real availability are always
  * read fresh from the DB on every turn, so they never go stale.
  *
- * Usage (run from padelBot_api/):
+ * Usage (run from api/):
  *   npm run bot:reset -- --phone 5491112345678
  *   npm run bot:reset -- --phone 5491112345678 --club club-demo
  *   npm run bot:reset -- --phone 5491112345678 --bookings   # also frees booked test slots

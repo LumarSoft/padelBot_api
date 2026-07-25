@@ -8,7 +8,7 @@ import { PrismaClient } from '../generated/prisma/client'
  * and seeds noShowCount from already-marked no-shows. Idempotent — re-running
  * only fills the gaps.
  *
- * Usage (run from padelBot_api/):
+ * Usage (run from api/):
  *   npm run players:backfill
  */
 

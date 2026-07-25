@@ -7,7 +7,7 @@ import { PrismaClient, SubscriptionStatus } from '../generated/prisma/client'
  * transfer arrives (or lapses). This is the whole "billing system" until we
  * automate charging with MercadoPago preapproval (>10 clubs).
  *
- * Usage (run from padelBot_api/):
+ * Usage (run from api/):
  *   npm run subscription -- --club club-demo                        # show current state
  *   npm run subscription -- --club club-demo --status ACTIVE --months 1
  *   npm run subscription -- --club club-demo --status PAST_DUE

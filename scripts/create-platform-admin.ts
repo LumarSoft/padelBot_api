@@ -8,7 +8,7 @@ import { PrismaClient } from '../generated/prisma/client'
  * no UI for this on purpose: a platform admin sees every tenant, so the only way to mint one
  * is shell access to the server.
  *
- * Usage (run from padelBot_api/):
+ * Usage (run from api/):
  *   npm run ops:admin -- --email mateo@lumarsoft.com --name Mateo --password '…'
  *   npm run ops:admin -- --email mateo@lumarsoft.com --password '…'   # rotate the password
  *   npm run ops:admin -- --email mateo@lumarsoft.com --deactivate
