@@ -132,6 +132,7 @@ model Club {
   scheduledPriceAdjustments ScheduledPriceAdjustment[]
   bookingPlayerPayments BookingPlayerPayment[]
   llmUsageDaily        LlmUsageDaily[]
+  auditLogs            AuditLog[]
 }
 
 enum Role {
@@ -265,6 +266,7 @@ model User {
   bookings         Booking[]
   recurringBookings RecurringBooking[]
   deviceTokens     DeviceToken[]
+  auditLogs        AuditLog[]
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
@@ -773,4 +775,77 @@ model RecurringBooking {
   @@index([clubId])
   @@index([courtId])
   @@index([clubId, courtId, dayOfWeek])
+}
+
+/// Quién ejecutó la acción auditada.
+enum AuditActorType {
+  /// Una persona autenticada (panel web o app de mostrador).
+  USER
+  /// El asistente de WhatsApp actuando por cuenta de un jugador.
+  BOT
+  /// Procesos automáticos: poller de MercadoPago, expiración de pendientes, recordatorios.
+  SYSTEM
+}
+
+/// Desde dónde entró la operación. Los clientes lo declaran con el header `x-client`.
+enum AuditSource {
+  PANEL
+  MOBILE
+  BOT
+  API
+  CRON
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  STATUS_CHANGE
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  PASSWORD_CHANGED
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_RESET_COMPLETED
+  PERMISSION_CHANGED
+}
+
+/// Registro de auditoría append-only: la aplicación escribe pero nunca actualiza ni borra.
+/// Sostiene la trazabilidad completa de la reserva (el elemento crítico del producto) y el
+/// historial de sesiones y de cambios de seguridad.
+model AuditLog {
+  id     String  @id @default(cuid())
+  clubId String?
+  club   Club?   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  userId Int?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  /// Etiqueta legible del actor, congelada al momento del hecho ("Lucas Quaroni (dueño)",
+  /// "Bot de WhatsApp", "Conciliación MercadoPago"). Sobrevive a la baja del usuario.
+  actorLabel String
+  actorType  AuditActorType
+  source     AuditSource
+  action     AuditAction
+
+  /// Entidad afectada: "Booking", "User", "PermissionGroup", "Session".
+  entity   String
+  entityId String
+  /// Descripción en español de lo ocurrido; es lo que se lee en el reporte.
+  summary  String @db.Text
+
+  /// Estado completo antes y después. Nulos en altas y en eventos de sesión.
+  before Json?
+  after  Json?
+  /// Cambios campo por campo: [{ field, from, to }]. Es el "cuáles eran los valores
+  /// originales" que exige la auditoría.
+  changes Json?
+
+  ip        String?
+  userAgent String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([clubId, createdAt])
+  @@index([entity, entityId])
+  @@index([userId])
+  @@index([action, createdAt])
 }

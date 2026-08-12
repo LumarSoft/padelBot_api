@@ -6,6 +6,7 @@ import { PrismaService } from '../prisma/prisma.service'
 import { hashPassword } from '../common/password'
 import { LoginDto } from './dto/login.dto'
 import { AuthenticatedUser, AuthRole, JwtPayload } from './types/jwt-payload'
+import { AuditService } from '../audit/audit.service'
 
 export interface LoginResult {
   token: string
@@ -41,6 +42,7 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
+    private readonly audit: AuditService,
   ) {}
 
   async login(dto: LoginDto): Promise<LoginResult> {
@@ -62,17 +64,40 @@ export class AuthService {
     // Same generic error for "no user" and "wrong password" to avoid leaking
     // which emails exist.
     if (!user) {
+      await this.audit.record({
+        action: 'LOGIN_FAILED',
+        entity: 'Session',
+        entityId: dto.email.toLowerCase(),
+        summary: `Intento de ingreso con un email inexistente (${dto.email})`,
+        actor: { type: 'SYSTEM', label: dto.email },
+      })
       throw new UnauthorizedException('Credenciales incorrectas')
     }
 
     const passwordMatches = await bcrypt.compare(dto.password, user.password)
     if (!passwordMatches) {
+      await this.audit.record({
+        action: 'LOGIN_FAILED',
+        entity: 'Session',
+        entityId: String(user.id),
+        summary: `Intento de ingreso con contraseña incorrecta (${user.email})`,
+        clubId: user.clubId,
+        actor: { type: 'SYSTEM', label: user.name },
+      })
       throw new UnauthorizedException('Credenciales incorrectas')
     }
 
     // Checked AFTER the password so a probe can't distinguish "wrong password"
     // from "deactivated account" without knowing the credentials.
     if (!user.isActive) {
+      await this.audit.record({
+        action: 'LOGIN_FAILED',
+        entity: 'Session',
+        entityId: String(user.id),
+        summary: `Intento de ingreso de un usuario desactivado (${user.email})`,
+        clubId: user.clubId,
+        actor: { type: 'SYSTEM', label: user.name },
+      })
       throw new UnauthorizedException('Tu usuario fue desactivado. Hablá con el dueño del club.')
     }
 
@@ -83,7 +108,37 @@ export class AuthService {
       data: { lastLoginAt: new Date() },
     })
 
+    await this.audit.record({
+      action: 'LOGIN',
+      entity: 'Session',
+      entityId: String(user.id),
+      summary: `${user.name} inició sesión`,
+      clubId: user.clubId,
+      actor: { type: 'USER', label: this.actorLabel(user.name, user.role), userId: user.id },
+    })
+
     return this.issueToken(user)
+  }
+
+  /**
+   * Records the end of the session. The JWT is stateless and is NOT invalidated server-side:
+   * the token stays valid until it expires, and the client is the one that discards it. What
+   * this endpoint gives us is the audit trail the assignment requires — when each session was
+   * closed and by whom. Revoking tokens on logout would need a denylist or short-lived tokens
+   * with refresh, and that is a deliberate non-goal for now.
+   */
+  async logout(user: AuthenticatedUser): Promise<void> {
+    await this.audit.record({
+      action: 'LOGOUT',
+      entity: 'Session',
+      entityId: user.id,
+      summary: `${user.name} cerró sesión`,
+      clubId: user.clubId,
+    })
+  }
+
+  private actorLabel(name: string, role: Role): string {
+    return `${name} (${role === 'OWNER' ? 'dueño' : 'personal'})`
   }
 
   /**
@@ -158,6 +213,15 @@ export class AuthService {
     await this.prisma.user.update({
       where: { id: user.id },
       data: { password: await hashPassword(newPassword), mustChangePassword: false },
+    })
+
+    await this.audit.record({
+      action: 'PASSWORD_CHANGED',
+      entity: 'User',
+      entityId: String(user.id),
+      summary: `${user.name} estableció su contraseña definitiva en el primer ingreso`,
+      clubId: user.clubId,
+      actor: { type: 'USER', label: this.actorLabel(user.name, user.role), userId: user.id },
     })
 
     return this.issueToken({ ...user, mustChangePassword: false })

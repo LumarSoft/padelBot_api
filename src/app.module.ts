@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common'
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common'
 import { APP_GUARD } from '@nestjs/core'
 import { ScheduleModule } from '@nestjs/schedule'
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler'
@@ -30,6 +30,8 @@ import { NotificationsModule } from './notifications/notifications.module'
 import { ProductsModule } from './products/products.module'
 import { BookingRemindersModule } from './booking-reminders/booking-reminders.module'
 import { OpsModule } from './ops/ops.module'
+import { AuditModule } from './audit/audit.module'
+import { AuditContextMiddleware } from './audit/audit-context.middleware'
 
 @Module({
   imports: [
@@ -39,6 +41,7 @@ import { OpsModule } from './ops/ops.module'
     // real client IP is used instead of the proxy's.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: Number(process.env.THROTTLE_LIMIT) || 120 }]),
     PrismaModule,
+    AuditModule,
     CryptoModule,
     StorageModule,
     PricingModule,
@@ -68,4 +71,12 @@ import { OpsModule } from './ops/ops.module'
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  /**
+   * Opens the audit context for every request. It must be middleware and not an interceptor:
+   * the whole downstream chain has to run inside the AsyncLocalStorage scope.
+   */
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(AuditContextMiddleware).forRoutes('*')
+  }
+}

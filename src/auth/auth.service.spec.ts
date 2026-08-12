@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt'
 import { AuthService } from './auth.service'
 import { PrismaService } from '../prisma/prisma.service'
 import { AuthenticatedUser } from './types/jwt-payload'
+import { AuditService } from '../audit/audit.service'
 
 /**
  * `getSession` is what keeps a stale-but-signed token from producing an "authenticated"
@@ -32,7 +33,9 @@ describe('AuthService.getSession', () => {
 
   function createService(findUnique: jest.Mock): AuthService {
     const prisma = { user: { findUnique } } as unknown as PrismaService
-    return new AuthService(prisma, {} as JwtService)
+    // The audit log is a side effect of authenticating, not part of what these tests assert.
+    const audit = { record: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService
+    return new AuthService(prisma, {} as JwtService, audit)
   }
 
   it('returns fresh claims from the database, not the token ones', async () => {

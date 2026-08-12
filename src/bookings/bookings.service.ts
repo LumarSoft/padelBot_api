@@ -25,6 +25,7 @@ import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { PlayersService } from '../players/players.service'
 import { SlotPricingService } from '../pricing/slot-pricing.service'
+import { AuditService } from '../audit/audit.service'
 
 /** Booking a schedule band that may not have a materialized Slot row yet. */
 export interface BookBandInput {
@@ -36,6 +37,29 @@ export interface BookBandInput {
   playerDni?: string
   notes?: string
 }
+
+/**
+ * The booking fields the audit diffs. Everything that moves money, moves the turn or changes
+ * who is playing; timestamps like `updatedAt` are noise in a "what changed" report.
+ */
+const AUDITED_BOOKING_FIELDS = [
+  'status',
+  'slotId',
+  'startsAt',
+  'courtName',
+  'playerName',
+  'playerPhone',
+  'playerDni',
+  'depositCents',
+  'transferAmountCents',
+  'localPaymentCents',
+  'creditAppliedCents',
+  'depositOutcome',
+  'noShowAt',
+  'settledAt',
+  'notes',
+  'deletedAt',
+]
 
 const bookingSelect = {
   id: true,
@@ -164,6 +188,7 @@ export class BookingsService {
     private readonly notifications: NotificationsService,
     private readonly players: PlayersService,
     private readonly slotPricing: SlotPricingService,
+    private readonly audit: AuditService,
   ) {}
 
   async findAll(clubId: string, query: QueryBookingsDto) {
@@ -228,6 +253,15 @@ export class BookingsService {
     await this.prisma.booking.update({
       where: { id },
       data: { deletedAt: new Date() },
+    })
+
+    await this.audit.record({
+      action: 'DELETE',
+      entity: 'Booking',
+      entityId: id,
+      clubId,
+      summary: `Se eliminó de las listas la reserva cancelada de ${booking.playerName}`,
+      before: this.auditView(booking as unknown as Record<string, unknown>),
     })
   }
 
@@ -404,7 +438,7 @@ export class BookingsService {
     // at (the club may have raised prices since). The waitlist offer below goes out with it.
     const priceCents = (await this.slotPricing.repriceSlot(booking.slotId, clubId)) ?? updated.slot.priceCents
 
-    this.emitBookingChange('cancelled', updated)
+    this.emitBookingChange('cancelled', updated, this.auditView(booking as unknown as Record<string, unknown>))
     this.events.emitSlotFreed({
       type: 'slot.freed',
       clubId,
@@ -490,7 +524,7 @@ export class BookingsService {
     // The hour the player gave back goes on sale again — at today's price.
     await this.slotPricing.repriceSlot(booking.slotId, clubId)
 
-    this.emitBookingChange('rescheduled', updated)
+    this.emitBookingChange('rescheduled', updated, this.auditView(booking as unknown as Record<string, unknown>))
     return updated
   }
 
@@ -1009,6 +1043,20 @@ export class BookingsService {
         clubId: booking.clubId,
         summary: `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`,
         source: paymentRef ? 'AUTO' : 'MANUAL',
+      })
+
+      // The money path is the one the audit exists for: who confirmed, how, and against what.
+      await this.audit.record({
+        action: 'STATUS_CHANGE',
+        entity: 'Booking',
+        entityId: bookingId,
+        clubId: booking.clubId,
+        summary: paymentRef
+          ? `Se confirmó la seña de ${booking.playerName} por conciliación automática`
+          : `Se confirmó la seña de ${booking.playerName} de forma manual`,
+        before: { status: 'PENDING_PAYMENT' },
+        after: { status: 'CONFIRMED', mpPaymentId: paymentRef ?? null, payerCuit: payer?.cuit ?? null },
+        ...(paymentRef ? { actor: { type: 'SYSTEM' as const, label: 'Conciliación MercadoPago' } } : {}),
       })
     }
 
@@ -1746,10 +1794,11 @@ export class BookingsService {
    * booking, pushes a notification to the staff app so someone checks it even with the app
    * closed. Best-effort: neither ever blocks or fails the booking itself.
    */
-  private emitBookingChange(action: BookingAction, booking: BookingForEvent): void {
+  private emitBookingChange(action: BookingAction, booking: BookingForEvent, previous?: unknown): void {
     const { startsAt, endsAt, court } = booking.slot
     const summary = `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`
     this.events.emit({ type: 'booking.changed', clubId: booking.clubId, action, summary })
+    this.recordBookingAudit(action, booking, previous)
 
     if (action === 'created') {
       void this.notifications.notifyClub(booking.clubId, {
@@ -1757,6 +1806,54 @@ export class BookingsService {
         body: summary,
         data: { bookingId: booking.id },
       })
+    }
+  }
+
+  /**
+   * Single audit hook for the booking lifecycle. It hangs off emitBookingChange so every path
+   * that already announces a change — panel, mostrador app and bot alike — is traced without
+   * each of them having to remember to log. `previous` is the state read before the write, so
+   * the entry keeps the original values next to the new ones.
+   */
+  private recordBookingAudit(action: BookingAction, booking: BookingForEvent, previous?: unknown): void {
+    const record = booking as unknown as Record<string, unknown>
+    const summaries: Record<BookingAction, string> = {
+      created: `Se creó la reserva de ${booking.playerName}`,
+      cancelled: `Se canceló la reserva de ${booking.playerName}`,
+      rescheduled: `Se reprogramó la reserva de ${booking.playerName}`,
+    }
+    void this.audit.record({
+      action: action === 'created' ? 'CREATE' : 'STATUS_CHANGE',
+      entity: 'Booking',
+      entityId: booking.id,
+      clubId: booking.clubId,
+      summary: summaries[action],
+      before: (previous as Record<string, unknown> | undefined) ?? null,
+      after: this.auditView(record),
+      fields: AUDITED_BOOKING_FIELDS,
+    })
+  }
+
+  /** The booking fields worth auditing, flattened so slot changes are visible in the diff. */
+  private auditView(booking: Record<string, unknown>): Record<string, unknown> {
+    const slot = booking.slot as { id?: string; startsAt?: Date; court?: { name?: string } } | undefined
+    return {
+      status: booking.status,
+      slotId: booking.slotId ?? slot?.id,
+      startsAt: slot?.startsAt,
+      courtName: slot?.court?.name,
+      playerName: booking.playerName,
+      playerPhone: booking.playerPhone,
+      playerDni: booking.playerDni,
+      depositCents: booking.depositCents,
+      transferAmountCents: booking.transferAmountCents,
+      localPaymentCents: booking.localPaymentCents,
+      creditAppliedCents: booking.creditAppliedCents,
+      depositOutcome: booking.depositOutcome,
+      noShowAt: booking.noShowAt,
+      settledAt: booking.settledAt,
+      notes: booking.notes,
+      deletedAt: booking.deletedAt,
     }
   }
 }

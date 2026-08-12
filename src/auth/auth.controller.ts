@@ -31,6 +31,17 @@ export class AuthController {
   }
 
   /**
+   * Ends the session for audit purposes. The JWT is stateless and is not revoked here — see
+   * AuthService.logout. The client is responsible for discarding the token.
+   */
+  @Post('logout')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  logout(@CurrentUser() user: AuthenticatedUser): Promise<void> {
+    return this.authService.logout(user)
+  }
+
+  /**
    * First-login password set for a user on a temporary password. Returns a fresh token so the
    * panel can keep the session (with the `mustChangePassword` claim cleared) instead of
    * re-logging in.
