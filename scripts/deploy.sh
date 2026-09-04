@@ -42,7 +42,7 @@ echo "==> [5/6] build"
 pnpm build
 
 echo "==> [6/6] zero-downtime cluster reload pm2 ($PM2_APP)"
-PM2_APP="$PM2_APP" pm2 startOrReload ecosystem.config.cjs --update-env
+PM2_APP="$PM2_APP" pm2 startOrReload scripts/ecosystem.config.cjs --update-env
 pm2 save
 
 echo "✅ Deploy OK — $(git rev-parse --short HEAD)"
