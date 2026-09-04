@@ -1,4 +1,5 @@
-import { Controller, Get, HttpCode, HttpStatus } from '@nestjs/common'
+import { Controller, Get, HttpStatus, Res } from '@nestjs/common'
+import type { Response } from 'express'
 import { AppService, HealthStatus } from './app.service'
 
 @Controller()
@@ -10,11 +11,11 @@ export class AppController {
     return this.appService.getHello()
   }
 
-  /** Public health check for uptime monitors / load balancers. Always returns 200; the
-   * body reports whether the DB is reachable so a monitor can alert on `db: "down"`. */
+  /** Public readiness check for uptime monitors / load balancers. */
   @Get('health')
-  @HttpCode(HttpStatus.OK)
-  getHealth(): Promise<HealthStatus> {
-    return this.appService.getHealth()
+  async getHealth(@Res({ passthrough: true }) response: Response): Promise<HealthStatus> {
+    const health = await this.appService.getHealth()
+    response.status(health.status === 'ok' ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE)
+    return health
   }
 }

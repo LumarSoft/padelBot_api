@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common'
+import { ForbiddenException, Injectable, Logger, UnauthorizedException } from '@nestjs/common'
 import { JwtService } from '@nestjs/jwt'
 import * as bcrypt from 'bcrypt'
 import { Role } from 'generated/prisma/client'
@@ -38,6 +38,8 @@ function toAuthenticatedUser(user: TokenUser): AuthenticatedUser {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name)
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
@@ -76,12 +78,14 @@ export class AuthService {
       throw new UnauthorizedException('Tu usuario fue desactivado. Hablá con el dueño del club.')
     }
 
-    // Retention signal for the ops console — a club that stops opening the panel is
-    // churning. Not awaited into the response path beyond the write itself.
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { lastLoginAt: new Date() },
-    })
+    // Retention telemetry must never turn valid credentials into a failed login. Keep it
+    // outside the response path; a later successful login can refresh the timestamp.
+    void this.prisma.user
+      .update({
+        where: { id: user.id },
+        data: { lastLoginAt: new Date() },
+      })
+      .catch(() => this.logger.warn('Could not update lastLoginAt after a successful login'))
 
     return this.issueToken(user)
   }

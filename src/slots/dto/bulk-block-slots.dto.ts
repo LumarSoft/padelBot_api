@@ -1,14 +1,4 @@
-import {
-  ArrayNotEmpty,
-  IsArray,
-  IsISO8601,
-  IsInt,
-  IsOptional,
-  IsString,
-  Matches,
-  Max,
-  Min,
-} from 'class-validator'
+import { ArrayNotEmpty, IsArray, IsISO8601, IsInt, IsOptional, IsString, Matches, Max, Min } from 'class-validator'
 
 /**
  * "HH:MM" wall-clock band start. NOT a fixed 90-minute grid: `Court.slotDurationMinutes` is

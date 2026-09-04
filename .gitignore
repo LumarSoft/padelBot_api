@@ -58,5 +58,4 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 /generated/prisma
 
-# PM2 — se crea manualmente en el servidor, no se commitea
-ecosystem.config.cjs
+# The production PM2 cluster definition is versioned so deploys are reproducible.

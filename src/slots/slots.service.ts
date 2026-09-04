@@ -130,10 +130,7 @@ export class SlotsService {
     }
     const priceByCourt = new Map(courts.map(c => [c.id, c.priceCents]))
 
-    const dates = this.filterByWeekday(
-      this.enumerateDates(dto.fromDate, dto.toDate),
-      dto.daysOfWeek,
-    )
+    const dates = this.filterByWeekday(this.enumerateDates(dto.fromDate, dto.toDate), dto.daysOfWeek)
     if (dates.length === 0) return { blocked: 0, created: 0, skipped: 0 }
 
     const targets: { courtId: string; startsAt: Date; endsAt: Date }[] = []

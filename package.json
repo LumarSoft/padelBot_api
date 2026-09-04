@@ -24,6 +24,7 @@
     "subscription": "ts-node scripts/set-subscription.ts",
     "ops:admin": "ts-node scripts/create-platform-admin.ts",
     "players:backfill": "ts-node scripts/backfill-players.ts",
+    "review:prepare": "ts-node scripts/prepare-app-review-demo.ts",
     "prepare": "husky"
   },
   "dependencies": {

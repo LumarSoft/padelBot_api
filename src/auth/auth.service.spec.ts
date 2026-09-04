@@ -72,3 +72,33 @@ describe('AuthService.getSession', () => {
     expect(findUnique).not.toHaveBeenCalled()
   })
 })
+
+describe('AuthService.login', () => {
+  it('issues a token even if updating lastLoginAt fails', async () => {
+    const password = await import('bcrypt').then(({ hash }) => hash('padel1234', 4))
+    const user = {
+      id: 7,
+      email: 'staff@clubdemo.com',
+      password,
+      name: 'Staff Demo',
+      role: 'STAFF',
+      isActive: true,
+      clubId: 'club-1',
+      mustChangePassword: false,
+      club: { name: 'Club Demo' },
+    }
+    const prisma = {
+      user: {
+        findUnique: jest.fn().mockResolvedValue(user),
+        update: jest.fn().mockRejectedValue(new Error('database telemetry write failed')),
+      },
+    } as unknown as PrismaService
+    const jwt = { signAsync: jest.fn().mockResolvedValue('test-jwt') } as unknown as JwtService
+    const service = new AuthService(prisma, jwt)
+
+    await expect(service.login({ email: user.email, password: 'padel1234' })).resolves.toMatchObject({
+      token: 'test-jwt',
+      user: { email: user.email, clubId: user.clubId },
+    })
+  })
+})
