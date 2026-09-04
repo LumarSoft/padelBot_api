@@ -1,9 +1,11 @@
 /**
- * Whether this instance should run @Cron/@Interval jobs. Scheduled jobs run in EVERY
- * instance of the API by default, so when scaling horizontally set RUN_SCHEDULER=false
- * on all but one instance to avoid double polling / double notifications.
- * Default true (single-instance deploys need no config).
+ * Whether this instance should run @Cron/@Interval jobs. PM2 assigns NODE_APP_INSTANCE
+ * (`0`, `1`, …) to cluster workers, so only worker 0 may run scheduled work. This keeps
+ * HTTP redundancy without duplicate polling, expirations or notifications. Single-process
+ * deployments have no instance id and remain enabled. RUN_SCHEDULER=false disables all jobs.
  */
 export function schedulerEnabled(): boolean {
-  return (process.env.RUN_SCHEDULER ?? 'true').toLowerCase() !== 'false'
+  if ((process.env.RUN_SCHEDULER ?? 'true').toLowerCase() === 'false') return false
+  const instanceId = process.env.NODE_APP_INSTANCE
+  return instanceId === undefined || instanceId === '0'
 }
