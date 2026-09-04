@@ -59,4 +59,4 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 /generated/prisma
 
 # PM2 — the legacy server-local file stays ignored; the versioned config lives in scripts/.
-ecosystem.config.cjs
+/ecosystem.config.cjs
