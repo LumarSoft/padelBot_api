@@ -14,6 +14,7 @@ set -euo pipefail
 # --- config: ajustá el nombre del proceso pm2 si es distinto ---
 PM2_APP="${PM2_APP:-padelbot_api}"
 BRANCH="${BRANCH:-master}"
+PM2_NODE_INTERPRETER="${PM2_NODE_INTERPRETER:-$(command -v node)}"
 
 cd "$(dirname "$0")/.."   # repo root (api/)
 
@@ -41,15 +42,30 @@ pnpm exec prisma migrate deploy
 echo "==> [5/6] build"
 pnpm build
 
-echo "==> [6/6] zero-downtime cluster reload pm2 ($PM2_APP)"
+echo "==> [6/6] restart pm2 with an explicit Node runtime ($PM2_APP)"
 if [[ ! -f dist/src/main.js ]]; then
   echo "ERROR: expected compiled entrypoint dist/src/main.js was not generated" >&2
   exit 1
 fi
 
-# PM2 can reload an existing cluster without downtime, but startOrReload does not convert a
-# legacy fork process into cluster mode. Recreate that process once; subsequent deploys use
-# zero-downtime reloads through the ecosystem file.
+if [[ ! -x "$PM2_NODE_INTERPRETER" ]]; then
+  echo "ERROR: Node interpreter is not executable: $PM2_NODE_INTERPRETER" >&2
+  exit 1
+fi
+
+node_version="$("$PM2_NODE_INTERPRETER" -p 'process.versions.node')"
+node_major="${node_version%%.*}"
+node_minor_patch="${node_version#*.}"
+node_minor="${node_minor_patch%%.*}"
+if (( node_major < 22 || (node_major == 22 && node_minor < 12) )); then
+  echo "ERROR: Node >= 22.12 is required; found $node_version at $PM2_NODE_INTERPRETER" >&2
+  exit 1
+fi
+echo "==> using Node $node_version ($PM2_NODE_INTERPRETER)"
+
+# PM2 cluster workers inherit the Node version of the shared PM2 daemon. That daemon still
+# runs under Node 18 on this VPS and also owns unrelated apps, so keep this API in fork mode
+# with an explicit supported interpreter until a coordinated PM2 daemon upgrade is performed.
 existing_mode="$(
   PM2_TARGET="$PM2_APP" pm2 jlist | PM2_TARGET="$PM2_APP" node -e '
     let input = ""
@@ -64,12 +80,14 @@ existing_mode="$(
   '
 )"
 
-if [[ -n "$existing_mode" && "$existing_mode" != "cluster_mode" ]]; then
-  echo "==> recreating legacy $existing_mode process as a cluster (one-time brief interruption)"
+if [[ -n "$existing_mode" && "$existing_mode" != "fork_mode" ]]; then
+  echo "==> recreating $existing_mode process in fork mode with Node $node_version"
   pm2 delete "$PM2_APP"
-  PM2_APP="$PM2_APP" pm2 start scripts/ecosystem.config.cjs --update-env
+  PM2_APP="$PM2_APP" PM2_NODE_INTERPRETER="$PM2_NODE_INTERPRETER" \
+    pm2 start scripts/ecosystem.config.cjs --update-env
 else
-  PM2_APP="$PM2_APP" pm2 startOrReload scripts/ecosystem.config.cjs --update-env
+  PM2_APP="$PM2_APP" PM2_NODE_INTERPRETER="$PM2_NODE_INTERPRETER" \
+    pm2 startOrReload scripts/ecosystem.config.cjs --update-env
 fi
 pm2 save
 
