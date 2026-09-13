@@ -5,7 +5,7 @@ module.exports = {
     {
       name: process.env.PM2_APP || 'padelbot_api',
       cwd: path.resolve(__dirname, '..'),
-      script: 'dist/main.js',
+      script: 'dist/src/main.js',
       instances: 2,
       exec_mode: 'cluster',
       autorestart: true,

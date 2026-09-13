@@ -42,7 +42,35 @@ echo "==> [5/6] build"
 pnpm build
 
 echo "==> [6/6] zero-downtime cluster reload pm2 ($PM2_APP)"
-PM2_APP="$PM2_APP" pm2 startOrReload scripts/ecosystem.config.cjs --update-env
+if [[ ! -f dist/src/main.js ]]; then
+  echo "ERROR: expected compiled entrypoint dist/src/main.js was not generated" >&2
+  exit 1
+fi
+
+# PM2 can reload an existing cluster without downtime, but startOrReload does not convert a
+# legacy fork process into cluster mode. Recreate that process once; subsequent deploys use
+# zero-downtime reloads through the ecosystem file.
+existing_mode="$(
+  PM2_TARGET="$PM2_APP" pm2 jlist | PM2_TARGET="$PM2_APP" node -e '
+    let input = ""
+    process.stdin.on("data", chunk => { input += chunk })
+    process.stdin.on("end", () => {
+      const jsonStart = input.indexOf("[")
+      if (jsonStart === -1) process.exit(0)
+      const apps = JSON.parse(input.slice(jsonStart))
+      const app = apps.find(candidate => candidate.name === process.env.PM2_TARGET)
+      process.stdout.write(app?.pm2_env?.exec_mode ?? "")
+    })
+  '
+)"
+
+if [[ -n "$existing_mode" && "$existing_mode" != "cluster_mode" ]]; then
+  echo "==> recreating legacy $existing_mode process as a cluster (one-time brief interruption)"
+  pm2 delete "$PM2_APP"
+  PM2_APP="$PM2_APP" pm2 start scripts/ecosystem.config.cjs --update-env
+else
+  PM2_APP="$PM2_APP" pm2 startOrReload scripts/ecosystem.config.cjs --update-env
+fi
 pm2 save
 
 echo "✅ Deploy OK — $(git rev-parse --short HEAD)"
