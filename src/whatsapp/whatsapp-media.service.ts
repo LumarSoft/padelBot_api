@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common'
+import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
 
 export interface DownloadedMedia {
   bytes: Buffer
@@ -15,18 +16,26 @@ export interface DownloadedMedia {
 export class WhatsAppMediaService {
   private readonly logger = new Logger(WhatsAppMediaService.name)
 
+  constructor(private readonly lines: WhatsAppLinesService) {}
+
   private get apiVersion(): string {
     return process.env.WHATSAPP_API_VERSION ?? 'v21.0'
   }
-  private get token(): string {
+  private get globalToken(): string {
     return process.env.WHATSAPP_TOKEN ?? process.env.META_ACCESS_TOKEN ?? ''
   }
 
+  /** The line's own Embedded Signup token when it has one, else the global token. */
+  private async tokenFor(phoneNumberId?: string): Promise<string> {
+    const lineToken = phoneNumberId ? await this.lines.findAccessToken(phoneNumberId) : null
+    return lineToken ?? this.globalToken
+  }
+
   /** Resolves a Meta media id to its (short-lived) download URL and mime type. */
-  async getMediaUrl(mediaId: string): Promise<{ url: string; mimeType: string } | null> {
+  async getMediaUrl(mediaId: string, token: string): Promise<{ url: string; mimeType: string } | null> {
     try {
       const res = await fetch(`https://graph.facebook.com/${this.apiVersion}/${mediaId}`, {
-        headers: { Authorization: `Bearer ${this.token}` },
+        headers: { Authorization: `Bearer ${token}` },
       })
       if (!res.ok) {
         this.logger.error(`Graph media lookup failed (${res.status}) for media ${mediaId}`)
@@ -42,11 +51,12 @@ export class WhatsAppMediaService {
   }
 
   /** Downloads media bytes from a resolved Graph media URL (requires the token). */
-  async download(mediaId: string): Promise<DownloadedMedia | null> {
-    const resolved = await this.getMediaUrl(mediaId)
+  async download(mediaId: string, phoneNumberId?: string): Promise<DownloadedMedia | null> {
+    const token = await this.tokenFor(phoneNumberId)
+    const resolved = await this.getMediaUrl(mediaId, token)
     if (!resolved) return null
     try {
-      const res = await fetch(resolved.url, { headers: { Authorization: `Bearer ${this.token}` } })
+      const res = await fetch(resolved.url, { headers: { Authorization: `Bearer ${token}` } })
       if (!res.ok) {
         this.logger.error(`Graph media download failed (${res.status}) for media ${mediaId}`)
         return null

@@ -104,7 +104,7 @@ export class ConversationsService {
     await this.prisma.conversationSession.update({
       where: { id: sessionId },
       // Acting on the conversation clears the "waiting for advisor" flag.
-      data: { mode, needsAdvisor: false },
+      data: { mode, needsAdvisor: false, humanUntil: null },
     })
 
     return { mode }

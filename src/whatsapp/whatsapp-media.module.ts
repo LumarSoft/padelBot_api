@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common'
+import { WhatsAppLinesModule } from '../whatsapp-lines/whatsapp-lines.module'
 import { WhatsAppMediaService } from './whatsapp-media.service'
 
 /**
@@ -6,6 +7,7 @@ import { WhatsAppMediaService } from './whatsapp-media.service'
  * can import it without an import cycle (WhatsAppModule → BotModule already exists).
  */
 @Module({
+  imports: [WhatsAppLinesModule],
   providers: [WhatsAppMediaService],
   exports: [WhatsAppMediaService],
 })

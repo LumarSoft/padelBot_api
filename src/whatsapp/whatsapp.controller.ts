@@ -81,11 +81,21 @@ export class WhatsAppController {
 
     for (const entry of payload?.entry ?? []) {
       for (const change of entry?.changes ?? []) {
-        if (change?.field !== 'messages') continue
-
         const value = change?.value
         const phoneNumberId: string | undefined = value?.metadata?.phone_number_id
         if (!phoneNumberId) continue
+
+        if (change?.field === 'smb_message_echoes') {
+          await this.processEchoes(phoneNumberId, value?.message_echoes ?? [])
+          continue
+        }
+        if (change?.field === 'history' || change?.field === 'smb_app_state_sync') {
+          // Coexistence onboarding sync (past chats / contacts). The bot doesn't need them to
+          // work; we only log that the sync arrived so a failed sync is visible.
+          this.logger.log(`Coexistence ${change.field} webhook received for line ${phoneNumberId}`)
+          continue
+        }
+        if (change?.field !== 'messages') continue
 
         for (const message of value?.messages ?? []) {
           const waId: string | undefined = message?.from
@@ -111,11 +121,36 @@ export class WhatsAppController {
           } else if (message?.type === 'image' || message?.type === 'document') {
             // Likely a transfer receipt. In RECEIPT mode the bot downloads and stores it for
             // the admin to verify; in AUTO mode it just acknowledges (the poller confirms).
-            const media = extractMedia(message)
+            const extracted = extractMedia(message)
+            const media = extracted ? { ...extracted, phoneNumberId } : null
             await this.inbound.enqueue(waId, () => this.processAttachment(phoneNumberId, waId, media))
           }
         }
       }
+    }
+  }
+
+  /**
+   * Coexistence: messages the club sent by hand from its WhatsApp Business app. Logged in the
+   * chat as ADMIN and the bot steps aside on that chat for a while (BotService.recordOwnerReply).
+   */
+  private async processEchoes(phoneNumberId: string, echoes: any[]): Promise<void> {
+    for (const echo of echoes) {
+      const waId = toWaId(echo?.to)
+      const messageId: string | undefined = echo?.id
+      if (!waId || !messageId) continue
+      if (!(await this.whatsappService.claimMessage(messageId))) continue
+
+      const text: string =
+        echo?.type === 'text' ? (echo?.text?.body ?? '') : `[${echo?.type ?? 'mensaje'} enviado desde el celular]`
+      await this.inbound.enqueue(waId, async () => {
+        try {
+          const clubId = await this.resolveClubId(phoneNumberId)
+          if (clubId) await this.botService.recordOwnerReply(waId, clubId, text)
+        } catch (err) {
+          this.logger.error(`Failed to record club reply to ${waId}`, err)
+        }
+      })
     }
   }
 
@@ -174,6 +209,17 @@ export class WhatsAppController {
       return null
     }
   }
+}
+
+/**
+ * Echo recipients are phone numbers, while inbound senders (and our sessions) use wa_id. For
+ * Argentine mobiles those differ by the "9" (54 341… vs 549 341…), so normalize to wa_id.
+ */
+export function toWaId(phone: unknown): string | undefined {
+  if (typeof phone !== 'string') return undefined
+  const digits = phone.replace(/\D/g, '')
+  if (!digits) return undefined
+  return digits.startsWith('54') && !digits.startsWith('549') && digits.length === 12 ? '549' + digits.slice(2) : digits
 }
 
 /** Pulls the selected option id out of an inbound interactive (button or list) reply. */

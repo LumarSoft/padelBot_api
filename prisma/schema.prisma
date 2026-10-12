@@ -682,6 +682,14 @@ model WhatsAppLine {
   clubId        String
   club          Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   isActive      Boolean  @default(true)
+  /// WhatsApp Business Account that owns the number (set when connected via Embedded Signup).
+  wabaId        String?
+  /// True when the number also stays on the club's WhatsApp Business app ("coexistence"):
+  /// the owner keeps answering from the phone, and those replies arrive as message echoes.
+  coexistence   Boolean  @default(false)
+  /// Business-integration token Meta issued for this number's WABA in Embedded Signup,
+  /// encrypted at rest (CryptoService). Null → messages go out with the global WHATSAPP_TOKEN.
+  accessToken   String?  @db.Text
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -704,6 +712,10 @@ model ConversationSession {
   expiresAt DateTime
   /// "AI" = bot handles the conversation; "HUMAN" = admin has taken over.
   mode      String   @default("AI")
+  /// When set, HUMAN mode is temporary: once this passes the bot takes the chat back. Used
+  /// when the owner answers from the WhatsApp Business app (coexistence echo). Null with
+  /// mode=HUMAN means an indefinite takeover from the panel.
+  humanUntil DateTime?
   /// True when the player asked to talk to a human advisor and no staff has replied yet.
   /// Surfaced/notified in the panel; cleared when an admin sends a message or switches mode.
   needsAdvisor Boolean @default(false)

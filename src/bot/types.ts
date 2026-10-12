@@ -161,4 +161,6 @@ export interface InboundMedia {
   /** Meta media id, resolved to bytes via WhatsAppMediaService when needed. */
   mediaId: string
   mimeType: string | null
+  /** The club number it arrived on — picks that line's Graph token for the download. */
+  phoneNumberId?: string
 }
