@@ -14,7 +14,7 @@ import {
   weekdayOfKey,
 } from '../availability/lib/datetime'
 import { LlmService } from '../llm/llm.service'
-import { ConversationSessionService, keepName } from './conversation-session.service'
+import { ConversationSessionService, SessionSnapshot, keepName } from './conversation-session.service'
 import { matchByTime, matchCourt, matchSlot } from './lib/match'
 import { parseDateExpression } from './lib/date-parse'
 import { stepPrompt } from './lib/step-prompt'
@@ -161,10 +161,7 @@ export class BotService {
     // speak to the player MUST sit below this guard: an admin who took over the chat is
     // mid-conversation with the player, and a bot message on top of theirs is a mess only
     // the club can clean up.
-    if (session.mode === 'HUMAN') {
-      this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
-      return null
-    }
+    if (await this.isHumanHandled(session, waId)) return null
 
     // Explicit "quiero hablar con una persona" → hand the chat to staff and go quiet, so the
     // player never gets stuck talking to a bot they've asked to get past.
@@ -240,10 +237,7 @@ export class BotService {
     this.logger.log(`📥 IN  ${waId}: [imagen/comprobante ${media?.mimeType ?? 'desconocido'}]`)
     await this.sessionService.saveMessage(session.id, 'USER', '[Imagen / comprobante recibido]')
 
-    if (session.mode === 'HUMAN') {
-      this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
-      return null
-    }
+    if (await this.isHumanHandled(session, waId)) return null
 
     const mode = await this.paymentVerificationMode(clubId)
     const reply =
@@ -272,7 +266,7 @@ export class BotService {
     if (!pending) return RECEIPT_ATTACHMENT_NO_PENDING
     if (!media) return RECEIPT_ATTACHMENT_FAILED
 
-    const downloaded = await this.media.download(media.mediaId)
+    const downloaded = await this.media.download(media.mediaId, media.phoneNumberId)
     if (!downloaded) return RECEIPT_ATTACHMENT_FAILED
 
     const mimeType = downloaded.mimeType || media.mimeType || 'image/jpeg'
@@ -713,6 +707,36 @@ export class BotService {
 
     this.logger.log(`🔄 ${waId}: movió la reserva ${ctx.rescheduleBookingId}`)
     return { reply: rescheduleDone(ctx, moved.priceDiffCents), state: BotState.MENU, ctx: keepName(ctx) }
+  }
+
+  /**
+   * The club answered this chat by hand from its WhatsApp Business app (a coexistence echo).
+   * The owner is mid-conversation, so the bot steps aside for OWNER_REPLY_PAUSE_HOURS and then
+   * takes the chat back on its own — unless staff took it over indefinitely from the panel.
+   */
+  async recordOwnerReply(waId: string, clubId: string, text: string): Promise<void> {
+    const session = await this.sessionService.getOrCreate(waId, clubId)
+    await this.sessionService.saveMessage(session.id, 'ADMIN', text)
+    if (session.mode === 'HUMAN' && !session.humanUntil) return
+
+    const until = new Date(Date.now() + ownerReplyPauseHours() * 60 * 60 * 1000)
+    await this.sessionService.setMode(session.id, 'HUMAN', until)
+    this.logger.log(`📱 ${waId}: el club respondió desde el celular, bot en pausa hasta ${until.toISOString()}`)
+  }
+
+  /**
+   * HUMAN guard shared by every inbound path. A temporary takeover (owner replied from the
+   * phone) that already ran out flips back to AI here, so the bot answers this message.
+   */
+  private async isHumanHandled(session: SessionSnapshot, waId: string): Promise<boolean> {
+    if (session.mode !== 'HUMAN') return false
+    if (session.humanUntil && session.humanUntil.getTime() <= Date.now()) {
+      await this.sessionService.setMode(session.id, 'AI')
+      this.logger.log(`🤖 ${waId}: terminó la pausa por respuesta del club, el bot retoma`)
+      return false
+    }
+    this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
+    return true
   }
 
   /**
@@ -1273,4 +1297,10 @@ function normalizeYesNo(msg: string): 's' | 'n' | null {
   if (hasNoWord && !hasYesWord) return 'n'
   if (hasYesWord && !hasNoWord) return 's'
   return null
+}
+
+/** Hours the bot stays quiet on a chat after the club answers it from the phone (default 6). */
+function ownerReplyPauseHours(): number {
+  const hours = Number(process.env.WHATSAPP_OWNER_REPLY_PAUSE_HOURS)
+  return Number.isFinite(hours) && hours > 0 ? hours : 6
 }

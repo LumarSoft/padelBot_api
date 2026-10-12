@@ -1139,6 +1139,82 @@ Occurrences whose booking was CANCELLED are treated as deliberately skipped ("el
 
 `404 Not Found`
 
+## WhatsApp lines
+
+Maps a Meta `phone_number_id` to the club so the bot knows which tenant an incoming message belongs to. All routes are scoped to the caller's club.
+
+### GET /whatsapp-lines
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+[{ "id": "cl…", "phoneNumberId": "1109940228878973", "displayPhone": "+54 9 341 555-0000", "isActive": true, "coexistence": true, "createdAt": "2026-10-12T22:00:00.000Z" }]
+```
+
+### POST /whatsapp-lines
+
+Manual registration of a line already set up in Meta (the number's messages go out with the global `WHATSAPP_TOKEN`).
+
+**Auth required:** Yes
+
+| Field | Type | Required | Constraints |
+| ----- | ---- | -------- | ----------- |
+| phoneNumberId | string | Yes | Meta phone number id, globally unique |
+| displayPhone | string | Yes | Human-readable number |
+
+`201 Created` → the line · `409 Conflict` when the phone number id is already registered.
+
+### GET /whatsapp-lines/embedded-signup/config
+
+Public ids the panel needs to open the Embedded Signup popup. `enabled` is `false` until `WHATSAPP_APP_ID`, `WHATSAPP_ES_CONFIG_ID` and `WHATSAPP_APP_SECRET` are all set.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{ "enabled": true, "appId": "1542936483770854", "configId": "123456789012345", "apiVersion": "v25.0" }
+```
+
+### POST /whatsapp-lines/embedded-signup
+
+Finishes Meta's Embedded Signup popup from the panel: exchanges the one-time `code` for the WABA's business token (stored encrypted), subscribes the app to the WABA webhooks, then either registers the number (Cloud API only) or — for **coexistence** (number stays on the club's WhatsApp Business app) — triggers the contacts + history sync. Creates or updates the club's line. Requires `WHATSAPP_APP_ID` and `WHATSAPP_APP_SECRET`.
+
+**Auth required:** Yes (OWNER only)
+
+| Field | Type | Required | Constraints |
+| ----- | ---- | -------- | ----------- |
+| code | string | Yes | `FB.login` response code (30 s TTL) |
+| wabaId | string | Yes | digits, from the `WA_EMBEDDED_SIGNUP` session message |
+| phoneNumberId | string | Yes | digits, from the `WA_EMBEDDED_SIGNUP` session message |
+| coexistence | boolean | No | `true` when the flow finished as `FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING` |
+
+```json
+{ "code": "AQB…", "wabaId": "123456789012345", "phoneNumberId": "109876543210987", "coexistence": true }
+```
+
+**Responses**
+
+`201 Created`
+
+```json
+{ "id": "cl…", "phoneNumberId": "109876543210987", "displayPhone": "+54 9 341 555-0000", "isActive": true, "coexistence": true, "createdAt": "2026-10-12T22:00:00.000Z" }
+```
+
+`403 Forbidden` — caller is STAFF · `409 Conflict` — the number belongs to another club · `502 Bad Gateway` — Meta rejected a step (`{ "message": "Meta rechazó la conexión (exchange_code). Probá de nuevo en unos minutos." }`) · `503 Service Unavailable` — `WHATSAPP_APP_ID`/`WHATSAPP_APP_SECRET` not configured.
+
+### DELETE /whatsapp-lines/:id
+
+**Auth required:** Yes
+
+`204 No Content` · `404 Not Found`
+
+### Webhook fields (`POST /webhook`, Meta → API)
+
+The app must be subscribed to `messages` and, for coexistence numbers, also to `smb_message_echoes`, `history` and `smb_app_state_sync`. An `smb_message_echoes` event (the club answered from the phone) is stored in the chat as `ADMIN` and pauses the bot on that chat for `WHATSAPP_OWNER_REPLY_PAUSE_HOURS` (default 6).
+
 ## Clubs
 
 Per-club settings. The transfer config holds the MercadoPago alias/CVU players send the deposit to.

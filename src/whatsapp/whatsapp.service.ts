@@ -5,12 +5,16 @@ import { createHmac, timingSafeEqual } from 'crypto'
 import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { Interactive } from '../bot/types'
+import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
 
 @Injectable()
 export class WhatsAppService {
   private readonly logger = new Logger(WhatsAppService.name)
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly lines: WhatsAppLinesService,
+  ) {}
 
   private get apiVersion() {
     return process.env.WHATSAPP_API_VERSION ?? 'v21.0'
@@ -93,11 +97,14 @@ export class WhatsAppService {
     const url = `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}/messages`
     // Argentina mobile wa_ids arrive as 549XXXXXXXXXX but the API requires 54XXXXXXXXXX
     const recipient = to.startsWith('549') && to.length === 13 ? '54' + to.slice(3) : to
+    // A number connected via Embedded Signup sends with its own WABA token; manual lines
+    // (and our own numbers) use the global one.
+    const token = (await this.lines.findAccessToken(phoneNumberId)) ?? this.token
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.token}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ messaging_product: 'whatsapp', to: recipient, ...message }),
