@@ -48,6 +48,7 @@ import {
   ASK_NAME,
   BAD_DNI,
   ATTACHMENT_NO_PENDING,
+  AUDIO_NOT_UNDERSTOOD,
   BOOKING_ABORTED,
   BOOKING_FAILED,
   NO_UPCOMING_BOOKINGS,
@@ -233,6 +234,13 @@ export class BotService {
     const blockedReply = await this.subscriptionBlockedReply(clubId)
     if (blockedReply) return blockedReply
 
+    // Without a booking waiting for its deposit, an image is not a receipt: read it instead.
+    const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
+    if (!pending) {
+      const answered = await this.replyToImage(waId, clubId, media)
+      if (answered) return answered
+    }
+
     const session = await this.sessionService.getOrCreate(waId, clubId)
     this.logger.log(`📥 IN  ${waId}: [imagen/comprobante ${media?.mimeType ?? 'desconocido'}]`)
     await this.sessionService.saveMessage(session.id, 'USER', '[Imagen / comprobante recibido]')
@@ -247,6 +255,55 @@ export class BotService {
 
     await this.sessionService.saveMessage(session.id, 'BOT', reply)
     return { text: reply }
+  }
+
+  /**
+   * A voice note: transcribed and then handled exactly like the same words typed — so every
+   * flow (booking, cancel, FAQ, LLM fallback) works by audio with no special cases.
+   */
+  async handleAudio(waId: string, clubId: string, media: InboundMedia | null): Promise<BotReply | null> {
+    try {
+      const downloaded = media ? await this.media.download(media.mediaId, media.phoneNumberId) : null
+      const transcript = downloaded
+        ? await this.llmService.transcribeAudio(
+            waId,
+            downloaded.bytes,
+            downloaded.mimeType || media?.mimeType || 'audio/ogg',
+          )
+        : null
+      if (transcript) return await this.handleMessage(waId, clubId, transcript)
+
+      const session = await this.sessionService.getOrCreate(waId, clubId)
+      await this.sessionService.saveMessage(session.id, 'USER', '[Audio]')
+      if (await this.isHumanHandled(session, waId)) return null
+      await this.sessionService.saveMessage(session.id, 'BOT', AUDIO_NOT_UNDERSTOOD)
+      return { text: AUDIO_NOT_UNDERSTOOD }
+    } catch (err) {
+      this.logger.error(`Failed to handle audio from ${waId}`, err)
+      return { text: TECHNICAL_ERROR }
+    }
+  }
+
+  /**
+   * An image that isn't a receipt for a pending booking (a flyer, a screenshot of the
+   * schedule…): we let the model describe it and answer that like a typed message. Returns null
+   * when it can't be read, so the caller falls back to the plain acknowledgement.
+   */
+  private async replyToImage(waId: string, clubId: string, media: InboundMedia | null): Promise<BotReply | null> {
+    if (!media || !media.mimeType?.startsWith('image/')) return null
+    const downloaded = await this.media.download(media.mediaId, media.phoneNumberId)
+    if (!downloaded) return null
+    const description = await this.llmService.describeImage(
+      waId,
+      downloaded.bytes,
+      downloaded.mimeType || media.mimeType,
+      media.caption,
+    )
+    if (!description) return null
+    const text = media.caption
+      ? `${media.caption}\n(El jugador mandó una imagen: ${description})`
+      : `(El jugador mandó una imagen: ${description})`
+    return this.handleMessage(waId, clubId, text)
   }
 
   /** AUTO mode: the poller confirms the money, so we only reassure the player. */

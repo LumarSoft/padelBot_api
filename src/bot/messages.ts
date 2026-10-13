@@ -57,6 +57,8 @@ export const BOOKING_FAILED = `😕 Uy, no pude confirmar la reserva — puede q
 export const PAYMENT_UNAVAILABLE = `😅 Justo no puedo tomar el pago por acá en este momento. Escribile al club así te ayudan a confirmar la reserva. 🎾`
 export const PAYMENT_CLAIM_NO_PENDING = `Mmm, no me figura ninguna reserva tuya esperando pago 🤔. Si transferiste recién, dame un par de minutos y revisá; si no, escribime *reservar* y armamos el turno. 🎾`
 export const ATTACHMENT_NO_PENDING = `Recibí tu archivo 🙌 pero por acá no puedo abrir imágenes. Si transferiste para una reserva, esperá un toque y te confirmo solo; si necesitás otra cosa, escribime con palabras. 🎾`
+/** A voice note we couldn't download or transcribe. */
+export const AUDIO_NOT_UNDERSTOOD = `Uy, no pude escuchar bien tu audio 😅. ¿Me lo escribís, porfa? 🎾`
 /** RECEIPT mode: we got an image but the player has no pending booking to attach it to. */
 export const RECEIPT_ATTACHMENT_NO_PENDING = `Recibí tu imagen 🙌 pero no me figura ninguna reserva tuya esperando pago. Si querés reservar, escribime *reservar* y lo armamos. 🎾`
 /** RECEIPT mode: we couldn't download/store the receipt image. */

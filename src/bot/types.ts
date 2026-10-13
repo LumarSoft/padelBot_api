@@ -163,4 +163,6 @@ export interface InboundMedia {
   mimeType: string | null
   /** The club number it arrived on — picks that line's Graph token for the download. */
   phoneNumberId?: string
+  /** Text the player typed under the photo, if any. */
+  caption?: string
 }

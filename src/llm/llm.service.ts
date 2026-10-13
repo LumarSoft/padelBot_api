@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common'
-import OpenAI from 'openai'
+import OpenAI, { toFile } from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
 import { todayKey } from '../availability/lib/datetime'
@@ -67,6 +67,63 @@ export class LlmService {
     } catch (err) {
       this.logger.error('LLM fallback error', err)
       return this.inPlace(NOT_UNDERSTOOD, state, ctx)
+    }
+  }
+
+  /**
+   * Transcribes a player's voice note so it can go through the normal text flow. Returns null
+   * when the audio can't be understood (or the per-player LLM budget is spent) — the caller
+   * then asks the player to write instead.
+   */
+  async transcribeAudio(waId: string, bytes: Buffer, mimeType: string): Promise<string | null> {
+    if (this.isRateLimited(waId)) return null
+    const model = process.env.OPENAI_TRANSCRIBE_MODEL ?? 'gpt-4o-mini-transcribe'
+    try {
+      const file = await toFile(bytes, `audio${audioExtension(mimeType)}`, { type: mimeType.split(';')[0] })
+      const result = await this.openai.audio.transcriptions.create({ file, model, language: 'es' })
+      const text = result.text?.trim()
+      this.logger.log(`🎤 Audio de ${waId} transcripto (${model}): ${logSnippet(text ?? '')}`)
+      return text || null
+    } catch (err) {
+      this.logger.error(`Audio transcription failed for ${waId}`, err)
+      return null
+    }
+  }
+
+  /**
+   * One-line description of an image a player sent outside a payment (a flyer, a screenshot of
+   * a schedule, a photo of the court…), so the bot can answer it like a text message.
+   */
+  async describeImage(waId: string, bytes: Buffer, mimeType: string, caption?: string): Promise<string | null> {
+    if (this.isRateLimited(waId)) return null
+    const model = process.env.OPENAI_VISION_MODEL ?? chatModel()
+    try {
+      const completion = await this.openai.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Sos el asistente de WhatsApp de un club de pádel. Describí en UNA oración, en español, qué muestra ' +
+              'la imagen y qué parece querer el jugador (por ejemplo: reservar un día/hora, una consulta, un ' +
+              'comprobante de transferencia con su monto). Sin saludos ni opiniones.',
+          },
+          {
+            role: 'user',
+            content: [
+              ...(caption ? [{ type: 'text' as const, text: `Texto que acompaña la imagen: ${caption}` }] : []),
+              { type: 'image_url' as const, image_url: { url: `data:${mimeType};base64,${bytes.toString('base64')}` } },
+            ],
+          },
+        ],
+        ...generationParams(model, 200),
+      })
+      const text = completion.choices[0]?.message?.content?.trim()
+      this.logger.log(`🖼️  Imagen de ${waId} interpretada (${model}): ${logSnippet(text ?? '')}`)
+      return text || null
+    } catch (err) {
+      this.logger.error(`Image description failed for ${waId}`, err)
+      return null
     }
   }
 
@@ -147,14 +204,13 @@ export class LlmService {
       content: m.content,
     }))
 
-    const model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini'
+    const model = chatModel()
     const completion = await this.openai.chat.completions.create({
       model,
       messages: [{ role: 'system', content: systemPrompt }, ...historyMessages, { role: 'user', content: message }],
       tools: TOOLS,
       tool_choice: 'auto',
-      temperature: 0.3,
-      max_tokens: 400,
+      ...generationParams(model, 400),
     })
 
     const { usage } = completion
@@ -383,8 +439,34 @@ const MODEL_PRICES: Record<string, { input: number; output: number }> = {
   'gpt-3.5-turbo': { input: 0.5, output: 1.5 },
 }
 
+/** The chat model the bot talks with (OPENAI_MODEL, e.g. "gpt-6-luna"). */
+function chatModel(): string {
+  return process.env.OPENAI_MODEL ?? 'gpt-4o-mini'
+}
+
+/**
+ * Sampling/length params differ by model generation: the gpt-4o/3.5 family takes
+ * `temperature` + `max_tokens`, while the newer reasoning models (gpt-5.x, gpt-6-luna…) reject
+ * both — they need `max_completion_tokens` (which also budgets their hidden reasoning, hence
+ * the headroom) and accept `reasoning_effort` (OPENAI_REASONING_EFFORT, default "low": a booking
+ * bot needs fast, cheap answers, not deep thought).
+ */
+function generationParams(model: string, maxOutputTokens: number) {
+  if (/^gpt-(4|3\.5)/.test(model)) return { temperature: 0.3, max_tokens: maxOutputTokens }
+  const effort = (process.env.OPENAI_REASONING_EFFORT ?? 'low') as OpenAI.ReasoningEffort
+  return { max_completion_tokens: maxOutputTokens * 4, reasoning_effort: effort }
+}
+
+function audioExtension(mimeType: string): string {
+  if (mimeType.includes('mpeg') || mimeType.includes('mp3')) return '.mp3'
+  if (mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')) return '.m4a'
+  if (mimeType.includes('wav')) return '.wav'
+  return '.ogg' // WhatsApp voice notes: audio/ogg; codecs=opus
+}
+
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
-  const prices = MODEL_PRICES[model] ?? MODEL_PRICES['gpt-4o-mini']
+  const override = modelPriceOverride()
+  const prices = override ?? MODEL_PRICES[model] ?? MODEL_PRICES['gpt-4o-mini']
   return (inputTokens * prices.input + outputTokens * prices.output) / 1_000_000
 }
 
@@ -441,4 +523,15 @@ export function validBookingDate(raw: string, today: string = todayKey()): strin
   const [ty, tm, td] = today.split('-').map(Number)
   const daysAhead = (probe.getTime() - Date.UTC(ty, tm - 1, td)) / 86_400_000
   return daysAhead <= MAX_BOOKING_HORIZON_DAYS ? key : null
+}
+
+/**
+ * USD per 1M tokens for a model missing from MODEL_PRICES (e.g. a model newer than this table):
+ * OPENAI_PRICE_INPUT_PER_MTOK / OPENAI_PRICE_OUTPUT_PER_MTOK. Without it the cost log falls back
+ * to gpt-4o-mini prices, which would under-report a pricier model.
+ */
+function modelPriceOverride(): { input: number; output: number } | null {
+  const input = Number(process.env.OPENAI_PRICE_INPUT_PER_MTOK)
+  const output = Number(process.env.OPENAI_PRICE_OUTPUT_PER_MTOK)
+  return Number.isFinite(input) && Number.isFinite(output) && input > 0 ? { input, output } : null
 }
