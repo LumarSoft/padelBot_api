@@ -1,3 +1,4 @@
+import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
 import {
   BadRequestException,
   ConflictException,
@@ -152,6 +153,19 @@ export interface PayerInfo {
   email?: string | null
   mpUserId?: string | null
 }
+
+/**
+ * Which clubs a transfer seen on the SHARED env MercadoPago account (no clubId) may confirm:
+ * only AUTO clubs that did NOT connect their own account — a club with its own account is
+ * reconciled scoped to it (and with its DNI rules), and the same account can be both the
+ * shared one and a club's own. The sales demo club is never eligible: its señas are simulated,
+ * so real money must never land on one of its fake bookings.
+ */
+const SHARED_ACCOUNT_CLUBS = {
+  paymentVerificationMode: 'AUTO',
+  mpAccessToken: null,
+  slug: { not: SALES_DEMO_SLUG },
+} as const
 
 @Injectable()
 export class BookingsService {
@@ -1057,7 +1071,7 @@ export class BookingsService {
       where: {
         ...(clubId ? { clubId } : {}),
         // Never auto-confirm a RECEIPT-mode booking — those are verified by hand from the panel.
-        club: { paymentVerificationMode: 'AUTO' },
+        club: clubId ? { paymentVerificationMode: 'AUTO' } : SHARED_ACCOUNT_CLUBS,
         status: 'PENDING_PAYMENT',
         transferAmountCents: amountCents,
         createdAt: { lte: paidAt },
@@ -1141,7 +1155,7 @@ export class BookingsService {
     const candidates = await this.prisma.booking.findMany({
       where: {
         ...(clubId ? { clubId } : {}),
-        club: { paymentVerificationMode: 'AUTO' },
+        club: clubId ? { paymentVerificationMode: 'AUTO' } : SHARED_ACCOUNT_CLUBS,
         // Cancelled by expiry, never paid: no payment ref and no explicit deposit outcome.
         status: 'CANCELLED',
         mpPaymentId: null,
