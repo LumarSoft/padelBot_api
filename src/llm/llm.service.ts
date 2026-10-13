@@ -128,6 +128,48 @@ export class LlmService {
   }
 
   /**
+   * Reads a bank/MercadoPago transfer receipt photo into structured fields. Used ONLY to
+   * attribute a transfer to a booking (who paid, which operation): it never confirms anything
+   * by itself — the money still has to show up in the club's MercadoPago. Returns null when
+   * the image can't be read or isn't a receipt.
+   */
+  async readTransferReceipt(waId: string, bytes: Buffer, mimeType: string): Promise<ReceiptReading | null> {
+    if (this.isRateLimited(waId)) return null
+    const model = process.env.OPENAI_VISION_MODEL ?? chatModel()
+    try {
+      const completion = await this.openai.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Extraé los datos de un comprobante de transferencia bancaria o de MercadoPago (Argentina). ' +
+              'Si la imagen no es un comprobante de transferencia, isTransferReceipt=false. No inventes datos: ' +
+              'usá null en lo que no se lea con claridad. payerTaxId es el CUIT/CUIL/DNI de QUIEN ENVÍA el dinero ' +
+              '(no el del destinatario), solo dígitos. amount es el importe transferido en pesos (número).',
+          },
+          {
+            role: 'user',
+            content: [{ type: 'image_url', image_url: { url: `data:${mimeType};base64,${bytes.toString('base64')}` } }],
+          },
+        ],
+        response_format: { type: 'json_schema', json_schema: RECEIPT_SCHEMA },
+        ...generationParams(model, 300),
+      })
+      const raw = completion.choices[0]?.message?.content
+      const parsed = raw ? (JSON.parse(raw) as ReceiptReading) : null
+      if (!parsed?.isTransferReceipt) return null
+      this.logger.log(
+        `🧾 Comprobante de ${waId}: monto=${parsed.amount ?? '?'} emisor=${parsed.payerTaxId ? '***' + parsed.payerTaxId.slice(-3) : '?'} op=${parsed.operationNumber ?? '?'}`,
+      )
+      return parsed
+    } catch (err) {
+      this.logger.error(`Receipt reading failed for ${waId}`, err)
+      return null
+    }
+  }
+
+  /**
    * Says something without moving the player: the answer (or apology) goes above the current
    * step's prompt, and the FSM stays where it was.
    *
@@ -536,4 +578,32 @@ function modelPriceOverride(): { input: number; output: number } | null {
   const input = Number(process.env.OPENAI_PRICE_INPUT_PER_MTOK)
   const output = Number(process.env.OPENAI_PRICE_OUTPUT_PER_MTOK)
   return Number.isFinite(input) && Number.isFinite(output) && input > 0 ? { input, output } : null
+}
+
+/** What a transfer receipt photo says. Every field may be null when it isn't legible. */
+export interface ReceiptReading {
+  isTransferReceipt: boolean
+  amount: number | null
+  payerName: string | null
+  payerTaxId: string | null
+  operationNumber: string | null
+  destination: string | null
+}
+
+const RECEIPT_SCHEMA = {
+  name: 'transfer_receipt',
+  strict: true,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['isTransferReceipt', 'amount', 'payerName', 'payerTaxId', 'operationNumber', 'destination'],
+    properties: {
+      isTransferReceipt: { type: 'boolean' },
+      amount: { type: ['number', 'null'] },
+      payerName: { type: ['string', 'null'] },
+      payerTaxId: { type: ['string', 'null'] },
+      operationNumber: { type: ['string', 'null'] },
+      destination: { type: ['string', 'null'] },
+    },
+  },
 }

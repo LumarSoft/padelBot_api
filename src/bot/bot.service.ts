@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable, Logger } from '@nestjs/common'
+import { dniFromIdentification } from '../common/identity'
 import { PrismaService } from '../prisma/prisma.service'
 import { BookingsService } from '../bookings/bookings.service'
 import { AvailabilityService } from '../availability/availability.service'
@@ -48,6 +49,8 @@ import {
   ASK_NAME,
   BAD_DNI,
   ATTACHMENT_NO_PENDING,
+  SKIP_DNI_INTENT,
+  receiptLinkedAck,
   AUDIO_NOT_UNDERSTOOD,
   BOOKING_ABORTED,
   BOOKING_FAILED,
@@ -251,7 +254,7 @@ export class BotService {
     const reply =
       mode === 'RECEIPT'
         ? await this.storeReceipt(waId, clubId, media)
-        : await this.acknowledgeReceiptClaim(clubId, waId)
+        : await this.acknowledgeReceipt(clubId, waId, media)
 
     await this.sessionService.saveMessage(session.id, 'BOT', reply)
     return { text: reply }
@@ -306,12 +309,37 @@ export class BotService {
     return this.handleMessage(waId, clubId, text)
   }
 
-  /** AUTO mode: the poller confirms the money, so we only reassure the player. */
-  private async acknowledgeReceiptClaim(clubId: string, waId: string): Promise<string> {
+  /**
+   * AUTO mode: the poller confirms the money. If the photo is a readable receipt, we keep who
+   * paid (CUIT/DNI) and the operation number on the booking, so the poller can match the real
+   * MercadoPago transfer even when someone else paid. The photo never confirms on its own.
+   */
+  private async acknowledgeReceipt(clubId: string, waId: string, media: InboundMedia | null): Promise<string> {
     const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
     if (!pending) return ATTACHMENT_NO_PENDING
     const { startsAt, endsAt, court } = pending.slot
-    return paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+
+    const reading = await this.readReceipt(waId, media)
+    if (!reading) return paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+
+    await this.bookingsService.recordReceiptReading(pending.id, {
+      payerDni: dniFromIdentification(reading.payerTaxId),
+      operationRef: reading.operationNumber?.replace(/\D/g, '') || null,
+    })
+    const readCents = reading.amount != null ? Math.round(reading.amount * 100) : null
+    const expected = pending.transferAmountCents
+    const mismatch =
+      readCents != null && expected != null && Math.abs(readCents - expected) >= 100
+        ? { expectedCents: expected, readCents }
+        : null
+    return receiptLinkedAck(court.name, startsAt, endsAt, mismatch)
+  }
+
+  private async readReceipt(waId: string, media: InboundMedia | null) {
+    if (!media?.mimeType?.startsWith('image/')) return null
+    const downloaded = await this.media.download(media.mediaId, media.phoneNumberId)
+    if (!downloaded) return null
+    return this.llmService.readTransferReceipt(waId, downloaded.bytes, downloaded.mimeType || media.mimeType)
   }
 
   /**
@@ -1049,7 +1077,9 @@ export class BotService {
 
   private async onBookDni(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     const dni = msg.replace(/\D/g, '')
-    if (dni.length < 7 || dni.length > 8) {
+    // The DNI is optional: someone else may pay, and the receipt photo identifies them.
+    const skipped = dni.length === 0 && SKIP_DNI_INTENT.test(msg.trim())
+    if (!skipped && (dni.length < 7 || dni.length > 8)) {
       return { reply: BAD_DNI, state: BotState.BOOK_DNI, ctx }
     }
 
@@ -1067,18 +1097,13 @@ export class BotService {
       return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
-    return this.createPendingBooking(
-      clubId,
-      waId,
-      { ...ctx, playerDni: dni },
-      {
-        transferAlias: club.transferAlias,
-        transferHolder: club.transferHolder,
-        depositMode: club.depositMode,
-        requireDniMatch: club.requireDniMatch,
-        paymentVerificationMode: club.paymentVerificationMode,
-      },
-    )
+    return this.createPendingBooking(clubId, waId, skipped ? ctx : { ...ctx, playerDni: dni }, {
+      transferAlias: club.transferAlias,
+      transferHolder: club.transferHolder,
+      depositMode: club.depositMode,
+      requireDniMatch: club.requireDniMatch,
+      paymentVerificationMode: club.paymentVerificationMode,
+    })
   }
 
   /** Locks the slot with a pending booking and tells the player exactly how much to transfer. */

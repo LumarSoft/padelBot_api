@@ -44,7 +44,10 @@ export function thanksReply(name?: string): string {
 
 export const ASK_DATE = `📅 ¿Para qué día lo querés? Tocá una opción, o decime la fecha (ej: *25/06*).`
 export const ASK_NAME = `👤 ¡Genial! ¿A nombre de quién pongo la reserva?`
-export const ASK_DNI = `🪪 Para confirmar el pago necesito tu *DNI* (solo los números). Tiene que ser el del titular que va a transferir la seña.`
+export const ASK_DNI = `🪪 ¿Me pasás tu *DNI* (solo números)? Así reconozco tu transferencia y te confirmo solo.\n\nSi transfiere *otra persona*, respondé *otro* y después mandame la foto del comprobante.`
+/** Answers that skip the DNI step (someone else pays / player prefers to send the receipt). */
+export const SKIP_DNI_INTENT =
+  /^(otro|otra|no|no tengo|paga otro|paga otra|transfiere otro|transfiere otra|comprobante|te mando el comprobante|despu[eé]s)\b/i
 export const BAD_DNI = `Mmm, ese DNI no me cierra 🤔 Pasámelo solo con números (7 u 8 dígitos), sin puntos.`
 export const BOOKING_ABORTED = `Listo, no reservé nada 👍 Cuando quieras lo vemos.\n\n${MENU}`
 /** The LLM couldn't make sense of the message — said above the current step's prompt. */
@@ -279,9 +282,8 @@ export function transferPending(
   // In DNI mode the amount is round and identity is validated by the payer's DNI, so we
   // don't ask for exact centavos — we ask them to pay from their OWN account.
   const guard = requireDni
-    ? `⚠️ Importante: transferí *desde tu propia cuenta* de MercadoPago` +
-      (ctx.playerDni ? ` (a nombre del DNI *${ctx.playerDni}*)` : '') +
-      `. Así confirmo tu pago solo; si transferís desde otra cuenta, lo reviso a mano.`
+    ? (ctx.playerDni ? `⚠️ Si transferís desde tu cuenta (DNI *${ctx.playerDni}*) te confirmo solo. ` : `⚠️ `) +
+      `Si transfiere otra persona, mandame la *foto del comprobante* por acá y la asocio a tu reserva.`
     : `⚠️ Transferí el monto *exacto, con los centavos* — así reconozco tu pago al instante y te confirmo solo. ` +
       `Si transferís otro importe, no voy a poder asociarlo automáticamente.`
 
@@ -317,6 +319,23 @@ export function receiptReceivedAck(courtName: string, startsAt: Date, endsAt: Da
  * image). We never confirm from a screenshot — the poller confirms the real money —
  * so we just acknowledge and tell them it's coming.
  */
+/** AUTO mode: the receipt photo was read — we now know who paid and wait for the money. */
+export function receiptLinkedAck(
+  courtName: string,
+  startsAt: Date,
+  endsAt: Date,
+  amountMismatch: { expectedCents: number; readCents: number } | null,
+): string {
+  const mismatch = amountMismatch
+    ? `\n\n⚠️ Ojo: en el comprobante leo *${fmtExact(amountMismatch.readCents)}* y la seña es de *${fmtExact(amountMismatch.expectedCents)}*. Si no coincide, lo revisa el club.`
+    : ''
+  return (
+    `¡Gracias! 🙌 Ya tengo tu comprobante. Apenas la transferencia se acredite en la cuenta del club ` +
+    `(suele ser un par de minutos) te confirmo *${courtName} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}* por acá. 🎾` +
+    mismatch
+  )
+}
+
 export function paymentClaimAck(
   courtName: string,
   startsAt: Date,

@@ -1063,7 +1063,7 @@ export class BookingsService {
         createdAt: { lte: paidAt },
         paymentExpiresAt: { gte: paidAt },
       },
-      select: { id: true, playerDni: true, payerMpUserId: true },
+      select: { id: true, playerDni: true, payerMpUserId: true, receiptPayerDni: true, receiptOperationRef: true },
     })
 
     if (candidates.length === 0) {
@@ -1071,6 +1071,14 @@ export class BookingsService {
       // expiry cron cancelled the pending before this poll tick saw the money.
       // The transfer is real and on time — try to revive the booking.
       return this.reviveExpiredCandidate(amountCents, paymentRef, paidAt, clubId, payer)
+    }
+
+    // Strongest link: the operation number on the receipt the player sent IS this
+    // MercadoPago payment. The money is real (we're reading it from MP), so confirm.
+    const byOperation = candidates.filter(c => c.receiptOperationRef !== null && c.receiptOperationRef === paymentRef)
+    if (byOperation.length === 1) {
+      const confirmed = await this.confirmPayment(byOperation[0].id, paymentRef, payer)
+      return confirmed ? byOperation[0].id : null
     }
 
     // Strict mode (per club): only auto-confirm when the payer's DNI matches the
@@ -1085,7 +1093,11 @@ export class BookingsService {
         )
         return null
       }
-      const matched = candidates.filter(c => dniMatches(c.playerDni, payerDni))
+      // The payer can be the player (DNI given at booking) or whoever's CUIT is on the
+      // receipt photo the player sent (a friend paying, or a player who skipped the DNI).
+      const matched = candidates.filter(
+        c => dniMatches(c.playerDni, payerDni) || dniMatches(c.receiptPayerDni, payerDni),
+      )
       if (matched.length !== 1) {
         this.logger.warn(
           `Transfer ${paymentRef}: payer DNI matched ${matched.length} of ${candidates.length} pending bookings — manual review`,
@@ -1186,20 +1198,39 @@ export class BookingsService {
    *    incoming payer matches (MercadoPago id, then DNI). This guards against a stranger's
    *    same-round-amount transfer ever confirming someone else's booking.
    */
-  private disambiguateByPayer<T extends { playerDni: string | null; payerMpUserId: string | null }>(
-    candidates: T[],
-    payer?: PayerInfo,
-  ): T | null {
+  private disambiguateByPayer<
+    T extends { playerDni: string | null; payerMpUserId: string | null; receiptPayerDni?: string | null },
+  >(candidates: T[], payer?: PayerInfo): T | null {
     const payerMpUserId = payer?.mpUserId ?? null
     const payerDni = dniFromIdentification(payer?.cuit)
     const identityMatches = (c: T): boolean =>
-      (payerMpUserId !== null && c.payerMpUserId === payerMpUserId) || dniMatches(c.playerDni, payerDni)
+      (payerMpUserId !== null && c.payerMpUserId === payerMpUserId) ||
+      dniMatches(c.playerDni, payerDni) ||
+      dniMatches(c.receiptPayerDni, payerDni)
 
     const eligible = candidates.filter(c => {
-      const expectsIdentity = c.payerMpUserId !== null || c.playerDni !== null
+      const expectsIdentity = c.payerMpUserId !== null || c.playerDni !== null || !!c.receiptPayerDni
       return expectsIdentity ? identityMatches(c) : true
     })
     return eligible.length === 1 ? eligible[0] : null
+  }
+
+  /**
+   * Stores who paid according to the receipt photo the player sent, so the poller can match
+   * the real MercadoPago transfer even when the payer isn't the player or no DNI was given.
+   * Only for the player's own pending booking; it never confirms anything by itself.
+   */
+  async recordReceiptReading(
+    bookingId: string,
+    reading: { payerDni: string | null; operationRef: string | null },
+  ): Promise<void> {
+    await this.prisma.booking.updateMany({
+      where: { id: bookingId, status: 'PENDING_PAYMENT' },
+      data: {
+        ...(reading.payerDni ? { receiptPayerDni: reading.payerDni } : {}),
+        ...(reading.operationRef ? { receiptOperationRef: reading.operationRef } : {}),
+      },
+    })
   }
 
   /** Whether the club requires DNI-matched auto-confirmation. */
