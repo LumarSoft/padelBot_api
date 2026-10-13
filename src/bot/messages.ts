@@ -45,6 +45,8 @@ export function thanksReply(name?: string): string {
 export const ASK_DATE = `📅 ¿Para qué día lo querés? Tocá una opción, o decime la fecha (ej: *25/06*).`
 export const ASK_NAME = `👤 ¡Genial! ¿A nombre de quién pongo la reserva?`
 export const ASK_DNI = `🪪 ¿Me pasás tu *DNI* (solo números)? Así reconozco tu transferencia y te confirmo solo.\n\nSi transfiere *otra persona*, respondé *otro* y después mandame la foto del comprobante.`
+/** The player typed their DNI while the deposit is pending. */
+export const DNI_NOTED = `¡Anotado! 🙌 Apenas la transferencia entre a la cuenta del club te confirmo la reserva por acá. 🎾`
 /** Answers that skip the DNI step (someone else pays / player prefers to send the receipt). */
 export const SKIP_DNI_INTENT =
   /^(otro|otra|no|no tengo|paga otro|paga otra|transfiere otro|transfiere otra|comprobante|te mando el comprobante|despu[eé]s)\b/i
@@ -282,8 +284,11 @@ export function transferPending(
   // In DNI mode the amount is round and identity is validated by the payer's DNI, so we
   // don't ask for exact centavos — we ask them to pay from their OWN account.
   const guard = requireDni
-    ? (ctx.playerDni ? `⚠️ Si transferís desde tu cuenta (DNI *${ctx.playerDni}*) te confirmo solo. ` : `⚠️ `) +
-      `Si transfiere otra persona, mandame la *foto del comprobante* por acá y la asocio a tu reserva.`
+    ? ctx.playerDni
+      ? `⚠️ Si transferís desde tu cuenta (DNI *${ctx.playerDni}*) te confirmo solo. ` +
+        `Si transfiere otra persona, mandame la *foto del comprobante* por acá.`
+      : `📸 Para confirmarte al toque, mandame la *foto del comprobante* cuando transfieras ` +
+        `(o tu *DNI*, si transferís desde tu cuenta). Igual siempre lo valido con lo que entra a la cuenta del club.`
     : `⚠️ Transferí el monto *exacto, con los centavos* — así reconozco tu pago al instante y te confirmo solo. ` +
       `Si transferís otro importe, no voy a poder asociarlo automáticamente.`
 
