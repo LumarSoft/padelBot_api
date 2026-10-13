@@ -210,7 +210,7 @@ export class LlmService {
       messages: [{ role: 'system', content: systemPrompt }, ...historyMessages, { role: 'user', content: message }],
       tools: TOOLS,
       tool_choice: 'auto',
-      ...generationParams(model, 400),
+      ...generationParams(model, 400, { withTools: true }),
     })
 
     const { usage } = completion
@@ -448,12 +448,14 @@ function chatModel(): string {
  * Sampling/length params differ by model generation: the gpt-4o/3.5 family takes
  * `temperature` + `max_tokens`, while the newer reasoning models (gpt-5.x, gpt-6-luna…) reject
  * both — they need `max_completion_tokens` (which also budgets their hidden reasoning, hence
- * the headroom) and accept `reasoning_effort` (OPENAI_REASONING_EFFORT, default "low": a booking
- * bot needs fast, cheap answers, not deep thought).
+ * the headroom) and accept `reasoning_effort` (OPENAI_REASONING_EFFORT, default "low", used for
+ * calls without tools such as reading an image).
  */
-function generationParams(model: string, maxOutputTokens: number) {
+function generationParams(model: string, maxOutputTokens: number, opts: { withTools?: boolean } = {}) {
   if (/^gpt-(4|3\.5)/.test(model)) return { temperature: 0.3, max_tokens: maxOutputTokens }
-  const effort = (process.env.OPENAI_REASONING_EFFORT ?? 'low') as OpenAI.ReasoningEffort
+  // Chat Completions rejects function tools combined with any reasoning effort but "none" on
+  // these models (only the Responses API allows both), so a tool call always runs at "none".
+  const effort = (opts.withTools ? 'none' : (process.env.OPENAI_REASONING_EFFORT ?? 'low')) as OpenAI.ReasoningEffort
   return { max_completion_tokens: maxOutputTokens * 4, reasoning_effort: effort }
 }
 
