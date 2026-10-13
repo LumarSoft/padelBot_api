@@ -66,8 +66,8 @@ echo "==> using Node $node_version ($PM2_NODE_INTERPRETER)"
 # PM2 cluster workers inherit the Node version of the shared PM2 daemon. That daemon still
 # runs under Node 18 on this VPS and also owns unrelated apps, so keep this API in fork mode
 # with an explicit supported interpreter until a coordinated PM2 daemon upgrade is performed.
-existing_mode="$(
-  PM2_TARGET="$PM2_APP" pm2 jlist | PM2_TARGET="$PM2_APP" node -e '
+pm2_field() {
+  pm2 jlist | PM2_TARGET="$PM2_APP" PM2_FIELD="$1" node -e '
     let input = ""
     process.stdin.on("data", chunk => { input += chunk })
     process.stdin.on("end", () => {
@@ -75,13 +75,21 @@ existing_mode="$(
       if (jsonStart === -1) process.exit(0)
       const apps = JSON.parse(input.slice(jsonStart))
       const app = apps.find(candidate => candidate.name === process.env.PM2_TARGET)
-      process.stdout.write(app?.pm2_env?.exec_mode ?? "")
+      process.stdout.write(String(app?.pm2_env?.[process.env.PM2_FIELD] ?? ""))
     })
   '
-)"
+}
 
-if [[ -n "$existing_mode" && "$existing_mode" != "fork_mode" ]]; then
-  echo "==> recreating $existing_mode process in fork mode with Node $node_version"
+existing_mode="$(pm2_field exec_mode)"
+existing_out_log="$(pm2_field pm_out_log_path)"
+expected_out_log="${PM2_LOG_DIR:-$PWD/logs}/out.log"
+
+out_log_bytes_before="$(stat -c %s "$expected_out_log" 2>/dev/null || echo 0)"
+
+# PM2 keeps a process's log paths from when it was first started and ignores changes on
+# reload, so a process started with other paths must be recreated to log where we expect.
+if [[ -n "$existing_mode" && ( "$existing_mode" != "fork_mode" || "$existing_out_log" != "$expected_out_log" ) ]]; then
+  echo "==> recreating $existing_mode process (logs: $existing_out_log) in fork mode with Node $node_version"
   pm2 delete "$PM2_APP"
   PM2_APP="$PM2_APP" PM2_NODE_INTERPRETER="$PM2_NODE_INTERPRETER" \
     pm2 start scripts/ecosystem.config.cjs --update-env
@@ -90,5 +98,17 @@ else
     pm2 startOrReload scripts/ecosystem.config.cjs --update-env
 fi
 pm2 save
+
+echo "==> checking that $expected_out_log receives the boot logs"
+for _ in $(seq 1 30); do
+  if tail -c +"$((out_log_bytes_before + 1))" "$expected_out_log" 2>/dev/null | grep -q "Nest application successfully started"; then
+    log_ok=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "${log_ok:-}" ]]; then
+  echo "WARNING: no boot line in $expected_out_log after 30s — check 'pm2 describe $PM2_APP'" >&2
+fi
 
 echo "✅ Deploy OK — $(git rev-parse --short HEAD)"
