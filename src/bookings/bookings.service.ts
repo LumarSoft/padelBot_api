@@ -1004,11 +1004,19 @@ export class BookingsService {
       const { startsAt, endsAt, court } = booking.slot
       // A dedicated "payment confirmed" event (not a generic booking.changed) so the panel can
       // ring the cash alert on every confirmation — automatic (poller) or manual.
+      const summary = `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`
       this.events.emitPaymentConfirmed({
         type: 'payment.confirmed',
         clubId: booking.clubId,
-        summary: `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`,
+        summary,
         source: paymentRef ? 'AUTO' : 'MANUAL',
+      })
+      // The staff app must hear about the money too — the panel's cash sound only rings for
+      // someone sitting in front of it.
+      void this.notifications.notifyClub(booking.clubId, {
+        title: '💸 Seña cobrada — reserva confirmada',
+        body: summary,
+        data: { bookingId },
       })
     }
 
