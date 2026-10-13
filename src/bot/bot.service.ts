@@ -45,11 +45,11 @@ import {
 } from './types'
 import {
   ASK_DATE,
-  ASK_DNI,
   ASK_NAME,
   BAD_DNI,
   ATTACHMENT_NO_PENDING,
   SKIP_DNI_INTENT,
+  DNI_NOTED,
   receiptLinkedAck,
   AUDIO_NOT_UNDERSTOOD,
   BOOKING_ABORTED,
@@ -189,6 +189,16 @@ export class BotService {
     const state = session.state as BotState
     const isMenuState = state === BotState.MENU || state === BotState.IDLE
 
+    // A bare DNI while a deposit is pending: it identifies who will transfer, so the poller
+    // can match the payment. Optional — the receipt photo does the same job.
+    if (isMenuState) {
+      const dniReply = await this.pendingDniReply(clubId, waId, msg)
+      if (dniReply) {
+        await this.sessionService.saveMessage(session.id, 'BOT', dniReply)
+        return { text: dniReply }
+      }
+    }
+
     // "Ya transferí" / "te mando el comprobante" after booking: acknowledge and let the
     // poller confirm the real money — never from a claim.
     const result =
@@ -307,6 +317,16 @@ export class BotService {
       ? `${media.caption}\n(El jugador mandó una imagen: ${description})`
       : `(El jugador mandó una imagen: ${description})`
     return this.handleMessage(waId, clubId, text)
+  }
+
+  /** Stores a DNI typed while the player's deposit is pending; null when it doesn't apply. */
+  private async pendingDniReply(clubId: string, waId: string, msg: string): Promise<string | null> {
+    if (!/^\s*\d{1,2}\.?\d{3}\.?\d{3}\s*$/.test(msg)) return null
+    const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
+    if (!pending || pending.playerDni) return null
+    const dni = msg.replace(/\D/g, '')
+    await this.bookingsService.recordPendingPlayerDni(pending.id, dni)
+    return DNI_NOTED
   }
 
   /**
@@ -1055,15 +1075,12 @@ export class BotService {
       return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
-    // Strict (AUTO) mode: we need the player's DNI to validate the transfer's titular. The DNI
-    // is irrelevant in RECEIPT mode (an admin verifies the photo by hand), so we skip it there.
-    // Reuse a DNI this phone already gave us so a returning player is never asked twice.
+    // Strict (AUTO) mode identifies the payer by DNI — but it never blocks the booking: we reuse
+    // a DNI this phone already gave us, and otherwise the player can send their DNI or the
+    // receipt photo later, while the deposit is pending (or neither: the club reviews it).
     if (club.requireDniMatch && club.paymentVerificationMode !== 'RECEIPT' && !ctx.playerDni) {
       const knownDni = await this.bookingsService.findKnownDniForPhone(clubId, waId)
-      if (!knownDni) {
-        return { reply: ASK_DNI, state: BotState.BOOK_DNI, ctx }
-      }
-      ctx = { ...ctx, playerDni: knownDni }
+      if (knownDni) ctx = { ...ctx, playerDni: knownDni }
     }
 
     return this.createPendingBooking(clubId, waId, ctx, {

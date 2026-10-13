@@ -1233,6 +1233,14 @@ export class BookingsService {
     })
   }
 
+  /** Sets the DNI the player typed after booking (only while the deposit is pending). */
+  async recordPendingPlayerDni(bookingId: string, dni: string): Promise<void> {
+    await this.prisma.booking.updateMany({
+      where: { id: bookingId, status: 'PENDING_PAYMENT' },
+      data: { playerDni: dni },
+    })
+  }
+
   /** Whether the club requires DNI-matched auto-confirmation. */
   private async clubRequiresDniMatch(clubId: string): Promise<boolean> {
     const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { requireDniMatch: true } })
@@ -1265,6 +1273,7 @@ export class BookingsService {
       select: {
         id: true,
         transferAmountCents: true,
+        playerDni: true,
         slot: { select: { startsAt: true, endsAt: true, court: { select: { name: true } } } },
       },
     })
