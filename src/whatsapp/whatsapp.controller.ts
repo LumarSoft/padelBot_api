@@ -118,6 +118,11 @@ export class WhatsAppController {
             const body = extractInteractiveReply(message)
             if (!body) continue
             await this.inbound.enqueue(waId, () => this.processMessage(phoneNumberId, waId, body))
+          } else if (message?.type === 'audio') {
+            // Voice notes are transcribed and then follow the normal text flow.
+            const extracted = extractMedia(message)
+            const media = extracted ? { ...extracted, phoneNumberId } : null
+            await this.inbound.enqueue(waId, () => this.processAudio(phoneNumberId, waId, media))
           } else if (message?.type === 'image' || message?.type === 'document') {
             // Likely a transfer receipt. In RECEIPT mode the bot downloads and stores it for
             // the admin to verify; in AUTO mode it just acknowledges (the poller confirms).
@@ -164,6 +169,19 @@ export class WhatsAppController {
     } catch (err) {
       // Transport-level safety net (the bot already has its own): never leave the user silent.
       this.logger.error(`Failed to process message from ${waId}`, err)
+      await this.sendCourtesy(phoneNumberId, waId)
+    }
+  }
+
+  private async processAudio(phoneNumberId: string, waId: string, media: InboundMedia | null): Promise<void> {
+    try {
+      const clubId = await this.resolveClubId(phoneNumberId)
+      if (!clubId) return
+
+      const reply = await this.botService.handleAudio(waId, clubId, media)
+      await this.deliver(phoneNumberId, waId, reply)
+    } catch (err) {
+      this.logger.error(`Failed to process audio from ${waId}`, err)
       await this.sendCourtesy(phoneNumberId, waId)
     }
   }
@@ -230,10 +248,11 @@ function extractInteractiveReply(message: any): string | undefined {
   return undefined
 }
 
-/** Pulls the Meta media id + mime type out of an inbound image/document message. */
+/** Pulls the Meta media id, mime type and caption out of an inbound image/document/audio message. */
 function extractMedia(message: any): InboundMedia | null {
-  const node = message?.type === 'image' ? message?.image : message?.document
+  const node = message?.[message?.type]
   const mediaId: string | undefined = node?.id
   if (!mediaId) return null
-  return { mediaId, mimeType: node?.mime_type ?? null }
+  const caption: string | undefined = typeof node?.caption === 'string' ? node.caption.trim() || undefined : undefined
+  return { mediaId, mimeType: node?.mime_type ?? null, ...(caption ? { caption } : {}) }
 }
