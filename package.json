@@ -25,7 +25,8 @@
     "ops:admin": "ts-node scripts/create-platform-admin.ts",
     "players:backfill": "ts-node scripts/backfill-players.ts",
     "review:prepare": "ts-node scripts/prepare-app-review-demo.ts",
-    "prepare": "husky"
+    "prepare": "husky",
+    "demo:seed": "ts-node scripts/seed-sales-demo.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.2.3",

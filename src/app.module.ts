@@ -30,6 +30,7 @@ import { NotificationsModule } from './notifications/notifications.module'
 import { ProductsModule } from './products/products.module'
 import { BookingRemindersModule } from './booking-reminders/booking-reminders.module'
 import { OpsModule } from './ops/ops.module'
+import { DemoModule } from './demo/demo.module'
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { OpsModule } from './ops/ops.module'
     ProductsModule,
     BookingRemindersModule,
     OpsModule,
+    DemoModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
