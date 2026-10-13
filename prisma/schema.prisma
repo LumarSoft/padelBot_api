@@ -365,6 +365,14 @@ model Booking {
   /// DNI the bot captured at booking (digits only), used to validate the payer's identity
   /// when the club has requireDniMatch on. Null otherwise.
   playerDni          String?
+  /// Payer identity read from the transfer receipt photo the player sent (DNI digits, derived
+  /// from the CUIT/CUIL/DNI printed on it). Lets a transfer from someone else's account — or
+  /// from a player who never gave a DNI — be matched against MercadoPago's real payer.
+  /// Never confirms on its own: the money must still arrive in MercadoPago.
+  receiptPayerDni     String?
+  /// Operation number printed on the receipt. When it equals MercadoPago's payment id it is
+  /// the strongest possible link between the transfer and this booking.
+  receiptOperationRef String?
   status             BookingStatus     @default(PENDING_PAYMENT)
   notes              String?
   /// Identity of who actually transferred, captured from MercadoPago at confirmation
