@@ -534,7 +534,7 @@ export async function seedSalesDemo(prisma: PrismaClient, options: SalesDemoOpti
     const clubContent = {
       name: CLUB_NAME,
       subscriptionStatus: 'ACTIVE' as const,
-      plan: 'pro',
+      plan: 'bandeja',
       trialEndsAt: null,
       currentPeriodEnd: addMs(now, 365 * DAY),
       setupCompletedAt: addMs(clubCreatedAt, 2 * DAY),

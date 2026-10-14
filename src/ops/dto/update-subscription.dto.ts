@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer'
-import { IsEnum, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
+import { IsEnum, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator'
 import { SubscriptionStatus } from 'generated/prisma/client'
+import { PLAN_KEYS, PlanKey } from '../../plans/lib/plans'
 
 /**
  * The UI equivalent of `npm run subscription`. Billing is manual: a transfer arrives, we
@@ -26,8 +27,8 @@ export class UpdateSubscriptionDto {
   @Max(180)
   days?: number
 
+  /** saque | bandeja | smash. Omit to keep the club's plan. */
   @IsOptional()
-  @IsString()
-  @MaxLength(40)
-  plan?: string
+  @IsIn(PLAN_KEYS)
+  plan?: PlanKey
 }

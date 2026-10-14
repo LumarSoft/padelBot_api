@@ -24,8 +24,9 @@ model Club {
 
   /// GTP subscription state. New clubs start on TRIAL (see trialEndsAt).
   subscriptionStatus SubscriptionStatus @default(TRIAL)
-  /// Commercial plan ("base" / "pro"); informational for now.
-  plan               String             @default("base")
+  /// Commercial plan: "saque" | "bandeja" | "smash" (the landing's plans). Its limits and
+  /// modules live in `src/plans/lib/plans.ts`; an unknown key restricts nothing.
+  plan               String             @default("saque")
   /// When the free trial ends (null = no fixed end, e.g. clubs created before billing).
   trialEndsAt        DateTime?
   /// End of the last paid period for ACTIVE/PAST_DUE clubs. The bot keeps working for
