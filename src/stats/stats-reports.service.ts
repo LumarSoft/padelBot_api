@@ -30,6 +30,10 @@ export interface OccupancyReport {
 export interface RevenueDay {
   dateKey: string
   depositCents: number
+  /**
+   * Kiosk sold (turno consumos + counter sales). A breakdown, not a channel: once paid it is
+   * already inside cashCents/qrCents — money collected = deposit + cash + QR.
+   */
   productsCents: number
   /** Front-desk cash collected (modo mostrador). */
   cashCents: number

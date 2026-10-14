@@ -1881,6 +1881,11 @@ per-player bill payments (CASH → efectivo; QR/TRANSFER → mostrador digital).
 (`POST /stock/counter-sales`, no turno) count on the day they happened, both in `productsCents`
 and in the cash/QR of their payment method. Owner-only. The panel exports this as CSV.
 
+**Money collected = `depositCents + cashCents + qrCents`.** `productsCents` is what the kiosk
+sold (turno consumos + counter sales), not a collection channel: the turno's bill includes its
+consumos and is paid at the desk, so once paid the kiosk is already inside cash/QR — adding it
+again counts it twice. A consumo not paid yet is in `productsCents` and in none of the three.
+
 **Auth required:** Yes (OWNER only)
 
 **Query** — `from`, `to` ("YYYY-MM-DD"; defaults: last 30 days)
@@ -1893,8 +1898,19 @@ and in the cash/QR of their payment method. Owner-only. The panel exports this a
   "toDateKey": "2026-07-09",
   "totalDepositCents": 1250000,
   "totalProductsCents": 340000,
+  "totalCashCents": 2100000,
+  "totalQrCents": 980000,
   "totalBookings": 84,
-  "days": [{ "dateKey": "2026-07-08", "depositCents": 25000, "productsCents": 8000, "bookings": 3 }]
+  "days": [
+    {
+      "dateKey": "2026-07-08",
+      "depositCents": 25000,
+      "productsCents": 8000,
+      "cashCents": 60000,
+      "qrCents": 32000,
+      "bookings": 3
+    }
+  ]
 }
 ```
 
