@@ -19,7 +19,7 @@ export class UpdateSubscriptionDto {
   @Max(24)
   months?: number
 
-  /** With TRIAL: trial days from now → trialEndsAt. Default 14. */
+  /** With TRIAL: trial days from now → trialEndsAt. Default 30, the month the landing promises. */
   @IsOptional()
   @Type(() => Number)
   @IsInt()

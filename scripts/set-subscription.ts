@@ -12,7 +12,7 @@ import { PLAN_KEYS, isPlanKey } from '../src/plans/lib/plans'
  *   npm run subscription -- --club club-demo                        # show current state
  *   npm run subscription -- --club club-demo --status ACTIVE --months 1
  *   npm run subscription -- --club club-demo --status PAST_DUE
- *   npm run subscription -- --club club-demo --status TRIAL --days 14
+ *   npm run subscription -- --club club-demo --status TRIAL --days 30
  *   npm run subscription -- --club club-demo --status CANCELLED
  *   npm run subscription -- --club club-demo --plan bandeja
  *
@@ -20,7 +20,7 @@ import { PLAN_KEYS, isPlanKey } from '../src/plans/lib/plans'
  *   --club <slug>      club slug (required)
  *   --status <status>  TRIAL | ACTIVE | PAST_DUE | CANCELLED
  *   --months <n>       with ACTIVE: paid months from now → currentPeriodEnd (default 1)
- *   --days <n>         with TRIAL: trial days from now → trialEndsAt (default 14)
+ *   --days <n>         with TRIAL: trial days from now → trialEndsAt (default 30)
  *   --plan <key>       saque | bandeja | smash
  */
 
@@ -80,7 +80,7 @@ async function main(): Promise<void> {
       data.currentPeriodEnd = new Date(Date.now() + months * 30 * DAY_MS)
     }
     if (status === 'TRIAL') {
-      const days = Number(flag('days') ?? 14)
+      const days = Number(flag('days') ?? 30)
       data.trialEndsAt = new Date(Date.now() + days * DAY_MS)
     }
   }
