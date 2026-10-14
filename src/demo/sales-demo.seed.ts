@@ -12,6 +12,7 @@ import {
   shiftDateKey,
   toDateKey,
   todayKey,
+  wallTimeToUtc,
   weekdayOfKey,
 } from '../availability/lib/datetime'
 import { splitEqually } from '../bookings/lib/account'
@@ -30,6 +31,7 @@ import {
 } from '../bot/messages'
 import { BandOption, SessionContext } from '../bot/types'
 import { bookingConversation } from './lib/booking-conversation'
+import { buildKioskLedger, LedgerSale } from './lib/kiosk-stock'
 
 /**
  * Sales demo club ("Distrito Pádel") — a fully populated tenant to show GTP end to end to
@@ -510,6 +512,8 @@ export interface SalesDemoSummary {
   conversations: number
   consumos: number
   payments: number
+  counterSales: number
+  lowStockProducts: number
 }
 
 /** Rebuilds the sales demo club's content (creating the club and users the first time). */
@@ -614,6 +618,8 @@ export async function seedSalesDemo(prisma: PrismaClient, options: SalesDemoOpti
     await prisma.recurringBooking.deleteMany({ where: { clubId } })
     await prisma.court.deleteMany({ where: { clubId } })
     await prisma.player.deleteMany({ where: { clubId } })
+    await prisma.stockMovement.deleteMany({ where: { clubId } })
+    await prisma.counterSale.deleteMany({ where: { clubId } })
     await prisma.product.deleteMany({ where: { clubId } })
     await prisma.conversationSession.deleteMany({ where: { clubId } })
     await prisma.waitlistEntry.deleteMany({ where: { clubId } })
@@ -1760,6 +1766,77 @@ export async function seedSalesDemo(prisma: PrismaClient, options: SalesDemoOpti
       addSession(b.player, b.player!.phone, known ? firstName(b.player!) : b.player!.name, msgs)
     }
 
+    // ── 4h. Kiosco: ventas sueltas and the stock ledger ─────────────────────
+    // Its own random stream, so adding stock doesn't reshuffle the rest of the demo.
+    const stockRand = mulberry32(SEED + 1)
+    const stockInt = (min: number, max: number): number => min + Math.floor(stockRand() * (max - min + 1))
+    const stockPick = <T>(items: readonly T[]): T => items[Math.floor(stockRand() * items.length)]
+    const historyStartKey = shiftDateKey(today, -HISTORY_DAYS)
+    const counterSales: {
+      id: string
+      productKey: string
+      quantity: number
+      method: 'CASH' | 'QR' | 'TRANSFER'
+      userId: number
+      createdAt: Date
+    }[] = []
+    // Someone buys a drink without playing: a few every evening, more on weekends.
+    for (let offset = -HISTORY_DAYS; offset <= 0; offset += 1) {
+      const dateKey = shiftDateKey(today, offset)
+      const weekday = weekdayOfKey(dateKey)
+      const sales = stockInt(1, 3) + (weekday === 0 || weekday === 6 ? 2 : 0)
+      for (let i = 0; i < sales; i += 1) {
+        const createdAt = addMs(wallTimeToUtc(dateKey, '17:00'), stockInt(0, 390) * MINUTE)
+        if (createdAt > addMs(now, -5 * MINUTE)) continue
+        const r = stockRand()
+        counterSales.push({
+          id: newId(),
+          productKey: stockPick([
+            'agua',
+            'agua',
+            'coca',
+            'cerveza',
+            'cerveza',
+            'gatorade',
+            'saborizada',
+            'alfajor',
+            'barrita',
+          ]),
+          quantity: stockRand() < 0.2 ? 2 : 1,
+          method: r < 0.5 ? 'CASH' : r < 0.85 ? 'QR' : 'TRANSFER',
+          userId: stockPick(staffIds),
+          createdAt,
+        })
+      }
+    }
+    const ledgerSales: LedgerSale[] = [
+      ...bookings.flatMap(b =>
+        b.lines.map(l => ({
+          productKey: l.productKey,
+          quantity: l.quantity,
+          // A consumo of a turno still in play is registered now, not at its planned minute.
+          at: minDate(l.createdAt, addMs(now, -MINUTE)),
+          userId: stockPick(staffIds),
+          bookingId: b.id,
+        })),
+      ),
+      ...counterSales.map(c => ({
+        productKey: c.productKey,
+        quantity: c.quantity,
+        at: c.createdAt,
+        userId: c.userId,
+        counterSaleId: c.id,
+      })),
+    ]
+    const kiosk = buildKioskLedger({
+      sales: ledgerSales,
+      fromKey: historyStartKey,
+      now,
+      rand: stockRand,
+      ownerId,
+      staffIds,
+    })
+
     // ── 5. Persist ──────────────────────────────────────────────────────────
     const chunked = async <T>(rows: T[], insert: (chunk: T[]) => Promise<unknown>): Promise<void> => {
       for (let i = 0; i < rows.length; i += 400) await insert(rows.slice(i, i + 400))
@@ -1799,6 +1876,9 @@ export async function seedSalesDemo(prisma: PrismaClient, options: SalesDemoOpti
         priceCents: p.priceCents,
         category: p.category,
         isActive: p.isActive,
+        stockQuantity: kiosk.states.get(p.key)?.stockQuantity ?? null,
+        lowStockThreshold: kiosk.states.get(p.key)?.lowStockThreshold ?? null,
+        lowStockNotifiedAt: kiosk.states.get(p.key)?.lowStockNotifiedAt ?? null,
         createdAt: addMs(clubCreatedAt, 2 * DAY),
       })),
     })
@@ -1932,6 +2012,37 @@ export async function seedSalesDemo(prisma: PrismaClient, options: SalesDemoOpti
           })),
         }),
     )
+    await chunked(counterSales, chunk =>
+      prisma.counterSale.createMany({
+        data: chunk.map(c => ({
+          id: c.id,
+          clubId,
+          productId: productByKey[c.productKey].id,
+          quantity: c.quantity,
+          unitPriceCents: productByKey[c.productKey].priceCents,
+          method: c.method,
+          userId: c.userId,
+          createdAt: c.createdAt,
+        })),
+      }),
+    )
+    await chunked(kiosk.movements, chunk =>
+      prisma.stockMovement.createMany({
+        data: chunk.map(m => ({
+          id: newId(),
+          clubId,
+          productId: productByKey[m.productKey].id,
+          type: m.type,
+          quantity: m.quantity,
+          stockAfter: m.stockAfter,
+          note: m.note,
+          userId: m.userId,
+          bookingId: m.bookingId,
+          counterSaleId: m.counterSaleId,
+          createdAt: m.createdAt,
+        })),
+      }),
+    )
 
     await prisma.conversationSession.createMany({
       data: sessions.map(s => {
@@ -2046,6 +2157,8 @@ export async function seedSalesDemo(prisma: PrismaClient, options: SalesDemoOpti
       conversations: sessions.length,
       consumos: bookings.reduce((sum, b) => sum + b.lines.length, 0),
       payments: bookings.reduce((sum, b) => sum + b.payments.length, 0),
+      counterSales: counterSales.length,
+      lowStockProducts: [...kiosk.states.values()].filter(st => st.stockQuantity <= st.lowStockThreshold).length,
     }
   }
 }
