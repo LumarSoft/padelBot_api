@@ -201,11 +201,15 @@ export class StatsReportsService {
         try {
           const summary = await this.weeklySummary(club.id, fromKey, toKey)
           if (summary.bookings === 0) continue // nothing to brag about — don't spam dead clubs
+          // A club that takes no seña (or collected none) gets no "$0 en señas" line.
+          const deposits =
+            summary.depositCents > 0
+              ? `, $${Math.round(summary.depositCents / 100).toLocaleString('es-AR')} en señas`
+              : ''
           await this.notifications.notifyClub(club.id, {
             title: `📈 Tu semana en GTP`,
             body:
-              `${summary.bookings} turnos (${summary.occupancyPct}% de ocupación), ` +
-              `$${Math.round(summary.depositCents / 100).toLocaleString('es-AR')} en señas. ` +
+              `${summary.bookings} turnos (${summary.occupancyPct}% de ocupación)${deposits}. ` +
               `El bot te vendió ${summary.botBookings} turnos.`,
           })
         } catch (err) {
