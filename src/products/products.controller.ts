@@ -23,12 +23,12 @@ export class ProductsController {
 
   @Post()
   create(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreateProductDto) {
-    return this.productsService.create(user.clubId, dto)
+    return this.productsService.create(user.clubId, dto, parseInt(user.id, 10))
   }
 
   @Patch(':id')
   update(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: UpdateProductDto) {
-    return this.productsService.update(user.clubId, id, dto)
+    return this.productsService.update(user.clubId, id, dto, parseInt(user.id, 10))
   }
 
   @Delete(':id')

@@ -28,6 +28,7 @@ import { StatsModule } from './stats/stats.module'
 import { PriceRulesModule } from './price-rules/price-rules.module'
 import { NotificationsModule } from './notifications/notifications.module'
 import { ProductsModule } from './products/products.module'
+import { StockModule } from './stock/stock.module'
 import { BookingRemindersModule } from './booking-reminders/booking-reminders.module'
 import { OpsModule } from './ops/ops.module'
 import { DemoModule } from './demo/demo.module'
@@ -64,6 +65,7 @@ import { FixedConfirmationsModule } from './fixed-confirmations/fixed-confirmati
     PriceRulesModule,
     NotificationsModule,
     ProductsModule,
+    StockModule,
     BookingRemindersModule,
     OpsModule,
     DemoModule,

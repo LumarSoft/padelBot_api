@@ -140,6 +140,6 @@ export class BookingsController {
 
   @Put(':id/products')
   setProducts(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: SetBookingProductsDto) {
-    return this.bookingsService.setBookingProducts(user.clubId, id, dto)
+    return this.bookingsService.setBookingProducts(user.clubId, id, dto, parseInt(user.id, 10))
   }
 }

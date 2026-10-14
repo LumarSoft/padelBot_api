@@ -907,6 +907,9 @@ Streams the latest transfer-receipt image for a booking (RECEIPT verification mo
 
 Replaces all consumo lines (products consumed during the court session) attached to a booking. Passing an empty `items` array clears all consumos. Club-scoped.
 
+Moves kiosk stock by the **net change** of the bill, in the same transaction: adding 2 waters takes 2 out, lowering it to 1 later puts 1 back, clearing the bill puts every unit back, re-saving it unchanged (or only re-splitting it among players) moves nothing. Only tracked products move (see [Stock (kiosco)](#stock-kiosco)); a sale is never blocked for lack of stock.
+
+
 Each line records which of the 4 fixed anonymous players (`1`..`4`) share its cost — used by the panel to split the turno's bill (court price ÷ 4 plus each player's share of shared consumos).
 
 **Auth required:** Yes
@@ -1528,6 +1531,324 @@ Disconnects the club's MercadoPago account (clears stored tokens). **Owner only.
 ```
 
 `403 Forbidden` — caller is not the club owner
+
+## Products
+
+The club's kiosk catalog (balls, drinks, snacks, accessories). Stock is **opt-in per product**:
+`stockQuantity: null` means the club doesn't track it. See [Stock (kiosco)](#stock-kiosco) for the
+ledger, counts and counter sales.
+
+### GET /products
+
+Lists the caller's club products, by category and name.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx...",
+    "name": "Agua mineral 500 ml",
+    "priceCents": 200000,
+    "category": "BEBIDA",
+    "isActive": true,
+    "stockQuantity": 9,
+    "lowStockThreshold": 24,
+    "createdAt": "2026-08-01T12:00:00.000Z",
+    "updatedAt": "2026-10-14T15:00:00.000Z"
+  }
+]
+```
+
+`stockQuantity` may be negative: a sale is never blocked for lack of stock, the next count corrects it.
+
+### POST /products
+
+Creates a product. Sending `stockQuantity` starts tracking its stock with an `ADJUSTMENT`
+("Stock inicial") in the ledger.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field             | Type    | Required | Constraints                                                     |
+| ----------------- | ------- | -------- | --------------------------------------------------------------- |
+| name              | string  | Yes      | max 100 chars                                                   |
+| priceCents        | number  | Yes      | integer ≥ 0                                                     |
+| category          | string  | No       | `PELOTA` \| `BEBIDA` \| `SNACK` \| `ACCESORIO` \| `OTRO` (default `OTRO`) |
+| isActive          | boolean | No       | default `true`                                                  |
+| stockQuantity     | number  | No       | integer 0..100000. Omit to not track stock                      |
+| lowStockThreshold | number  | No       | integer 0..100000 or `null`. `null` = "para comprar" only at 0  |
+
+```json
+{ "name": "Overgrip", "priceCents": 450000, "category": "ACCESORIO", "stockQuantity": 20, "lowStockThreshold": 6 }
+```
+
+`201 Created` — the product (same shape as in `GET /products`)
+
+`400 Bad Request` — validation error
+
+### PATCH /products/:id
+
+Updates a product. A new `stockQuantity` is recorded in the ledger as an `ADJUSTMENT`
+("Corrección desde Productos"); `null` stops tracking stock. A new `lowStockThreshold`
+re-evaluates the low-stock alert flag. Neither sends a push (the owner is the one editing).
+
+**Auth required:** Yes
+
+**Request body** — any subset of the `POST /products` fields; `stockQuantity` also accepts `null`.
+
+```json
+{ "lowStockThreshold": 12 }
+```
+
+`200 OK` — the updated product
+
+`404 Not Found` — product not in the caller's club
+
+### DELETE /products/:id
+
+**Auth required:** Yes
+
+`204 No Content`
+
+`404 Not Found` — product not in the caller's club
+
+`409 Conflict` — the product was already sold (a consumo or a counter sale points at it); deactivate it instead
+
+```json
+{ "statusCode": 409, "message": "Este producto ya tiene ventas registradas. Desactivalo en lugar de borrarlo." }
+```
+
+## Stock (kiosco)
+
+The kiosk's "entra / sale / queda". Every change writes a `StockMovement` (`PURCHASE` |
+`SALE` | `ADJUSTMENT`, signed `quantity`, `stockAfter`) in the same transaction as the change.
+Consumos loaded on a turno (`PUT /bookings/:id/products`) move stock by the net change of the
+bill. Only tracked products (`stockQuantity` not null) move.
+
+**Low-stock push:** when a tracked product drops to `lowStockThreshold` or below (to `0` when no
+minimum is set) after a sale, a consumo or a count, the club **owner's** devices get one push
+("🛒 Hay que comprar …"). It doesn't repeat until the product is restocked above its minimum.
+
+All endpoints are open to **OWNER and STAFF** (the front desk receives deliveries, counts the
+shelf and sells loose drinks) and scoped to the caller's club.
+
+### POST /stock/purchases
+
+"Entró mercadería": adds one delivery of several products. A product nobody tracked yet starts
+being tracked from the received quantity.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Request body**
+
+| Field             | Type   | Required | Constraints                         |
+| ----------------- | ------ | -------- | ----------------------------------- |
+| items             | array  | Yes      | 1..200 lines                        |
+| items[].productId | string | Yes      | must belong to the caller's club    |
+| items[].quantity  | number | Yes      | integer 1..100000 (repeated products are summed) |
+| note              | string | No       | max 200 chars (supplier, invoice…)  |
+
+```json
+{ "items": [{ "productId": "clx-agua", "quantity": 48 }, { "productId": "clx-coca", "quantity": 24 }], "note": "Distribuidora" }
+```
+
+`201 Created` — the updated products
+
+```json
+[
+  { "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA", "stockQuantity": 57, "lowStockThreshold": 24 },
+  { "id": "clx-coca", "name": "Coca-Cola 500 ml", "category": "BEBIDA", "stockQuantity": 55, "lowStockThreshold": 12 }
+]
+```
+
+`404 Not Found` — a product doesn't exist in the caller's club (nothing is written)
+
+```json
+{ "statusCode": 404, "message": "Producto clx-agua no encontrado" }
+```
+
+`400 Bad Request` — validation error
+
+### POST /stock/counts
+
+"Contar stock": receives the real quantity of each counted product, stores the difference against
+what the system expected as an `ADJUSTMENT` (a zero difference is logged too) and returns it.
+Products left out aren't touched. Counting a product that wasn't tracked starts tracking it.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Request body**
+
+| Field                   | Type   | Required | Constraints                      |
+| ----------------------- | ------ | -------- | -------------------------------- |
+| items                   | array  | Yes      | 1..200 lines, each product once  |
+| items[].productId       | string | Yes      | must belong to the caller's club |
+| items[].countedQuantity | number | Yes      | integer 0..100000                |
+| note                    | string | No       | max 200 chars                    |
+
+```json
+{ "items": [{ "productId": "clx-agua", "countedQuantity": 7 }, { "productId": "clx-grip", "countedQuantity": 12 }] }
+```
+
+`201 Created` — one result per counted product, in the request order. `difference` = counted − expected
+(negative = faltante); `null` when the product wasn't tracked before this count.
+
+```json
+[
+  { "productId": "clx-agua", "name": "Agua mineral 500 ml", "previousQuantity": 10, "countedQuantity": 7, "difference": -3 },
+  { "productId": "clx-grip", "name": "Overgrip", "previousQuantity": null, "countedQuantity": 12, "difference": null }
+]
+```
+
+`400 Bad Request` — validation error, or the same product twice
+
+```json
+{ "statusCode": 400, "message": "Hay un producto repetido en el conteo" }
+```
+
+`404 Not Found` — a product doesn't exist in the caller's club (nothing is written)
+
+### GET /stock/shopping-list
+
+"Para comprar": active tracked products at or below their minimum (or out of stock when no minimum is set).
+
+**Auth required:** Yes (OWNER or STAFF)
+
+`200 OK`
+
+```json
+[{ "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA", "stockQuantity": 9, "lowStockThreshold": 24 }]
+```
+
+### GET /stock/products/:productId/movements
+
+A product's ledger, newest first.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Query** — `limit` (1..200, default 50)
+
+`200 OK`
+
+```json
+{
+  "product": { "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA", "stockQuantity": 9, "lowStockThreshold": 24 },
+  "movements": [
+    {
+      "id": "clm...",
+      "type": "SALE",
+      "quantity": -2,
+      "stockAfter": 9,
+      "note": "Consumo del turno",
+      "createdAt": "2026-10-14T23:10:00.000Z",
+      "counterSaleId": null,
+      "user": { "id": 2, "name": "Santiago Ríos" },
+      "booking": {
+        "id": "clb...",
+        "playerName": "Martín Gómez",
+        "slot": { "startsAt": "2026-10-14T22:30:00.000Z", "court": { "name": "Cancha 1" } }
+      }
+    },
+    {
+      "id": "clm...",
+      "type": "PURCHASE",
+      "quantity": 48,
+      "stockAfter": 11,
+      "note": "Distribuidora",
+      "createdAt": "2026-10-13T14:00:00.000Z",
+      "counterSaleId": null,
+      "user": { "id": 2, "name": "Santiago Ríos" },
+      "booking": null
+    }
+  ]
+}
+```
+
+`404 Not Found` — product not in the caller's club
+
+### POST /stock/counter-sales
+
+"Venta suelta": kiosk products sold outside any turno (someone buys a drink without playing),
+paid on the spot. Each product becomes a counter sale with a price snapshot; it counts in
+`GET /stats/revenue` (kiosk revenue + cash/QR of that day) and takes the units out of stock
+when the product is tracked. Never blocked for lack of stock.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Request body**
+
+| Field             | Type   | Required | Constraints                          |
+| ----------------- | ------ | -------- | ------------------------------------ |
+| items             | array  | Yes      | 1..50 lines (repeated products are summed) |
+| items[].productId | string | Yes      | must belong to the caller's club     |
+| items[].quantity  | number | Yes      | integer 1..1000                      |
+| method            | string | Yes      | `CASH` \| `QR` \| `TRANSFER`         |
+
+```json
+{ "items": [{ "productId": "clx-agua", "quantity": 2 }], "method": "CASH" }
+```
+
+`201 Created` — the created sales
+
+```json
+[
+  {
+    "id": "cls...",
+    "quantity": 2,
+    "unitPriceCents": 200000,
+    "method": "CASH",
+    "createdAt": "2026-10-14T21:05:00.000Z",
+    "product": { "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA" },
+    "user": { "id": 2, "name": "Santiago Ríos" }
+  }
+]
+```
+
+`404 Not Found` — a product doesn't exist in the caller's club
+
+```json
+{ "statusCode": 404, "message": "Productos no encontrados: clx-agua" }
+```
+
+### GET /stock/counter-sales
+
+The counter sales of one club-local day, newest first, with totals per payment method.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Query** — `date` ("YYYY-MM-DD", default today)
+
+`200 OK`
+
+```json
+{
+  "dateKey": "2026-10-14",
+  "sales": [{ "id": "cls...", "quantity": 2, "unitPriceCents": 200000, "method": "CASH", "createdAt": "2026-10-14T21:05:00.000Z", "product": { "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA" }, "user": { "id": 2, "name": "Santiago Ríos" } }],
+  "totalCents": 400000,
+  "byMethod": { "CASH": 400000, "QR": 0, "TRANSFER": 0 }
+}
+```
+
+`400 Bad Request` — `date` isn't `YYYY-MM-DD`
+
+### DELETE /stock/counter-sales/:id
+
+Undoes a counter sale (wrong product, charged twice…) and puts its units back in stock (a `SALE`
+movement with a positive quantity, "Venta suelta anulada").
+
+**Auth required:** Yes (OWNER or STAFF)
+
+`204 No Content`
+
+`404 Not Found` — sale not in the caller's club (or already undone)
+
+```json
+{ "statusCode": 404, "message": "Venta cls... no encontrada" }
+```
 
 ## Stats reports
 

@@ -138,6 +138,8 @@ model Club {
   deviceTokens         DeviceToken[]
   products             Product[]
   bookingProducts      BookingProduct[]
+  stockMovements       StockMovement[]
+  counterSales         CounterSale[]
   waitlistEntries      WaitlistEntry[]
   scheduledPriceAdjustments ScheduledPriceAdjustment[]
   bookingPlayerPayments BookingPlayerPayment[]
@@ -278,6 +280,8 @@ model User {
   bookings         Booking[]
   recurringBookings RecurringBooking[]
   deviceTokens     DeviceToken[]
+  stockMovements   StockMovement[]
+  counterSales     CounterSale[]
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
@@ -414,6 +418,7 @@ model Booking {
   receiptUploadedAt  DateTime?
   receipts           PaymentReceipt[]
   bookingProducts    BookingProduct[]
+  stockMovements     StockMovement[]
   /// When the turno's bill was fully settled (todos pagaron) — set/cleared
   /// automatically as player payments cover the total. Null = cuenta abierta.
   settledAt          DateTime?
@@ -483,11 +488,81 @@ model Product {
   priceCents   Int
   category     ProductCategory @default(OTRO)
   isActive     Boolean         @default(true)
-  bookingItems BookingProduct[]
+  /// Units on hand. Null = the club doesn't track stock for this product (never forced on
+  /// anyone). May go negative: a sale is never blocked, the next count corrects it.
+  stockQuantity      Int?
+  /// "Para comprar" once stock drops to this or below. Null = only when it runs out (0).
+  lowStockThreshold  Int?
+  /// When the owner was pushed that this product is low. Cleared once stock is back above the
+  /// threshold, so the alert fires once per crossing instead of on every sale.
+  lowStockNotifiedAt DateTime?
+  bookingItems   BookingProduct[]
+  stockMovements StockMovement[]
+  counterSales   CounterSale[]
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
   @@index([clubId])
+}
+
+enum StockMovementType {
+  /// Goods that came in ("entró mercadería").
+  PURCHASE
+  /// Consumo on a turno or a counter sale (negative), or one undone (positive).
+  SALE
+  /// Physical count difference, initial stock or a manual correction.
+  ADJUSTMENT
+}
+
+/// One line of the kiosk's "entra / sale / queda" ledger. Only written for products whose
+/// stock is tracked (Product.stockQuantity not null).
+model StockMovement {
+  id            String            @id @default(cuid())
+  clubId        String
+  club          Club              @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  type          StockMovementType
+  /// Signed: +N came in, -N went out.
+  quantity      Int
+  /// Stock right after this movement (the "queda" column).
+  stockAfter    Int
+  note          String?           @db.VarChar(200)
+  /// Who registered it. Null for system-made movements.
+  userId        Int?
+  user          User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  /// The turno whose consumos moved the stock, for SALE movements from a bill.
+  bookingId     String?
+  booking       Booking?          @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  /// The counter sale that moved the stock, for SALE movements without a turno.
+  counterSaleId String?
+  counterSale   CounterSale?      @relation(fields: [counterSaleId], references: [id], onDelete: SetNull)
+  createdAt     DateTime          @default(now())
+
+  @@index([clubId, productId, createdAt])
+  @@index([bookingId])
+  @@index([counterSaleId])
+}
+
+/// A kiosk sale outside any turno ("venta suelta": someone buys a drink without playing).
+/// Counts in the day's cash and kiosk revenue like a consumo, and moves stock when tracked.
+model CounterSale {
+  id             String              @id @default(cuid())
+  clubId         String
+  club           Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product             @relation(fields: [productId], references: [id])
+  quantity       Int
+  /// Snapshot of the product price at the time of sale (cents).
+  unitPriceCents Int
+  method         PlayerPaymentMethod
+  userId         Int?
+  user           User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  stockMovements StockMovement[]
+  createdAt      DateTime            @default(now())
+
+  @@index([clubId, createdAt])
+  @@index([productId])
 }
 
 enum ProductCategory {

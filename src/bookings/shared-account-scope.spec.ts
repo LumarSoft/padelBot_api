@@ -12,7 +12,15 @@ function setup() {
     booking: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) },
     club: { findUnique: jest.fn().mockResolvedValue({ requireDniMatch: false }) },
   }
-  const service = new BookingsService(prisma as never, {} as never, {} as never, {} as never, {} as never, {} as never)
+  const service = new BookingsService(
+    prisma as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  )
   return { service, prisma }
 }
 

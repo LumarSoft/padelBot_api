@@ -26,6 +26,7 @@ import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { PlayersService } from '../players/players.service'
 import { SlotPricingService } from '../pricing/slot-pricing.service'
+import { StockService } from '../stock/stock.service'
 
 /** Booking a schedule band that may not have a materialized Slot row yet. */
 export interface BookBandInput {
@@ -210,6 +211,7 @@ export class BookingsService {
     private readonly notifications: NotificationsService,
     private readonly players: PlayersService,
     private readonly slotPricing: SlotPricingService,
+    private readonly stock: StockService,
   ) {}
 
   async findAll(clubId: string, query: QueryBookingsDto) {
@@ -1905,26 +1907,36 @@ export class BookingsService {
   // ── Booking products (consumos) ─────────────────────────────────────────────
 
   /**
-   * Replaces all products associated with a booking in a single transaction.
-   * Passing an empty items array clears all consumos. Club-scoped.
+   * Replaces all products associated with a booking and moves the kiosk stock by the net change,
+   * in one transaction: the bill and the shelf never disagree. Passing an empty items array
+   * clears all consumos (and puts their units back). Club-scoped.
    */
-  async setBookingProducts(clubId: string, bookingId: string, dto: SetBookingProductsDto) {
-    const booking = await this.prisma.booking.findFirst({ where: { id: bookingId, clubId }, select: { id: true } })
-    if (!booking) throw new NotFoundException(`Booking ${bookingId} not found`)
+  async setBookingProducts(clubId: string, bookingId: string, dto: SetBookingProductsDto, userId?: number) {
+    const productIds = [...new Set(dto.items.map(i => i.productId))]
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: productIds }, clubId },
+      select: { id: true, priceCents: true },
+    })
+    const priceMap = new Map(products.map(p => [p.id, p.priceCents]))
+    const missing = productIds.filter(id => !priceMap.has(id))
+    if (missing.length > 0) throw new NotFoundException(`Productos no encontrados: ${missing.join(', ')}`)
 
-    if (dto.items.length > 0) {
-      const productIds = dto.items.map(i => i.productId)
-      const products = await this.prisma.product.findMany({
-        where: { id: { in: productIds }, clubId },
-        select: { id: true, priceCents: true },
+    const alerts = await this.prisma.$transaction(async tx => {
+      // Touching the booking locks it until commit, so two saves of the same bill can't both
+      // read the old lines and move the stock twice. It also scopes the booking to the club.
+      const { count } = await tx.booking.updateMany({
+        where: { id: bookingId, clubId },
+        data: { updatedAt: new Date() },
       })
-      const priceMap = new Map(products.map(p => [p.id, p.priceCents]))
-      const missing = productIds.filter(id => !priceMap.has(id))
-      if (missing.length > 0) throw new NotFoundException(`Productos no encontrados: ${missing.join(', ')}`)
+      if (count === 0) throw new NotFoundException(`Booking ${bookingId} not found`)
 
-      await this.prisma.$transaction([
-        this.prisma.bookingProduct.deleteMany({ where: { bookingId } }),
-        this.prisma.bookingProduct.createMany({
+      const before = await tx.bookingProduct.findMany({
+        where: { bookingId },
+        select: { productId: true, quantity: true },
+      })
+      await tx.bookingProduct.deleteMany({ where: { bookingId } })
+      if (dto.items.length > 0) {
+        await tx.bookingProduct.createMany({
           data: dto.items.map(item => ({
             bookingId,
             productId: item.productId,
@@ -1933,12 +1945,12 @@ export class BookingsService {
             unitPriceCents: priceMap.get(item.productId)!,
             playerMask: item.players.reduce((mask, player) => mask | (1 << (player - 1)), 0),
           })),
-        }),
-      ])
-    } else {
-      await this.prisma.bookingProduct.deleteMany({ where: { bookingId } })
-    }
+        })
+      }
+      return this.stock.applyConsumos(tx, { clubId, bookingId, userId, before, after: dto.items })
+    })
 
+    this.stock.notifyLowStock(clubId, alerts)
     return this.findOne(clubId, bookingId)
   }
 
