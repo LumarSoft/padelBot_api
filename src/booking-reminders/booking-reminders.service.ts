@@ -53,6 +53,9 @@ export class BookingRemindersService {
       where: {
         status: 'CONFIRMED',
         reminderSentAt: null,
+        // A fijo that already got the "¿venís?" (FixedConfirmationsService) doesn't also get the
+        // reminder: one template per turno. One that couldn't be asked still gets reminded.
+        attendanceAskedAt: null,
         playerPhone: { not: null },
         slot: { startsAt: { gte: windowStart, lt: windowEnd } },
       },

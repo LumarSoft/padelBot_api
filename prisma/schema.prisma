@@ -89,6 +89,15 @@ model Club {
   /// be pushed forward forever, which is also how a player would dodge the deposit window.
   maxPlayerReschedules Int @default(1)
 
+  /// Automatic attendance check for the fijos (FixedConfirmationsService): the bot WhatsApps
+  /// each fixed booking "¿venís?" with two buttons, so the front desk stops calling them one by
+  /// one. "No puedo" frees only that date for the waitlist; no answer never cancels anything.
+  /// Off by default: it needs the Meta template approved on the club's number to deliver.
+  fixedConfirmationEnabled   Boolean @default(false)
+  /// How many hours before the turno the question goes out. 24 = the day before, at the same
+  /// time as the turno (always inside the club's opening hours, never at 3 AM).
+  fixedConfirmationLeadHours Int     @default(24)
+
   /// When true, the bot asks the player's DNI at booking, the transfer amount is a clean
   /// round number (no centavos tag), and a transfer auto-confirms only if the payer's DNI
   /// (from MercadoPago) matches the reservation's. Mismatch/unknown → manual review.
@@ -408,6 +417,15 @@ model Booking {
   /// When the pre-match WhatsApp reminder was sent (BookingRemindersService, ~1h before
   /// the slot). Null until sent; guards the reminder cron from re-sending on every sweep.
   reminderSentAt     DateTime?
+  /// Fixed-booking attendance check (FixedConfirmationsService). When the "¿venís?" template
+  /// was sent. Null = not asked; a booking that was asked doesn't also get the 1h reminder.
+  attendanceAskedAt     DateTime?
+  /// The answer: true = "Sí, voy", false = "No puedo" (the booking was released), null = none yet.
+  attendanceConfirmed   Boolean?
+  /// When the answer arrived (from the player on WhatsApp, or the front desk in the panel).
+  attendanceAnsweredAt  DateTime?
+  /// When the staff was pushed that this fijo never answered. Guards the alert from repeating.
+  attendanceAlertSentAt DateTime?
   /// Times the PLAYER moved this booking from WhatsApp (capped by Club.maxPlayerReschedules).
   /// Admin reschedules from the panel don't count — the club can always override.
   rescheduleCount    Int               @default(0)
@@ -425,6 +443,7 @@ model Booking {
   @@index([status, paymentExpiresAt])
   @@index([status, transferAmountCents])
   @@index([status, reminderSentAt])
+  @@index([status, attendanceAskedAt])
 }
 
 /// A transfer-receipt image a player sent for a booking in RECEIPT verification mode.

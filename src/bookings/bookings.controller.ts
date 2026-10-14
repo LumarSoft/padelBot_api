@@ -26,6 +26,7 @@ import { QueryBookingsDto } from './dto/query-bookings.dto'
 import { LocalPaymentDto } from './dto/local-payment.dto'
 import { AddPlayerPaymentDto } from './dto/add-player-payment.dto'
 import { SetBookingProductsDto } from './dto/set-booking-products.dto'
+import { SetAttendanceDto } from './dto/set-attendance.dto'
 
 @Controller('bookings')
 @UseGuards(JwtAuthGuard)
@@ -72,6 +73,13 @@ export class BookingsController {
   @HttpCode(HttpStatus.OK)
   cancel(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     return this.bookingsService.cancel(user.clubId, id)
+  }
+
+  /** The front desk records a fijo's answer by hand ("confirmó" / "no viene" after calling them). */
+  @Patch(':id/attendance')
+  @HttpCode(HttpStatus.OK)
+  setAttendance(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: SetAttendanceDto) {
+    return this.bookingsService.setAttendance(user.clubId, id, dto.confirmed)
   }
 
   /** Soft-deletes a CANCELLED reservation so it drops out of the club's lists (staff or owner). */

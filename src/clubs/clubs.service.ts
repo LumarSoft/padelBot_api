@@ -4,6 +4,7 @@ import { CryptoService } from '../common/crypto/crypto.service'
 import { MercadoPagoService } from '../mercadopago/mercadopago.service'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
 import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
+import { UpdateFixedConfirmationDto } from './dto/update-fixed-confirmation.dto'
 import { DepositMode, PaymentVerificationMode, PlayerRescheduleMode, Prisma } from 'generated/prisma/client'
 import { SubscriptionState, subscriptionSelect, subscriptionState } from './lib/subscription'
 
@@ -19,6 +20,13 @@ export interface TransferConfig {
   playerReschedule: PlayerRescheduleMode
   playerRescheduleCutoffHours: number | null
   maxPlayerReschedules: number
+}
+
+/** The automatic "¿venís?" to the fijos (see FixedConfirmationsService). */
+export interface FixedConfirmationConfig {
+  enabled: boolean
+  /** Hours before the turno the question goes out. */
+  leadHours: number
 }
 
 export interface ClubProfile {
@@ -167,6 +175,26 @@ export class ClubsService {
       },
     })
     return this.getTransferConfig(clubId)
+  }
+
+  async getFixedConfirmation(clubId: string): Promise<FixedConfirmationConfig> {
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      select: { fixedConfirmationEnabled: true, fixedConfirmationLeadHours: true },
+    })
+    if (!club) throw new NotFoundException(`Club ${clubId} not found`)
+    return { enabled: club.fixedConfirmationEnabled, leadHours: club.fixedConfirmationLeadHours }
+  }
+
+  async updateFixedConfirmation(clubId: string, dto: UpdateFixedConfirmationDto): Promise<FixedConfirmationConfig> {
+    await this.prisma.club.update({
+      where: { id: clubId },
+      data: {
+        ...(dto.enabled !== undefined ? { fixedConfirmationEnabled: dto.enabled } : {}),
+        ...(dto.leadHours !== undefined ? { fixedConfirmationLeadHours: dto.leadHours } : {}),
+      },
+    })
+    return this.getFixedConfirmation(clubId)
   }
 
   // ── MercadoPago Connect (OAuth) ──────────────────────────────────────────────

@@ -16,6 +16,7 @@ import { BotService } from '../bot/bot.service'
 import { BotReply, InboundMedia } from '../bot/types'
 import { TECHNICAL_ERROR } from '../bot/messages'
 import { KeyedSerialQueue } from '../common/keyed-serial-queue'
+import { FixedConfirmationsService } from '../fixed-confirmations/fixed-confirmations.service'
 import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
 import { WhatsAppService } from './whatsapp.service'
 
@@ -32,6 +33,7 @@ export class WhatsAppController {
     private readonly whatsappService: WhatsAppService,
     private readonly whatsappLinesService: WhatsAppLinesService,
     private readonly botService: BotService,
+    private readonly fixedConfirmations: FixedConfirmationsService,
   ) {}
 
   /**
@@ -118,6 +120,14 @@ export class WhatsAppController {
             const body = extractInteractiveReply(message)
             if (!body) continue
             await this.inbound.enqueue(waId, () => this.processMessage(phoneNumberId, waId, body))
+          } else if (message?.type === 'button') {
+            // A quick-reply tap on a TEMPLATE we sent (the fijo's "¿venís?"). Unlike interactive
+            // replies its payload is whatever we set at send time, so it's routed to the feature
+            // that sent it; an unknown payload falls back to the button's text as a message.
+            const payload: string | undefined = message?.button?.payload
+            const text: string | undefined = message?.button?.text
+            if (!payload && !text) continue
+            await this.inbound.enqueue(waId, () => this.processTemplateButton(phoneNumberId, waId, payload, text))
           } else if (message?.type === 'audio') {
             // Voice notes are transcribed and then follow the normal text flow.
             const extracted = extractMedia(message)
@@ -170,6 +180,38 @@ export class WhatsAppController {
       // Transport-level safety net (the bot already has its own): never leave the user silent.
       this.logger.error(`Failed to process message from ${waId}`, err)
       await this.sendCourtesy(phoneNumberId, waId)
+    }
+  }
+
+  private async processTemplateButton(
+    phoneNumberId: string,
+    waId: string,
+    payload: string | undefined,
+    text: string | undefined,
+  ): Promise<void> {
+    let clubId: string | null = null
+    let reply: string | null = null
+    try {
+      clubId = await this.resolveClubId(phoneNumberId)
+      if (!clubId) return
+      reply = payload ? await this.fixedConfirmations.handleButtonReply(clubId, waId, payload) : null
+    } catch (err) {
+      this.logger.error(`Failed to process template button from ${waId}`, err)
+      await this.sendCourtesy(phoneNumberId, waId)
+      return
+    }
+
+    if (reply === null) {
+      if (text) await this.processMessage(phoneNumberId, waId, text)
+      return
+    }
+
+    await this.whatsappService.sendText(phoneNumberId, waId, reply)
+    try {
+      // Logged after the send: the player already has their answer even if the chat log hiccups.
+      await this.botService.recordExchange(waId, clubId, text ?? payload ?? '', reply)
+    } catch (err) {
+      this.logger.error(`Failed to log template button exchange with ${waId}`, err)
     }
   }
 

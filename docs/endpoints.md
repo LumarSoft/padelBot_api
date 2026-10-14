@@ -761,6 +761,56 @@ money goes and records it on the booking as `depositOutcome`: cancelled
 become the player's `creditCents`, applied automatically to their next booking); later →
 `FORFEITED`. Unpaid bookings just restore any player credit they had consumed.
 
+### PATCH /bookings/:id/attendance
+
+The front desk records a fijo's answer by hand (they called them, or the player said it in person).
+Same effect as the player's tap on the WhatsApp question (see `docs/FIXED_CONFIRMATIONS.md`):
+`confirmed: true` marks them as coming; `confirmed: false` ("no viene") releases **only this
+date** — the booking is cancelled exactly like `PATCH /bookings/:id/cancel` (slot back to
+`AVAILABLE`, waitlist offered the court) while the recurring booking keeps the next weeks.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field     | Type    | Required | Constraints                                 |
+| --------- | ------- | -------- | ------------------------------------------- |
+| confirmed | boolean | Yes      | `true` = viene · `false` = no viene (libera) |
+
+```json
+{ "confirmed": true }
+```
+
+**Responses**
+
+`200 OK` — the updated booking. Every booking carries the attendance fields:
+
+```json
+{
+  "id": "clx...",
+  "status": "CONFIRMED",
+  "recurringBookingId": "clr...",
+  "attendanceAskedAt": "2026-10-13T22:00:00.000Z",
+  "attendanceConfirmed": true,
+  "attendanceAnsweredAt": "2026-10-14T13:05:12.000Z"
+}
+```
+
+`attendanceAskedAt` = when the WhatsApp question went out (null = not asked);
+`attendanceConfirmed` = `true` / `false` / `null` (no answer yet); `attendanceAnsweredAt` = when
+the answer arrived. With `confirmed: false` the response is the cancelled booking
+(`status: "CANCELLED"`, `attendanceConfirmed: false`).
+
+`400 Bad Request` — not a fijo, no longer booked, or (for `false`) the turno already started
+
+```json
+{ "statusCode": 400, "message": "Solo los turnos fijos tienen confirmación de asistencia" }
+```
+
+`404 Not Found` — booking not found in the caller's club
+
+`409 Conflict` — the booking changed while confirming it
+
 ### DELETE /bookings/:id
 
 Soft-deletes a booking so it drops out of the club's lists (mobile/panel). Only a
@@ -1215,6 +1265,13 @@ Finishes Meta's Embedded Signup popup from the panel: exchanges the one-time `co
 
 The app must be subscribed to `messages` and, for coexistence numbers, also to `smb_message_echoes`, `history` and `smb_app_state_sync`. An `smb_message_echoes` event (the club answered from the phone) is stored in the chat as `ADMIN` and pauses the bot on that chat for `WHATSAPP_OWNER_REPLY_PAUSE_HOURS` (default 6).
 
+A `messages` entry with `type: "button"` is a tap on a quick-reply button of a **template** we
+sent (`message.button.payload` / `.text`). Payloads `FIJO:YES:<bookingId>` / `FIJO:NO:<bookingId>`
+are the fijo's answer to the attendance question (`docs/FIXED_CONFIRMATIONS.md`): handled in the
+sender's serial queue, only after checking the booking belongs to the line's club and to the
+number that tapped, idempotently. Any other payload is treated as the button's text, like a typed
+message.
+
 ## Clubs
 
 Per-club settings. The transfer config holds the MercadoPago alias/CVU players send the deposit to.
@@ -1346,6 +1403,52 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 ```
 
 `200 OK` — the updated transfer config
+
+`403 Forbidden` — caller is not the club owner
+
+### GET /clubs/me/fixed-confirmation
+
+The automatic WhatsApp question to the fijos ("¿venís?", see `docs/FIXED_CONFIRMATIONS.md`).
+Readable by staff and owner — the agenda shows the answers only when it's on.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{ "enabled": true, "leadHours": 24 }
+```
+
+### PATCH /clubs/me/fixed-confirmation
+
+Turns the question on/off and sets how early it goes out. **Owner only.**
+
+**Auth required:** Yes (role `owner`)
+
+**Request body**
+
+| Field     | Type    | Required | Constraints                                                   |
+| --------- | ------- | -------- | ------------------------------------------------------------- |
+| enabled   | boolean | No       | on/off (default off: needs the Meta template approved first)  |
+| leadHours | int     | No       | one of `3`, `6`, `12`, `24`, `48` — hours before the turno    |
+
+```json
+{ "enabled": true, "leadHours": 24 }
+```
+
+**Responses**
+
+`200 OK` — the updated config
+
+```json
+{ "enabled": true, "leadHours": 24 }
+```
+
+`400 Bad Request` — `leadHours` outside the allowed values
+
+```json
+{ "statusCode": 400, "message": ["leadHours must be one of the following values: 3, 6, 12, 24, 48"], "error": "Bad Request" }
+```
 
 `403 Forbidden` — caller is not the club owner
 

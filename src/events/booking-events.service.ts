@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { Observable, Subject, filter } from 'rxjs'
 
-export type BookingAction = 'created' | 'cancelled' | 'rescheduled'
+/** `attendance` = a fijo confirmed they're coming (FixedConfirmationsService). */
+export type BookingAction = 'created' | 'cancelled' | 'rescheduled' | 'attendance'
 
 export interface BookingEvent {
   type: 'booking.changed'

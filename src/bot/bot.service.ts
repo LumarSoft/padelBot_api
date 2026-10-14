@@ -830,6 +830,17 @@ export class BotService {
   }
 
   /**
+   * Logs an exchange the bot's FSM didn't run — a tap on a template button, e.g. the fijo's
+   * "Sí, voy" and its answer — so the club's chat view shows it like any other message. Doesn't
+   * touch the session's state, mode or history.
+   */
+  async recordExchange(waId: string, clubId: string, playerText: string, botText: string): Promise<void> {
+    const session = await this.sessionService.getOrCreate(waId, clubId)
+    await this.sessionService.saveMessage(session.id, 'USER', playerText)
+    await this.sessionService.saveMessage(session.id, 'BOT', botText)
+  }
+
+  /**
    * HUMAN guard shared by every inbound path. A temporary takeover (owner replied from the
    * phone) that already ran out flips back to AI here, so the bot answers this message.
    */

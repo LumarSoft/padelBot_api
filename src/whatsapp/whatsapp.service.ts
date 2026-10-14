@@ -66,6 +66,10 @@ export class WhatsAppService {
    * free-form `sendText` in that case. `bodyParams` fill the template's `{{1}}`, `{{2}}`… in
    * order; the template itself (name, language, wording) must already be approved in the
    * WhatsApp Business Manager for the number behind `phoneNumberId`.
+   *
+   * `quickReplyPayloads` fill the template's quick-reply buttons, in order (index 0, 1…). A tap
+   * comes back as an inbound `button` message carrying that payload, which is how the reply is
+   * tied to what was asked (e.g. which booking a "No puedo" is about).
    */
   async sendTemplate(
     phoneNumberId: string,
@@ -73,6 +77,7 @@ export class WhatsAppService {
     templateName: string,
     languageCode: string,
     bodyParams: string[],
+    quickReplyPayloads: string[] = [],
   ): Promise<boolean> {
     return this.postMessage(phoneNumberId, to, {
       type: 'template',
@@ -84,6 +89,12 @@ export class WhatsAppService {
             type: 'body',
             parameters: bodyParams.map(text => ({ type: 'text', text })),
           },
+          ...quickReplyPayloads.map((payload, index) => ({
+            type: 'button',
+            sub_type: 'quick_reply',
+            index: String(index),
+            parameters: [{ type: 'payload', payload }],
+          })),
         ],
       },
     })

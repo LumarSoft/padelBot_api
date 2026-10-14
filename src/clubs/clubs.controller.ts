@@ -18,6 +18,7 @@ import { ConnectMercadoPagoDto } from './dto/connect-mercadopago.dto'
 import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
 import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
 import { UpdateFaqDto } from './dto/update-faq.dto'
+import { UpdateFixedConfirmationDto } from './dto/update-fixed-confirmation.dto'
 
 @Controller('clubs')
 @UseGuards(JwtAuthGuard)
@@ -63,6 +64,18 @@ export class ClubsController {
   updateTransferConfig(@CurrentUser() user: AuthenticatedUser, @Body() dto: UpdateTransferConfigDto) {
     this.assertOwner(user)
     return this.clubsService.updateTransferConfig(user.clubId, dto)
+  }
+
+  /** The automatic "¿venís?" to the fijos. Readable by staff (the agenda shows the answers). */
+  @Get('me/fixed-confirmation')
+  getFixedConfirmation(@CurrentUser() user: AuthenticatedUser) {
+    return this.clubsService.getFixedConfirmation(user.clubId)
+  }
+
+  @Patch('me/fixed-confirmation')
+  updateFixedConfirmation(@CurrentUser() user: AuthenticatedUser, @Body() dto: UpdateFixedConfirmationDto) {
+    this.assertOwner(user)
+    return this.clubsService.updateFixedConfirmation(user.clubId, dto)
   }
 
   // ── MercadoPago Connect (OAuth) ──────────────────────────────────────────────

@@ -31,6 +31,7 @@ import { ProductsModule } from './products/products.module'
 import { BookingRemindersModule } from './booking-reminders/booking-reminders.module'
 import { OpsModule } from './ops/ops.module'
 import { DemoModule } from './demo/demo.module'
+import { FixedConfirmationsModule } from './fixed-confirmations/fixed-confirmations.module'
 
 @Module({
   imports: [
@@ -66,6 +67,7 @@ import { DemoModule } from './demo/demo.module'
     BookingRemindersModule,
     OpsModule,
     DemoModule,
+    FixedConfirmationsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

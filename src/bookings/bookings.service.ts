@@ -63,6 +63,9 @@ const bookingSelect = {
   mpPaymentId: true,
   paymentExpiresAt: true,
   receiptUploadedAt: true,
+  attendanceAskedAt: true,
+  attendanceConfirmed: true,
+  attendanceAnsweredAt: true,
   createdAt: true,
   updatedAt: true,
   slot: {
@@ -165,6 +168,17 @@ const SHARED_ACCOUNT_CLUBS = {
   paymentVerificationMode: 'AUTO',
   mpAccessToken: null,
   slug: { not: SALES_DEMO_SLUG },
+} as const
+
+/**
+ * A fijo's "¿venís?" was asked (and maybe answered) for the slot's OLD time. On a move, clear it
+ * so FixedConfirmationsService asks again for the new time — like `reminderSentAt`.
+ */
+const ATTENDANCE_RESET = {
+  attendanceAskedAt: null,
+  attendanceConfirmed: null,
+  attendanceAnsweredAt: null,
+  attendanceAlertSentAt: null,
 } as const
 
 @Injectable()
@@ -377,7 +391,11 @@ export class BookingsService {
     return booking
   }
 
-  async cancel(clubId: string, id: string) {
+  /**
+   * `attendanceDeclined`: the cancellation IS a fijo's "no puedo" (WhatsApp or front desk) —
+   * recorded in the same conditional write, so the answer and the release can't half-happen.
+   */
+  async cancel(clubId: string, id: string, options: { attendanceDeclined?: boolean } = {}) {
     const booking = await this.findOne(clubId, id)
     if (booking.status === 'CANCELLED') {
       throw new BadRequestException('La reserva ya fue cancelada')
@@ -396,7 +414,11 @@ export class BookingsService {
       // were still unpaid would silently swallow the deposit that just landed.
       const { count } = await tx.booking.updateMany({
         where: { id, status: booking.status },
-        data: { status: 'CANCELLED', depositOutcome },
+        data: {
+          status: 'CANCELLED',
+          depositOutcome,
+          ...(options.attendanceDeclined ? { attendanceConfirmed: false, attendanceAnsweredAt: new Date() } : {}),
+        },
       })
       if (count !== 1) return null
 
@@ -496,7 +518,7 @@ export class BookingsService {
       // reminder already sent for the old time would suppress the (now-wrong) one for the new time.
       return tx.booking.update({
         where: { id },
-        data: { slotId: dto.newSlotId, reminderSentAt: null },
+        data: { slotId: dto.newSlotId, reminderSentAt: null, ...ATTENDANCE_RESET },
         select: bookingSelect,
       })
     })
@@ -901,6 +923,50 @@ export class BookingsService {
           ]
         : []),
     ])
+  }
+
+  // ── Fijo attendance check (see FixedConfirmationsService) ─────────────────────
+
+  /**
+   * Records that the fijo is coming. Conditional on the booking still being an active fijo, so
+   * a "sí" that races a cancellation never resurrects it. False = nothing changed.
+   */
+  async confirmAttendance(clubId: string, id: string): Promise<boolean> {
+    const { count } = await this.prisma.booking.updateMany({
+      where: { id, clubId, status: 'CONFIRMED', recurringBookingId: { not: null }, deletedAt: null },
+      data: { attendanceConfirmed: true, attendanceAnsweredAt: new Date() },
+    })
+    if (count !== 1) return false
+
+    const booking = await this.prisma.booking.findUnique({ where: { id }, select: bookingSelect })
+    if (booking) this.emitBookingChange('attendance', booking)
+    return true
+  }
+
+  /**
+   * The front desk records a fijo's answer by hand (they called them, or the player told them in
+   * person). "No viene" releases only this date, exactly like the player's "No puedo": the
+   * RecurringBooking keeps booking the next weeks and the freed court goes to the waitlist.
+   */
+  async setAttendance(clubId: string, id: string, confirmed: boolean) {
+    const booking = await this.findOne(clubId, id)
+    if (!booking.recurringBookingId) {
+      throw new BadRequestException('Solo los turnos fijos tienen confirmación de asistencia')
+    }
+    if (booking.status !== 'CONFIRMED') {
+      throw new BadRequestException('Este turno ya no está reservado')
+    }
+    if (!confirmed) {
+      if (new Date(booking.slot.startsAt).getTime() <= Date.now()) {
+        throw new BadRequestException('El turno ya empezó: no hay nada que liberar')
+      }
+      return this.cancel(clubId, id, { attendanceDeclined: true })
+    }
+
+    if (!(await this.confirmAttendance(clubId, id))) {
+      throw new ConflictException('El turno cambió mientras lo confirmábamos. Volvé a abrirlo y fijate.')
+    }
+    return this.findOne(clubId, id)
   }
 
   /**
@@ -1454,6 +1520,7 @@ export class BookingsService {
             slotId: newSlotId,
             // The reminder was scheduled against the old time; let it be re-evaluated.
             reminderSentAt: null,
+            ...ATTENDANCE_RESET,
             rescheduleCount: { increment: 1 },
           },
         })
