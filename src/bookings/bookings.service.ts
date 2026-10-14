@@ -26,6 +26,7 @@ import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { PlayersService } from '../players/players.service'
 import { SlotPricingService } from '../pricing/slot-pricing.service'
+import { splitPaymentLockedMessage } from '../plans/lib/features'
 import { PlansService } from '../plans/plans.service'
 import { StockService } from '../stock/stock.service'
 
@@ -869,14 +870,20 @@ export class BookingsService {
    * refreshed account so the panel updates in one round trip.
    */
   async addPlayerPayment(clubId: string, bookingId: string, dto: AddPlayerPaymentDto): Promise<BookingAccountView> {
-    // Charging each player their share is the split-payment module; undoing a payment never asks.
-    await this.plans.assertFeature(clubId, 'splitPayment')
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, clubId },
       select: { id: true, status: true },
     })
     if (!booking) throw new NotFoundException('Reserva no encontrada')
     if (booking.status === 'CANCELLED') throw new BadRequestException('La reserva está cancelada')
+
+    // This is the desk's only way to record a payment, so every plan can charge the turno.
+    // What the split-payment module adds is charging a player just their share: without it, a
+    // payment has to cover the whole remaining bill. Undoing a payment never asks.
+    if (!(await this.plans.hasFeature(clubId, 'splitPayment'))) {
+      const { view } = await this.loadAccount(clubId, bookingId)
+      if (dto.amountCents < view.remainingCents) throw new ForbiddenException(splitPaymentLockedMessage())
+    }
 
     await this.prisma.bookingPlayerPayment.create({
       data: { clubId, bookingId, playerSlot: dto.playerSlot, amountCents: dto.amountCents, method: dto.method },

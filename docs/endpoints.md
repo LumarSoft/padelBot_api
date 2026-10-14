@@ -1059,7 +1059,7 @@ again if a payment is undone. Returns the refreshed account.
 
 `200 OK` — refreshed account · `400 Bad Request` — cancelled booking · `404 Not Found`
 
-`403 Forbidden` — the plan doesn't include split payment (Saque, unless the club predates the plans). Removing a payment is never refused.
+`403 Forbidden` — on a plan without split payment (Saque, unless the club predates the plans) a payment must cover the whole remaining bill: the desk charges the turno in one payment, charging a player only their share is refused. Removing a payment is never refused.
 
 ### DELETE /bookings/:id/payments/:paymentId
 

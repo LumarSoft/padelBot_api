@@ -16,3 +16,8 @@ export const FEATURE_LABELS: Record<PlanFeature, string> = {
 export function featureLockedMessage(feature: PlanFeature): string {
   return `${FEATURE_LABELS[feature]} viene con el plan ${cheapestPlanWith(feature).name}. Escribinos y te lo activamos.`
 }
+
+/** Without split payment the desk still charges the turno — in one payment for the whole bill. */
+export function splitPaymentLockedMessage(): string {
+  return `${featureLockedMessage('splitPayment')} Con tu plan, registrá el turno completo en un solo pago.`
+}

@@ -112,8 +112,12 @@ describe('scheduled price rises and the plan', () => {
 })
 
 describe('split payment and the plan', () => {
-  it('refuses charging a player their share on a new Saque club', async () => {
-    const prisma = { bookingPlayerPayment: { create: jest.fn() }, booking: { findFirst: jest.fn() } }
+  /** A confirmed turno whose bill still owes $20.000. */
+  function setup(club: { plan: string; grandfatheredFeatures: boolean }) {
+    const prisma = {
+      booking: { findFirst: jest.fn().mockResolvedValue({ id: 'b1', status: 'CONFIRMED' }) },
+      bookingPlayerPayment: { create: jest.fn().mockResolvedValue({}) },
+    }
     const bookings = new BookingsService(
       prisma as never,
       {} as never,
@@ -122,13 +126,37 @@ describe('split payment and the plan', () => {
       {} as never,
       {} as never,
       {} as never,
-      plansFor(NEW_SAQUE),
+      plansFor(club),
     )
+    const internals = bookings as unknown as Record<'loadAccount' | 'refreshSettled', () => Promise<unknown>>
+    jest.spyOn(internals, 'loadAccount').mockResolvedValue({ view: { remainingCents: 2_000_000 }, settledAt: null })
+    jest.spyOn(internals, 'refreshSettled').mockResolvedValue({})
+    const pay = (amountCents: number) =>
+      bookings.addPlayerPayment('c1', 'b1', { playerSlot: 2, amountCents, method: 'CASH' } as never)
+    return { prisma, pay }
+  }
 
-    await expect(
-      bookings.addPlayerPayment('c1', 'b1', { playerSlot: 1, amountCents: 500_000, method: 'CASH' } as never),
-    ).rejects.toThrow(/cobro dividido.*Bandeja/)
+  it('refuses charging a player just their share on a new Saque club', async () => {
+    const { prisma, pay } = setup(NEW_SAQUE)
+
+    await expect(pay(500_000)).rejects.toThrow(/cobro dividido.*Bandeja.*turno completo/)
     expect(prisma.bookingPlayerPayment.create).not.toHaveBeenCalled()
+  })
+
+  it('still lets a Saque desk charge the whole turno in one payment', async () => {
+    const { prisma, pay } = setup(NEW_SAQUE)
+
+    await pay(2_000_000)
+
+    expect(prisma.bookingPlayerPayment.create).toHaveBeenCalled()
+  })
+
+  it('lets Bandeja and clubs that predate the plans split the bill', async () => {
+    for (const club of [BANDEJA, OLD_SAQUE]) {
+      const { prisma, pay } = setup(club)
+      await pay(500_000)
+      expect(prisma.bookingPlayerPayment.create).toHaveBeenCalled()
+    }
   })
 })
 
