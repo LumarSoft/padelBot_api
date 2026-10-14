@@ -7,9 +7,37 @@
 #
 # It pulls the latest master, installs deps, applies pending DB migrations
 # (NEVER resets data — uses `migrate deploy`, not `migrate dev`), rebuilds
-# and restarts the pm2 process.
+# and restarts the pm2 process. It picks a supported Node (>= 22.12) on its own,
+# so it works from that non-interactive SSH command too.
 
 set -euo pipefail
+
+# --- Node >= 22.12 first in PATH ---
+# A non-interactive SSH session doesn't load the login profile, so nvm isn't set up and
+# `node` is the VPS's system Node 18, on which Prisma 7 can't even run `generate`. When the
+# node in PATH is too old, put an nvm-installed Node >= 22.12 first, so pnpm, prisma, the
+# build and the PM2 interpreter below all run on it: nvm's default (the one an interactive
+# login gets, with its own pnpm) when it qualifies, otherwise the newest one installed.
+node_supported() {
+  "$1" -e 'const [major, minor] = process.versions.node.split(".").map(Number)
+    process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)' 2>/dev/null
+}
+if ! node_supported "$(command -v node || echo node)"; then
+  nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+  nvm_default="$(cat "$nvm_dir/alias/default" 2>/dev/null || true)"
+  for node_bin in "$nvm_dir/versions/node/v${nvm_default#v}/bin" \
+    $(ls -d "$nvm_dir"/versions/node/v*/bin 2>/dev/null | sort -rV); do
+    if node_supported "$node_bin/node"; then
+      export PATH="$node_bin:$PATH"
+      break
+    fi
+  done
+fi
+# Fail before touching the checkout rather than halfway through the deploy.
+if ! node_supported "$(command -v node || echo node)"; then
+  echo "ERROR: Node >= 22.12 is required (found $(node -v 2>/dev/null || echo none)); install it with nvm" >&2
+  exit 1
+fi
 
 # --- config: ajustá el nombre del proceso pm2 si es distinto ---
 PM2_APP="${PM2_APP:-padelbot_api}"
