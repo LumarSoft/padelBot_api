@@ -105,13 +105,14 @@ export class StatsReportsService {
 
   /**
    * Money per day in a date range: deposits actually collected (confirmed transfer
-   * flow) and kiosk consumption. The panel renders it and exports it as CSV.
+   * flow) and kiosk consumption (turno bills + counter sales). The panel renders it and
+   * exports it as CSV.
    */
   async getRevenue(clubId: string, fromKey: string, toKey: string): Promise<RevenueReport> {
     const from = dayRangeUtc(fromKey).gte
     const to = dayRangeUtc(shiftDateKey(toKey, 1)).gte
 
-    const [bookings, products, playerPayments] = await Promise.all([
+    const [bookings, products, playerPayments, counterSales] = await Promise.all([
       this.prisma.booking.findMany({
         where: {
           clubId,
@@ -133,6 +134,10 @@ export class StatsReportsService {
       this.prisma.bookingPlayerPayment.findMany({
         where: { clubId, booking: { slot: { startsAt: { gte: from, lt: to } } } },
         select: { amountCents: true, method: true, booking: { select: { slot: { select: { startsAt: true } } } } },
+      }),
+      this.prisma.counterSale.findMany({
+        where: { clubId, createdAt: { gte: from, lt: to } },
+        select: { quantity: true, unitPriceCents: true, method: true, createdAt: true },
       }),
     ])
 
@@ -169,6 +174,15 @@ export class StatsReportsService {
       const entry = dayOf(payment.booking.slot.startsAt)
       if (payment.method === 'CASH') entry.cashCents += payment.amountCents
       else entry.qrCents += payment.amountCents
+    }
+    // Counter sales (venta suelta, no turno): kiosk revenue of the day they happened, and the
+    // money they brought to the desk — the same two sides a consumo paid at the bill counts in.
+    for (const sale of counterSales) {
+      const entry = dayOf(sale.createdAt)
+      const cents = sale.quantity * sale.unitPriceCents
+      entry.productsCents += cents
+      if (sale.method === 'CASH') entry.cashCents += cents
+      else entry.qrCents += cents
     }
 
     const days = [...byDay.values()].sort((a, b) => a.dateKey.localeCompare(b.dateKey))

@@ -1877,7 +1877,9 @@ every court. Owner-only. Drives "tus martes 15:00 están al 20%, probá un preci
 
 Money per club-local day in a range: deposits actually collected through the transfer
 flow, kiosk consumption, and front-desk collections — both the legacy aggregate and the
-per-player bill payments (CASH → efectivo; QR/TRANSFER → mostrador digital). Owner-only. The panel exports this as CSV.
+per-player bill payments (CASH → efectivo; QR/TRANSFER → mostrador digital). Counter sales
+(`POST /stock/counter-sales`, no turno) count on the day they happened, both in `productsCents`
+and in the cash/QR of their payment method. Owner-only. The panel exports this as CSV.
 
 **Auth required:** Yes (OWNER only)
 
