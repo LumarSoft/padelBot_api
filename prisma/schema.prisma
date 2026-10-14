@@ -27,6 +27,10 @@ model Club {
   /// Commercial plan: "saque" | "bandeja" | "smash" (the landing's plans). Its limits and
   /// modules live in `src/plans/lib/plans.ts`; an unknown key restricts nothing.
   plan               String             @default("saque")
+  /// The club existed before the plans were enforced: it keeps every module (fijo confirmation,
+  /// kiosk stock, waitlist, split payment, scheduled price rises) whatever its plan, so nobody
+  /// loses a feature silently. Ops clears it from the console once a plan is agreed with the club.
+  grandfatheredFeatures Boolean @default(false)
   /// Last AI-credit alert sent to ops (AiCreditAlertsService): the month ("2026-10") and the
   /// threshold crossed (80 / 100), so each threshold pings once per club and month. Going over
   /// the plan's credits never cuts the bot — it only tells us to talk to the club.

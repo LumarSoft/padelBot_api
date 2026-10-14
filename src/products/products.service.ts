@@ -43,6 +43,7 @@ export class ProductsService {
 
   /** Creates a product; a starting stock opens its ledger with an "Stock inicial" adjustment. */
   async create(clubId: string, dto: CreateProductDto, userId?: number) {
+    if (dto.stockQuantity != null) await this.stock.assertCanStartTracking(clubId)
     const { id } = await this.prisma.$transaction(async tx => {
       const created = await tx.product.create({
         data: {
@@ -70,6 +71,7 @@ export class ProductsService {
    */
   async update(clubId: string, id: string, dto: UpdateProductDto, userId?: number) {
     const current = await this.findOne(clubId, id)
+    if (dto.stockQuantity != null && current.stockQuantity === null) await this.stock.assertCanStartTracking(clubId)
     await this.prisma.$transaction(async tx => {
       await tx.product.update({
         where: { id },

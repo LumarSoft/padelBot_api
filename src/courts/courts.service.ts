@@ -123,6 +123,9 @@ export class CourtsService {
     // A future effective date SCHEDULES the change ("desde el 1/8 sube 10%") — in
     // Argentina los aumentos se anuncian antes de que rijan. Applied by applyDueAdjustments.
     if (!dto.dryRun && dto.effectiveDate && dto.effectiveDate > todayKey()) {
+      // Scheduling is the plan's module; raising prices today is open to every plan, and the
+      // adjustments already scheduled still apply on their day.
+      await this.plans.assertFeature(clubId, 'scheduledPriceAdjustments')
       const scheduled = await this.prisma.scheduledPriceAdjustment.create({
         data: { clubId, percent: dto.percent, effectiveDateKey: dto.effectiveDate },
         select: { id: true, percent: true, effectiveDateKey: true },

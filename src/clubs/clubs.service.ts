@@ -6,6 +6,7 @@ import { UpdateTransferConfigDto } from './dto/update-transfer-config.dto'
 import { UpdateClubProfileDto } from './dto/update-club-profile.dto'
 import { UpdateFixedConfirmationDto } from './dto/update-fixed-confirmation.dto'
 import { DepositMode, PaymentVerificationMode, PlayerRescheduleMode, Prisma } from 'generated/prisma/client'
+import { PlansService } from '../plans/plans.service'
 import { SubscriptionState, subscriptionSelect, subscriptionState } from './lib/subscription'
 
 export interface TransferConfig {
@@ -80,6 +81,7 @@ export class ClubsService {
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
     private readonly mp: MercadoPagoService,
+    private readonly plans: PlansService,
   ) {}
 
   /** Effective subscription state for the panel's banner (soft guard, never blocks the panel). */
@@ -187,6 +189,10 @@ export class ClubsService {
   }
 
   async updateFixedConfirmation(clubId: string, dto: UpdateFixedConfirmationDto): Promise<FixedConfirmationConfig> {
+    // Only switching it ON asks the plan: a club that already has it running keeps it.
+    if (dto.enabled === true && !(await this.getFixedConfirmation(clubId)).enabled) {
+      await this.plans.assertFeature(clubId, 'fixedConfirmation')
+    }
     await this.prisma.club.update({
       where: { id: clubId },
       data: {

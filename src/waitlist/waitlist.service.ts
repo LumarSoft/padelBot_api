@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule'
 import { Subscription } from 'rxjs'
 import { PrismaService } from '../prisma/prisma.service'
 import { WhatsAppService } from '../whatsapp/whatsapp.service'
+import { PlansService } from '../plans/plans.service'
 import { BookingEventsService, SlotFreedEvent } from '../events/booking-events.service'
 import { dayLabelFromKey, formatTime, formatTimeRange, toDateKey, todayKey } from '../availability/lib/datetime'
 import { schedulerEnabled } from '../common/scheduling'
@@ -19,7 +20,16 @@ export class WaitlistService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly whatsapp: WhatsAppService,
     private readonly events: BookingEventsService,
+    private readonly plans: PlansService,
   ) {}
+
+  /**
+   * Whether the bot offers "respondé *avisame*" on a full day. Only the offer depends on the
+   * plan: players already on a list are still told when a slot frees.
+   */
+  offeredIn(clubId: string): Promise<boolean> {
+    return this.plans.hasFeature(clubId, 'waitlist')
+  }
 
   onModuleInit(): void {
     // In-process fan-out: whenever a slot frees anywhere, offer it to that day's waitlist.

@@ -8,7 +8,7 @@ import { LlmService } from './llm.service'
 function setup() {
   process.env.OPENAI_API_KEY ??= 'test-key'
   const upsert = jest.fn().mockResolvedValue({})
-  const service = new LlmService({ llmUsageDaily: { upsert } } as never, {} as never)
+  const service = new LlmService({ llmUsageDaily: { upsert } } as never, {} as never, {} as never)
   const openai = {
     audio: {
       transcriptions: {

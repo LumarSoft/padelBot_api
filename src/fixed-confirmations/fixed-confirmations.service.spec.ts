@@ -222,7 +222,7 @@ describe('"No puedo" → release → waitlist (real BookingsService and Waitlist
     }
     const events = new BookingEventsService()
     const whatsapp = { sendText: jest.fn().mockResolvedValue(true) }
-    const waitlist = new WaitlistService(prisma as never, whatsapp as never, events)
+    const waitlist = new WaitlistService(prisma as never, whatsapp as never, events, {} as never)
     waitlist.onModuleInit()
 
     // Reflect.construct keeps this test independent of how many collaborators BookingsService

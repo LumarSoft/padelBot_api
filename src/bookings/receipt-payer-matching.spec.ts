@@ -34,6 +34,7 @@ function setup(candidates: Candidate[], requireDniMatch = true) {
     {} as never,
     {} as never,
     {} as never,
+    {} as never, // plans
   )
   const confirm = jest.spyOn(service, 'confirmPayment').mockResolvedValue(true)
   return { service, confirm }

@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common'
+import { BadRequestException, ForbiddenException } from '@nestjs/common'
 import { BookingsService } from '../bookings/bookings.service'
 import { StockService } from './stock.service'
 import { consumoDeltas, isLowStock } from './lib/stock-math'
@@ -59,6 +59,7 @@ interface Where {
   id?: string | { in: string[] }
   clubId?: string
   bookingId?: string
+  stockQuantity?: null
 }
 interface Query {
   where: Where
@@ -87,6 +88,15 @@ function fakeDb(products: FakeProduct[], lines: FakeLine[] = []) {
         [...state.products.values()]
           .filter(p => p.clubId === where.clubId && (typeof where.id !== 'object' || where.id.in.includes(p.id)))
           .map(p => pick(p, select)),
+      ),
+      count: jest.fn(
+        async ({ where }: Query) =>
+          [...state.products.values()].filter(
+            p =>
+              p.clubId === where.clubId &&
+              (typeof where.id !== 'object' || where.id.in.includes(p.id)) &&
+              (where.stockQuantity !== null || p.stockQuantity === null),
+          ).length,
       ),
       findFirst: jest.fn(async ({ where, select }: Query) => {
         const p = state.products.get(idOf(where))
@@ -163,10 +173,16 @@ function fakeDb(products: FakeProduct[], lines: FakeLine[] = []) {
   }
 }
 
-function setup(products: FakeProduct[], lines: FakeLine[] = []) {
+function setup(products: FakeProduct[], lines: FakeLine[] = [], opts: { planHasStock?: boolean } = {}) {
   const db = fakeDb(products, lines)
   const notifications = { notifyOwners: jest.fn().mockResolvedValue(undefined), notifyClub: jest.fn() }
-  const stock = new StockService(db.client as never, notifications as never)
+  const plans = {
+    assertFeature: jest.fn(async () => {
+      if (opts.planHasStock === false)
+        throw new ForbiddenException('El control de stock del kiosco viene con el plan Bandeja.')
+    }),
+  }
+  const stock = new StockService(db.client as never, notifications as never, plans as never)
   const bookings = new BookingsService(
     db.client as never,
     {} as never,
@@ -175,6 +191,7 @@ function setup(products: FakeProduct[], lines: FakeLine[] = []) {
     {} as never,
     {} as never,
     stock,
+    plans as never,
   )
   jest.spyOn(bookings, 'findOne').mockResolvedValue({ id: 'b1' } as never)
   const setConsumos = (items: { productId: string; quantity: number; players?: number[] }[]) =>
@@ -407,5 +424,38 @@ describe('StockService.registerCount', () => {
     ).rejects.toThrow('Producto ajeno no encontrado')
     expect(db.stockOf('agua')).toBe(10)
     expect(db.stockOf('ajeno')).toBe(5)
+  })
+})
+
+/**
+ * Kiosk stock is a Bandeja module. On a plan without it the API refuses STARTING to track a
+ * product, and nothing else: products already tracked (a club moved down a plan) keep every
+ * stock operation, and sales never ask.
+ */
+describe('kiosk stock and the plan', () => {
+  it('refuses a delivery that would start tracking a product on a plan without stock', async () => {
+    const { stock, db } = setup([product('agua', null)], [], { planHasStock: false })
+
+    await expect(stock.registerPurchase(CLUB, 7, { items: [{ productId: 'agua', quantity: 24 }] })).rejects.toThrow(
+      ForbiddenException,
+    )
+    expect(db.stockOf('agua')).toBeNull()
+  })
+
+  it('keeps deliveries and counts working for a product already tracked', async () => {
+    const { stock, db } = setup([product('agua', 10)], [], { planHasStock: false })
+
+    await stock.registerPurchase(CLUB, 7, { items: [{ productId: 'agua', quantity: 24 }] })
+    await stock.registerCount(CLUB, 7, { items: [{ productId: 'agua', countedQuantity: 30 }] })
+
+    expect(db.stockOf('agua')).toBe(30)
+  })
+
+  it('starts tracking on a plan with stock', async () => {
+    const { stock, db } = setup([product('agua', null)])
+
+    await stock.registerPurchase(CLUB, 7, { items: [{ productId: 'agua', quantity: 24 }] })
+
+    expect(db.stockOf('agua')).toBe(24)
   })
 })

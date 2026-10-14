@@ -746,10 +746,11 @@ export class BotService {
     const bands = await this.availability.availableBandsForDate(clubId, date)
     if (bands.length === 0) {
       const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
+      const offerWaitlist = await this.waitlist.offeredIn(clubId)
       return {
-        reply: noAvailabilityWithSuggestions(date, suggestions),
+        reply: noAvailabilityWithSuggestions(date, suggestions, offerWaitlist),
         state: BotState.RESCHEDULE_DATE,
-        ctx: { ...ctx, waitlistOfferDate: date },
+        ctx: { ...ctx, waitlistOfferDate: offerWaitlist ? date : undefined },
       }
     }
 
@@ -936,10 +937,11 @@ export class BotService {
       // Don't dead-end: offer the nearest days that do have availability and
       // stay in BOOK_DATE so the player can just reply with one of them.
       const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
+      const offerWaitlist = await this.waitlist.offeredIn(clubId)
       return {
-        reply: noAvailabilityWithSuggestions(date, suggestions),
+        reply: noAvailabilityWithSuggestions(date, suggestions, offerWaitlist),
         state: BotState.BOOK_DATE,
-        ctx: { ...ctx, waitlistOfferDate: date },
+        ctx: { ...ctx, waitlistOfferDate: offerWaitlist ? date : undefined },
       }
     }
 
@@ -992,10 +994,11 @@ export class BotService {
       const suggestions = await this.availability.nextAvailableDates(clubId, nextCtx.selectedDate!, {
         excludeDateKey: nextCtx.selectedDate,
       })
+      const offerWaitlist = await this.waitlist.offeredIn(clubId)
       return {
-        reply: noAvailabilityWithSuggestions(nextCtx.selectedDate!, suggestions),
+        reply: noAvailabilityWithSuggestions(nextCtx.selectedDate!, suggestions, offerWaitlist),
         state: BotState.BOOK_DATE,
-        ctx: { ...nextCtx, waitlistOfferDate: nextCtx.selectedDate },
+        ctx: { ...nextCtx, waitlistOfferDate: offerWaitlist ? nextCtx.selectedDate : undefined },
       }
     }
     return availabilityResult(nextCtx, bands, nextCtx.selectedDate!)
@@ -1028,10 +1031,11 @@ export class BotService {
       const suggestions = await this.availability.nextAvailableDates(clubId, ctx.selectedDate!, {
         excludeDateKey: ctx.selectedDate,
       })
+      const offerWaitlist = await this.waitlist.offeredIn(clubId)
       return {
-        reply: noAvailabilityWithSuggestions(ctx.selectedDate!, suggestions),
+        reply: noAvailabilityWithSuggestions(ctx.selectedDate!, suggestions, offerWaitlist),
         state: BotState.BOOK_DATE,
-        ctx: { ...ctx, waitlistOfferDate: ctx.selectedDate },
+        ctx: { ...ctx, waitlistOfferDate: offerWaitlist ? ctx.selectedDate : undefined },
       }
     }
     return availabilityResult(ctx, bands, ctx.selectedDate!)

@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer'
-import { IsEnum, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator'
+import { IsBoolean, IsEnum, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator'
 import { SubscriptionStatus } from 'generated/prisma/client'
 import { PLAN_KEYS, PlanKey } from '../../plans/lib/plans'
 
@@ -31,4 +31,10 @@ export class UpdateSubscriptionDto {
   @IsOptional()
   @IsIn(PLAN_KEYS)
   plan?: PlanKey
+
+  /** false once a plan is agreed with a club that predates the plans: it then gets only its
+   *  plan's modules. true gives a club every module whatever its plan. */
+  @IsOptional()
+  @IsBoolean()
+  grandfatheredFeatures?: boolean
 }

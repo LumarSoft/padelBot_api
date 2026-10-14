@@ -83,6 +83,27 @@ export function planName(key: string): string {
   return planDefinition(key)?.name ?? key
 }
 
+/** The fields that decide which modules a club may use. */
+export interface PlanFields {
+  plan: string
+  /** Clubs that existed before plans were enforced keep every module until ops clears it. */
+  grandfatheredFeatures: boolean
+}
+
+export const planFieldsSelect = { plan: true, grandfatheredFeatures: true } as const
+
+/** Whether the club may use (or turn on) a module. An unknown plan never strips anything. */
+export function hasFeature(club: PlanFields, feature: PlanFeature): boolean {
+  if (club.grandfatheredFeatures) return true
+  const plan = planDefinition(club.plan)
+  return plan === null || plan.features.includes(feature)
+}
+
+/** The cheapest plan that includes a module: the one the upsell names. */
+export function cheapestPlanWith(feature: PlanFeature): PlanDefinition {
+  return PLAN_KEYS.map(key => PLANS[key]).find(plan => plan.features.includes(feature)) ?? PLANS.smash
+}
+
 /** Whether one more fits under a limit (null = no limit). */
 export function fitsOneMore(used: number, limit: number | null): boolean {
   return limit === null || used < limit

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import OpenAI, { toFile } from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
+import { PlansService } from '../plans/plans.service'
 import { todayKey } from '../availability/lib/datetime'
 import { courtScheduleSelect } from '../availability/lib/schedule'
 import { BotState, HandlerResult, SessionContext } from '../bot/types'
@@ -42,6 +43,7 @@ export class LlmService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly availability: AvailabilityService,
+    private readonly plans: PlansService,
   ) {
     this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   }
@@ -370,10 +372,11 @@ export class LlmService {
     if (bands.length === 0) {
       // Proactively offer the nearest days with availability instead of dead-ending.
       const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
+      const offerWaitlist = await this.plans.hasFeature(clubId, 'waitlist')
       return {
-        reply: noAvailabilityWithSuggestions(date, suggestions),
+        reply: noAvailabilityWithSuggestions(date, suggestions, offerWaitlist),
         state: BotState.BOOK_DATE,
-        ctx: { ...ctx, waitlistOfferDate: date },
+        ctx: { ...ctx, waitlistOfferDate: offerWaitlist ? date : undefined },
       }
     }
 

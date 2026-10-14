@@ -61,6 +61,8 @@ export interface OpsClubRow {
     users: PlanUsage
     /** This calendar month's AI credits. Over 100% never cuts the bot: it's a sales call. */
     aiCredits: PlanUsage & { percent: number | null }
+    /** Predates the plans: keeps every module whatever its plan, until we clear it. */
+    grandfatheredFeatures: boolean
   }
 }
 
@@ -106,6 +108,7 @@ export class OpsClubsService {
           plan: true,
           trialEndsAt: true,
           currentPeriodEnd: true,
+          grandfatheredFeatures: true,
           setupCompletedAt: true,
           ...paymentSetupSelect,
           _count: { select: { courts: true, whatsappLines: true } },
@@ -214,6 +217,7 @@ export class OpsClubsService {
           courts: { used: club._count.courts, limit: definition?.courts ?? null },
           users: { used: usersByClub.get(club.id) ?? 0, limit: definition?.users ?? null },
           aiCredits: { used: credits, limit: allowance, percent: creditPercent(credits, allowance) },
+          grandfatheredFeatures: club.grandfatheredFeatures,
         },
       }
     })
@@ -232,6 +236,7 @@ export class OpsClubsService {
       plan?: string
       aiCreditsAlertMonth?: null
       aiCreditsAlertPercent?: null
+      grandfatheredFeatures?: boolean
       currentPeriodEnd?: Date
       trialEndsAt?: Date
     } = { subscriptionStatus: dto.status }
@@ -242,6 +247,7 @@ export class OpsClubsService {
       data.aiCreditsAlertMonth = null
       data.aiCreditsAlertPercent = null
     }
+    if (dto.grandfatheredFeatures !== undefined) data.grandfatheredFeatures = dto.grandfatheredFeatures
     if (dto.status === SubscriptionStatus.ACTIVE) {
       data.currentPeriodEnd = new Date(Date.now() + (dto.months ?? 1) * 30 * DAY_MS)
     }

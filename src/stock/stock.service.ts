@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import { PlayerPaymentMethod, Prisma, StockMovementType } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { PlansService } from '../plans/plans.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { dayRangeUtc, todayKey } from '../availability/lib/datetime'
 import { consumoDeltas, isLowStock, StockLine } from './lib/stock-math'
@@ -96,7 +97,23 @@ export class StockService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly plans: PlansService,
   ) {}
+
+  /**
+   * Starting to track a product's stock (it has no quantity yet) needs a plan with kiosk stock.
+   * Products already tracked keep every stock operation whatever the plan, and selling from the
+   * catalog never asks. Without `productIds` it's a product being created with a quantity.
+   */
+  async assertCanStartTracking(clubId: string, productIds?: string[]): Promise<void> {
+    if (productIds) {
+      const untracked = await this.prisma.product.count({
+        where: { clubId, id: { in: productIds }, stockQuantity: null },
+      })
+      if (untracked === 0) return
+    }
+    await this.plans.assertFeature(clubId, 'kioscoStock')
+  }
 
   // ── Building blocks (run inside the caller's transaction) ──────────────────
 
@@ -196,6 +213,10 @@ export class StockService {
   /** "Entró mercadería": adds a delivery of several products at once. */
   async registerPurchase(clubId: string, userId: number | null, dto: RegisterPurchaseDto): Promise<StockProductView[]> {
     const lines = mergeByProduct(dto.items)
+    await this.assertCanStartTracking(
+      clubId,
+      lines.map(([productId]) => productId),
+    )
     await this.prisma.$transaction(async tx => {
       for (const [productId, quantity] of lines) {
         // No push here: whoever is restocking is standing in front of the shelf.
@@ -222,6 +243,7 @@ export class StockService {
   async registerCount(clubId: string, userId: number | null, dto: RegisterCountDto): Promise<CountResult[]> {
     const ids = dto.items.map(i => i.productId)
     if (new Set(ids).size !== ids.length) throw new BadRequestException('Hay un producto repetido en el conteo')
+    await this.assertCanStartTracking(clubId, ids)
     const items = [...dto.items].sort((a, b) => a.productId.localeCompare(b.productId))
 
     const { results, alerts } = await this.prisma.$transaction(async tx => {

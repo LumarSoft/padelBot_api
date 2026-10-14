@@ -16,6 +16,7 @@ describe('BookingsService.disambiguateByPayer', () => {
     {} as never,
     { repriceSlot: jest.fn(), repriceFutureSlots: jest.fn() } as never,
     {} as never,
+    {} as never, // plans
   )
   const choose = (candidates: Candidate[], payer?: { cuit?: string | null; mpUserId?: string | null }) =>
     (

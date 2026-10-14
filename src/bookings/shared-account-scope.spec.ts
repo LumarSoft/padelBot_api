@@ -20,6 +20,7 @@ function setup() {
     {} as never,
     {} as never,
     {} as never,
+    {} as never, // plans
   )
   return { service, prisma }
 }

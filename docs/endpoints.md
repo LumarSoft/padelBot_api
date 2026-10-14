@@ -487,6 +487,8 @@ returns the preview without writing. Owner-only.
 }
 ```
 
+`403 Forbidden` — a future `effectiveDate` (scheduling) on a plan without scheduled price rises. Applying today and the adjustments already scheduled are not affected.
+
 ### GET /courts/scheduled-price-adjustments
 
 Pending scheduled mass price adjustments (not yet applied), soonest first. Owner-only.
@@ -1057,6 +1059,8 @@ again if a payment is undone. Returns the refreshed account.
 
 `200 OK` — refreshed account · `400 Bad Request` — cancelled booking · `404 Not Found`
 
+`403 Forbidden` — the plan doesn't include split payment (Saque, unless the club predates the plans). Removing a payment is never refused.
+
 ### DELETE /bookings/:id/payments/:paymentId
 
 Undoes a registered player payment (reopens the account if it was settled). Returns the
@@ -1337,9 +1341,22 @@ Open to STAFF too.
   "plan": { "key": "saque", "name": "Saque", "known": true },
   "courts": { "used": 2, "limit": 2 },
   "users": { "used": 1, "limit": 2 },
-  "aiCredits": { "used": 640, "limit": 1000, "month": "2026-10", "percent": 64 }
+  "aiCredits": { "used": 640, "limit": 1000, "month": "2026-10", "percent": 64 },
+  "features": {
+    "fixedConfirmation": { "enabled": false, "plan": "Bandeja" },
+    "kioscoStock": { "enabled": false, "plan": "Bandeja" },
+    "waitlist": { "enabled": false, "plan": "Bandeja" },
+    "splitPayment": { "enabled": false, "plan": "Bandeja" },
+    "scheduledPriceAdjustments": { "enabled": false, "plan": "Bandeja" }
+  },
+  "grandfatheredFeatures": false
 }
 ```
+
+`features` says whether the club may use (turn on) each module and the cheapest plan that
+includes it. Clubs that existed before the plans were enforced have `grandfatheredFeatures`
+and every module. Only switching a module ON is refused (`403`, message naming the plan); what
+the club already has running keeps working.
 
 `aiCredits` counts this calendar month (club-local): one credit per AI step — a message the
 bot needed AI to understand, an audio transcribed, an image or receipt read. It is only
@@ -1500,6 +1517,8 @@ Turns the question on/off and sets how early it goes out. **Owner only.**
 
 `403 Forbidden` — caller is not the club owner
 
+`403 Forbidden` — turning it ON (`enabled: true` while off) on a plan without the module (Saque, unless the club predates the plans). Already on keeps working, and can be tuned or turned off.
+
 ### GET /clubs/me/mercadopago
 
 Returns whether the caller's club has connected its own MercadoPago account (OAuth).
@@ -1631,6 +1650,8 @@ Creates a product. Sending `stockQuantity` starts tracking its stock with an `AD
 
 `400 Bad Request` — validation error
 
+`403 Forbidden` — a `stockQuantity` (starting to track stock) on a plan without kiosk stock.
+
 ### PATCH /products/:id
 
 Updates a product. A new `stockQuantity` is recorded in the ledger as an `ADJUSTMENT`
@@ -1648,6 +1669,8 @@ re-evaluates the low-stock alert flag. Neither sends a push (the owner is the on
 `200 OK` — the updated product
 
 `404 Not Found` — product not in the caller's club
+
+`403 Forbidden` — a `stockQuantity` on a product not tracked yet, on a plan without kiosk stock. Products already tracked keep working.
 
 ### DELETE /products/:id
 
@@ -1714,6 +1737,8 @@ being tracked from the received quantity.
 
 `400 Bad Request` — validation error
 
+`403 Forbidden` — the delivery includes a product not tracked yet, on a plan without kiosk stock (it would start tracking it).
+
 ### POST /stock/counts
 
 "Contar stock": receives the real quantity of each counted product, stores the difference against
@@ -1752,6 +1777,8 @@ Products left out aren't touched. Counting a product that wasn't tracked starts 
 ```
 
 `404 Not Found` — a product doesn't exist in the caller's club (nothing is written)
+
+`403 Forbidden` — the count includes a product not tracked yet, on a plan without kiosk stock.
 
 ### GET /stock/shopping-list
 
@@ -2310,7 +2337,9 @@ No HTTP surface — the waitlist lives inside the bot flow:
 
 1. When a requested day has no availability, the bot offers: "respondé *avisame* y te
    escribo apenas se libere un turno ese día". Answering joins `WaitlistEntry`
-   (club + phone + dateKey, deduped).
+   (club + phone + dateKey, deduped). The offer depends on the club's plan (Bandeja and up,
+   or a club that predates the plans); without it the full-day reply just asks for another
+   date. Players already on a list are notified either way.
 2. Whenever a slot frees (panel cancellation, expired/rejected pending) a `slot.freed`
    event fires and every waitlisted player for that day gets a WhatsApp with the freed
    court/time — throttled to one broadcast per entry per 10 minutes, max 10 recipients.
@@ -2631,7 +2660,8 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
       "known": true,
       "courts": { "used": 2, "limit": 2 },
       "users": { "used": 1, "limit": 2 },
-      "aiCredits": { "used": 830, "limit": 1000, "percent": 83 }
+      "aiCredits": { "used": 830, "limit": 1000, "percent": 83 },
+      "grandfatheredFeatures": true
     }
   }
 ]
@@ -2656,6 +2686,7 @@ Manual billing from the UI — the same thing `npm run subscription` does from t
 | months | number | No       | 1–24. With `ACTIVE`: paid months from now. Default 1.       |
 | days   | number | No       | 1–180. With `TRIAL`: trial days from now. Default 30.       |
 | plan   | string | No       | `saque` \| `bandeja` \| `smash`. Resets the month's AI-credit alerts. |
+| grandfatheredFeatures | boolean | No | `false` once a plan is agreed with a club that predates the plans: from then on it gets only its plan's modules. |
 
 ```json
 { "status": "ACTIVE", "months": 1 }

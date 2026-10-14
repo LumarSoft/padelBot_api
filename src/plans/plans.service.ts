@@ -2,8 +2,19 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { PrismaService } from '../prisma/prisma.service'
 import { todayKey } from '../availability/lib/datetime'
 import { creditPercent, monthKeyOf, monthStartKey } from './lib/ai-credits'
+import { featureLockedMessage } from './lib/features'
 import { courtLimitMessage, userLimitMessage } from './lib/limits'
-import { fitsOneMore, planDefinition, planName } from './lib/plans'
+import {
+  cheapestPlanWith,
+  fitsOneMore,
+  hasFeature,
+  PLAN_FEATURES,
+  PlanFeature,
+  PlanFields,
+  planDefinition,
+  planFieldsSelect,
+  planName,
+} from './lib/plans'
 
 /** Something counted against a plan limit. */
 export interface PlanUsage {
@@ -30,6 +41,10 @@ export interface ClubPlanOverview {
     /** Whole percentage of the allowance used (can pass 100); null without an allowance. */
     percent: number | null
   }
+  /** Each module: whether the club may use it, and the cheapest plan that includes it. */
+  features: Record<PlanFeature, { enabled: boolean; plan: string }>
+  /** The club predates the plans and keeps every module, whatever its plan says. */
+  grandfatheredFeatures: boolean
 }
 
 /**
@@ -50,6 +65,12 @@ export class PlansService {
     ])
     const plan = planDefinition(club.plan)
     const allowance = plan?.aiCredits ?? null
+    const features = Object.fromEntries(
+      PLAN_FEATURES.map(feature => [
+        feature,
+        { enabled: hasFeature(club, feature), plan: cheapestPlanWith(feature).name },
+      ]),
+    ) as ClubPlanOverview['features']
     return {
       plan: { key: club.plan, name: planName(club.plan), known: plan !== null },
       courts: { used: courts, limit: plan?.courts ?? null },
@@ -60,7 +81,22 @@ export class PlansService {
         month: monthKeyOf(today),
         percent: creditPercent(credits, allowance),
       },
+      features,
+      grandfatheredFeatures: club.grandfatheredFeatures,
     }
+  }
+
+  /** Whether the club's plan includes a module (always, for a club that predates the plans). */
+  async hasFeature(clubId: string, feature: PlanFeature): Promise<boolean> {
+    return hasFeature(await this.clubPlan(clubId), feature)
+  }
+
+  /**
+   * Refuses turning ON a module the plan doesn't include. Callers ask only when something is
+   * being switched on — never for what the club already has running, which keeps working.
+   */
+  async assertFeature(clubId: string, feature: PlanFeature): Promise<void> {
+    if (!(await this.hasFeature(clubId, feature))) throw new ForbiddenException(featureLockedMessage(feature))
   }
 
   /** AI credits the club used in the calendar month of `dateKey` (club-local). */
@@ -92,8 +128,8 @@ export class PlansService {
     throw new ForbiddenException(userLimitMessage(plan, users))
   }
 
-  private async clubPlan(clubId: string): Promise<{ plan: string }> {
-    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { plan: true } })
+  private async clubPlan(clubId: string): Promise<PlanFields> {
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: planFieldsSelect })
     if (!club) throw new NotFoundException('Club no encontrado')
     return club
   }

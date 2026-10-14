@@ -26,6 +26,7 @@ import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { PlayersService } from '../players/players.service'
 import { SlotPricingService } from '../pricing/slot-pricing.service'
+import { PlansService } from '../plans/plans.service'
 import { StockService } from '../stock/stock.service'
 
 /** Booking a schedule band that may not have a materialized Slot row yet. */
@@ -212,6 +213,7 @@ export class BookingsService {
     private readonly players: PlayersService,
     private readonly slotPricing: SlotPricingService,
     private readonly stock: StockService,
+    private readonly plans: PlansService,
   ) {}
 
   async findAll(clubId: string, query: QueryBookingsDto) {
@@ -867,6 +869,8 @@ export class BookingsService {
    * refreshed account so the panel updates in one round trip.
    */
   async addPlayerPayment(clubId: string, bookingId: string, dto: AddPlayerPaymentDto): Promise<BookingAccountView> {
+    // Charging each player their share is the split-payment module; undoing a payment never asks.
+    await this.plans.assertFeature(clubId, 'splitPayment')
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, clubId },
       select: { id: true, status: true },
