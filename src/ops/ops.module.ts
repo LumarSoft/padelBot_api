@@ -9,6 +9,7 @@ import { OpsLeadsService } from './ops-leads.service'
 import { OpsClubsService } from './ops-clubs.service'
 import { OpsMetricsService } from './ops-metrics.service'
 import { OpsHealthService } from './ops-health.service'
+import { OpsHelpService } from './ops-help.service'
 import { OpsJwtStrategy } from './strategies/ops-jwt.strategy'
 import { opsJwtSecret } from './lib/ops-secret'
 
@@ -38,6 +39,14 @@ import { opsJwtSecret } from './lib/ops-secret'
     PaymentsModule,
   ],
   controllers: [OpsController],
-  providers: [OpsAuthService, OpsLeadsService, OpsClubsService, OpsMetricsService, OpsHealthService, OpsJwtStrategy],
+  providers: [
+    OpsAuthService,
+    OpsLeadsService,
+    OpsClubsService,
+    OpsMetricsService,
+    OpsHealthService,
+    OpsHelpService,
+    OpsJwtStrategy,
+  ],
 })
 export class OpsModule {}

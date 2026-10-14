@@ -2697,3 +2697,32 @@ running the scheduler, see `RUN_SCHEDULER`). Issue kinds: `POLLER_DOWN`, `CLUB_M
   "checkedAt": "2026-07-11T21:06:58.317Z"
 }
 ```
+
+### GET /ops/help/search-misses
+
+What the clubs' desk staff searched in the panel's "?" help without finding an answer — the
+to-do list for the next round of help content. Last 90 days, most searched first, top 50.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "query": "como cierro la caja",
+    "count": 4,
+    "lastSearchedAt": "2026-10-14T19:05:00.000Z",
+    "clubId": "clx…",
+    "clubName": "Club Demo Pádel"
+  }
+]
+```
+
+`401 Unauthorized` — missing or invalid ops token.
+
+```json
+{ "statusCode": 401, "message": "Unauthorized" }
+```

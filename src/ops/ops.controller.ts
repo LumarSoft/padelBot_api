@@ -21,6 +21,7 @@ import { OpsLeadsService, LeadsSummary } from './ops-leads.service'
 import { OpsClubsService, OpsClubRow, ClubUserRow } from './ops-clubs.service'
 import { OpsMetricsService, BusinessMetrics, BotMetrics } from './ops-metrics.service'
 import { OpsHealthService, OpsHealth } from './ops-health.service'
+import { OpsHelpService, HelpSearchMissRow } from './ops-help.service'
 import { SubscriptionState } from '../clubs/lib/subscription'
 import { OpsLoginDto } from './dto/ops-login.dto'
 import { UpdateLeadDto } from './dto/update-lead.dto'
@@ -42,6 +43,7 @@ export class OpsController {
     private readonly clubs: OpsClubsService,
     private readonly metrics: OpsMetricsService,
     private readonly health: OpsHealthService,
+    private readonly help: OpsHelpService,
   ) {}
 
   // ── Auth ──────────────────────────────────────────────────────────────────
@@ -148,5 +150,14 @@ export class OpsController {
   @UseGuards(OpsAuthGuard)
   systemHealth(): Promise<OpsHealth> {
     return this.health.get()
+  }
+
+  // ── Staff help ────────────────────────────────────────────────────────────
+
+  /** What the clubs' desk staff searched in the "?" help without finding it. */
+  @Get('help/search-misses')
+  @UseGuards(OpsAuthGuard)
+  helpSearchMisses(): Promise<HelpSearchMissRow[]> {
+    return this.help.searchMisses()
   }
 }
