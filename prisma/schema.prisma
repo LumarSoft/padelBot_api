@@ -760,6 +760,9 @@ model ClubSignupRequest {
   contactWindow     String?
   /// Free text when contactWindow = CUSTOM ("martes y jueves después de las 16").
   contactWindowNote String?
+  /// The landing's pricing card they came from (`/register?plan=…`): "saque" | "bandeja" |
+  /// "smash". Null when they reached the signup any other way. Provisioning defaults to it.
+  plan              String?
 
   /// NEW → CONTACTED → CONVERTED → LOST. Moved from the ops console (`/ops/leads`).
   status    String   @default("NEW")

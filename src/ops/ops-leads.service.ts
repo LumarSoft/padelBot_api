@@ -5,6 +5,7 @@ import { OnboardingService } from '../onboarding/onboarding.service'
 import { UpdateLeadDto } from './dto/update-lead.dto'
 import { ProvisionLeadDto } from './dto/provision-lead.dto'
 import { LeadStatus } from './lib/lead-status'
+import { isPlanKey } from '../plans/lib/plans'
 
 /** Counts per pipeline stage, so the console can show the funnel without a second call. */
 export interface LeadPipeline {
@@ -96,6 +97,7 @@ export class OpsLeadsService {
       ownerName: dto.ownerName ?? lead.ownerName,
       email: dto.email ?? lead.email,
       password: dto.password,
+      plan: dto.plan ?? (lead.plan && isPlanKey(lead.plan) ? lead.plan : undefined),
     })
 
     this.logger.log(`Lead ${id} (${lead.clubName}) provisioned as club ${clubId}`)

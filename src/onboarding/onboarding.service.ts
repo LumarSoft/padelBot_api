@@ -91,6 +91,7 @@ export class OnboardingService {
         howFound: dto.howFound ?? null,
         contactWindow: dto.contactWindow ?? null,
         contactWindowNote: dto.contactWindowNote?.trim() || null,
+        plan: dto.plan ?? null,
       },
     })
     await notifyOps(formatSignupAlert(lead))
@@ -114,6 +115,7 @@ export class OnboardingService {
           data: {
             name: dto.clubName.trim(),
             slug: await this.availableSlug(dto.clubName),
+            ...(dto.plan ? { plan: dto.plan } : {}),
             trialEndsAt: new Date(Date.now() + TRIAL_DAYS * DAY_MS),
           },
           select: { id: true },

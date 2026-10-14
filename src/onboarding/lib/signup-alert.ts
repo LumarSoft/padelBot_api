@@ -1,4 +1,5 @@
 import { ClubSignupRequest } from 'generated/prisma/client'
+import { planDefinition } from '../../plans/lib/plans'
 import { answerLabel } from './signup-answers'
 
 /** Cents → "$20.000" (the ops alert is read by a human, not parsed). */
@@ -17,6 +18,10 @@ export function formatSignupAlert(lead: ClubSignupRequest): string {
     `🏓 *Nuevo club: ${lead.clubName}*${lead.city ? ` — ${lead.city}` : ''}`,
     `${lead.ownerName} · ${lead.phone} · ${lead.email}`,
   ]
+
+  // The pricing card they clicked: the plan to provision unless the call says otherwise.
+  const plan = lead.plan ? planDefinition(lead.plan) : null
+  if (plan) lines.push(`📦 Eligió el plan *${plan.name}*.`)
 
   // A named window ("martes después de las 16") beats the generic bucket every time.
   const when = lead.contactWindowNote?.trim() || answerLabel(lead.contactWindow)

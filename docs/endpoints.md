@@ -180,6 +180,7 @@ a prospect has none by definition.
 | fixedSlots          | string | No       | `NONE` \| `FEW` \| `SOME` \| `MANY`                      |
 | howFound            | string | No       | `INSTAGRAM` \| `REFERRAL` \| `GOOGLE` \| `OTHER_CLUB` \| `OTHER` |
 | contactWindow       | string | No       | `MORNING` \| `AFTERNOON` \| `EVENING` \| `ANY`           |
+| plan                | string | No       | `saque` \| `bandeja` \| `smash` — the pricing card they came from (`/register?plan=…`); shown first in the ops alert |
 
 The allowed values live in `src/onboarding/lib/signup-answers.ts`, together with the Spanish
 labels the ops alert renders.
@@ -217,7 +218,8 @@ owner; seeding fake rows would only leave them data to hunt down and delete.
 
 **Auth required:** ops secret header
 
-**Request body** — `clubName` (2–80), `ownerName` (1–100), `email`, `password` (8–72)
+**Request body** — `clubName` (2–80), `ownerName` (1–100), `email`, `password` (8–72),
+`plan` (optional: `saque` \| `bandeja` \| `smash`, default `saque`)
 
 `201 Created` — token + user · `403 Forbidden` — missing/invalid ops secret · `409 Conflict` — email in use
 
@@ -2595,6 +2597,7 @@ prospect gave us pre-load the `/setup` wizard, they are not written here.
 | password  | string | Yes      | 8–72 chars. Temporary — the owner changes it on first login. |
 | clubName  | string | No       | 2–80 chars. Defaults to the lead's.                       |
 | ownerName | string | No       | 1–100 chars. Defaults to the lead's.                      |
+| plan      | string | No       | `saque` \| `bandeja` \| `smash`. Defaults to the plan the lead picked, then `saque`. |
 | email     | string | No       | valid email. Defaults to the lead's.                      |
 
 ```json

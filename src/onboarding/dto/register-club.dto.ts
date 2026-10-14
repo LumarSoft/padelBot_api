@@ -1,10 +1,11 @@
-import { IsEmail, IsString, Matches, MaxLength, MinLength } from 'class-validator'
+import { IsEmail, IsIn, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator'
 import {
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
   PASSWORD_PATTERN,
   PASSWORD_RULE_MESSAGE,
 } from '../../common/password'
+import { PLAN_KEYS, PlanKey } from '../../plans/lib/plans'
 
 export class RegisterClubDto {
   @IsString()
@@ -25,4 +26,9 @@ export class RegisterClubDto {
   @MaxLength(PASSWORD_MAX_LENGTH)
   @Matches(PASSWORD_PATTERN, { message: PASSWORD_RULE_MESSAGE })
   password: string
+
+  /** The club's plan. Omit for the default (Saque). */
+  @IsOptional()
+  @IsIn(PLAN_KEYS)
+  plan?: PlanKey
 }
