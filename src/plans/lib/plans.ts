@@ -82,3 +82,18 @@ export function planDefinition(key: string): PlanDefinition | null {
 export function planName(key: string): string {
   return planDefinition(key)?.name ?? key
 }
+
+/** Whether one more fits under a limit (null = no limit). */
+export function fitsOneMore(used: number, limit: number | null): boolean {
+  return limit === null || used < limit
+}
+
+/** The cheapest plan with room for one more than `used`; null when no plan has it. */
+export function nextPlanWithRoom(limitOf: (plan: PlanDefinition) => number | null, used: number): PlanDefinition | null {
+  return (
+    PLAN_KEYS.map(key => PLANS[key]).find(plan => {
+      const limit = limitOf(plan)
+      return limit === null || limit > used
+    }) ?? null
+  )
+}

@@ -346,6 +346,12 @@ it to the employee out-of-band; no email delivery involved). The user is flagged
 
 `409 Conflict` — email already in use
 
+`403 Forbidden` — the plan's active-user limit is full (Saque 2, Bandeja 5, owner included); the message names the plan with room
+
+```json
+{ "statusCode": 403, "message": "Tu plan Saque incluye 2 usuarios activos, con vos incluido. Para sumar a alguien, desactivá a quien ya no use el panel o pasate a Bandeja: escribinos y lo cambiamos." }
+```
+
 ### PATCH /users/:id
 
 Updates a team member's name, role or active state. Deactivated users cannot log in, and the
@@ -356,7 +362,8 @@ also applies on their next request. The caller cannot edit themself (avoids self
 
 **Request body** — `{ "name"?: string, "role"?: "OWNER" | "STAFF", "isActive"?: boolean }`
 
-`200 OK` — updated user · `400 Bad Request` — attempted self-edit · `404 Not Found`
+`200 OK` — updated user · `400 Bad Request` — attempted self-edit · `404 Not Found` ·
+`403 Forbidden` — reactivating (`isActive: true` on an inactive user) beyond the plan's active-user limit
 
 ### POST /users/:id/reset-password
 
@@ -450,7 +457,8 @@ Creates a court.
 }
 ```
 
-`201 Created` — the created court · `400 Bad Request` — invalid weeklyHours shape
+`201 Created` — the created court · `400 Bad Request` — invalid weeklyHours shape ·
+`403 Forbidden` — the plan's court limit is reached (Saque 2, Bandeja 4); existing courts are never touched
 
 ### POST /courts/bulk-price
 
@@ -1304,12 +1312,31 @@ fallback message. The panel itself is never blocked.
 ```json
 {
   "subscriptionStatus": "TRIAL",
-  "plan": "base",
+  "plan": "saque",
   "trialEndsAt": "2026-07-23T00:00:00.000Z",
   "currentPeriodEnd": null,
   "severity": "trial",
   "botAllowed": true,
   "daysLeft": 14
+}
+```
+
+### GET /clubs/me/plan
+
+The club's commercial plan (`saque` | `bandeja` | `smash`), its limits and how much of them is
+used. Courts and users are soft limits: creating beyond them is refused (`403`), what the club
+already has is never touched. An unknown plan key restricts nothing (`known: false`, no limits).
+Open to STAFF too.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{
+  "plan": { "key": "saque", "name": "Saque", "known": true },
+  "courts": { "used": 2, "limit": 2 },
+  "users": { "used": 1, "limit": 2 }
 }
 ```
 

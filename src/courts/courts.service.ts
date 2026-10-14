@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule'
 import { Prisma } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { SlotPricingService } from '../pricing/slot-pricing.service'
+import { PlansService } from '../plans/plans.service'
 import { parseWeeklyHours, WeeklyHours } from '../availability/lib/schedule'
 import { todayKey } from '../availability/lib/datetime'
 import { schedulerEnabled } from '../common/scheduling'
@@ -33,6 +34,7 @@ export class CourtsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly slotPricing: SlotPricingService,
+    private readonly plans: PlansService,
   ) {}
 
   findAll(clubId: string) {
@@ -54,8 +56,9 @@ export class CourtsService {
     return court
   }
 
-  create(clubId: string, dto: CreateCourtDto) {
+  async create(clubId: string, dto: CreateCourtDto) {
     const weeklyHours = this.validateWeeklyHours(dto.weeklyHours)
+    await this.plans.assertCanAddCourt(clubId)
     return this.prisma.court.create({
       data: {
         name: dto.name,
