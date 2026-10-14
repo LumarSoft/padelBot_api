@@ -1336,9 +1336,14 @@ Open to STAFF too.
 {
   "plan": { "key": "saque", "name": "Saque", "known": true },
   "courts": { "used": 2, "limit": 2 },
-  "users": { "used": 1, "limit": 2 }
+  "users": { "used": 1, "limit": 2 },
+  "aiCredits": { "used": 640, "limit": 1000, "month": "2026-10", "percent": 64 }
 }
 ```
+
+`aiCredits` counts this calendar month (club-local): one credit per AI step — a message the
+bot needed AI to understand, an audio transcribed, an image or receipt read. It is only
+measured: going over never cuts the bot (ops is alerted at 80% and 100%).
 
 ### GET /clubs/me/faq
 
@@ -2597,7 +2602,7 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
     "createdAt": "2026-06-21T20:30:28.969Z",
     "subscription": {
       "subscriptionStatus": "TRIAL",
-      "plan": "base",
+      "plan": "saque",
       "trialEndsAt": null,
       "currentPeriodEnd": null,
       "severity": "trial",
@@ -2620,10 +2625,22 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
       "lastPanelLoginAt": "2026-07-11T14:02:00.000Z",
       "dormant": false
     },
-    "llmCostMicroUsd": 41230
+    "llmCostMicroUsd": 41230,
+    "plan": {
+      "name": "Saque",
+      "known": true,
+      "courts": { "used": 2, "limit": 2 },
+      "users": { "used": 1, "limit": 2 },
+      "aiCredits": { "used": 830, "limit": 1000, "percent": 83 }
+    }
   }
 ]
 ```
+
+`plan.aiCredits` is this calendar month (club-local): one credit per AI step (a message
+understood, an audio transcribed, an image or receipt read). Going over never cuts the bot; an
+hourly job posts to `OPS_ALERT_WEBHOOK_URL` when a club crosses 80% and 100% (once each per
+month, the sales demo excluded).
 
 ### PATCH /ops/clubs/:id/subscription
 
@@ -2637,8 +2654,8 @@ Manual billing from the UI — the same thing `npm run subscription` does from t
 | ------ | ------ | -------- | ----------------------------------------------------------- |
 | status | string | Yes      | `TRIAL` \| `ACTIVE` \| `PAST_DUE` \| `CANCELLED`            |
 | months | number | No       | 1–24. With `ACTIVE`: paid months from now. Default 1.       |
-| days   | number | No       | 1–180. With `TRIAL`: trial days from now. Default 14.       |
-| plan   | string | No       | max 40 chars (`base` / `pro`).                              |
+| days   | number | No       | 1–180. With `TRIAL`: trial days from now. Default 30.       |
+| plan   | string | No       | `saque` \| `bandeja` \| `smash`. Resets the month's AI-credit alerts. |
 
 ```json
 { "status": "ACTIVE", "months": 1 }
@@ -2650,7 +2667,7 @@ Manual billing from the UI — the same thing `npm run subscription` does from t
 ```json
 {
   "subscriptionStatus": "ACTIVE",
-  "plan": "base",
+  "plan": "bandeja",
   "trialEndsAt": null,
   "currentPeriodEnd": "2026-08-10T21:00:00.000Z",
   "severity": "ok",

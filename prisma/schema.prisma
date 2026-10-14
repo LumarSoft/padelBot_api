@@ -27,6 +27,11 @@ model Club {
   /// Commercial plan: "saque" | "bandeja" | "smash" (the landing's plans). Its limits and
   /// modules live in `src/plans/lib/plans.ts`; an unknown key restricts nothing.
   plan               String             @default("saque")
+  /// Last AI-credit alert sent to ops (AiCreditAlertsService): the month ("2026-10") and the
+  /// threshold crossed (80 / 100), so each threshold pings once per club and month. Going over
+  /// the plan's credits never cuts the bot — it only tells us to talk to the club.
+  aiCreditsAlertMonth   String?
+  aiCreditsAlertPercent Int?
   /// When the free trial ends (null = no fixed end, e.g. clubs created before billing).
   trialEndsAt        DateTime?
   /// End of the last paid period for ACTIVE/PAST_DUE clubs. The bot keeps working for
@@ -800,6 +805,8 @@ model LlmUsageDaily {
   club         Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   /// Club-local day ("YYYY-MM-DD"), same convention as everywhere else.
   dateKey      String
+  /// AI steps (a message understood, an audio transcribed, an image or receipt read). Each one
+  /// is one AI credit of the club's plan (`plans/lib/ai-credits.ts`).
   calls        Int      @default(0)
   inputTokens  Int      @default(0)
   outputTokens Int      @default(0)

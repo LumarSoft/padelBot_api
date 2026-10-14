@@ -1,5 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
+import { todayKey } from '../availability/lib/datetime'
+import { creditPercent, monthKeyOf, monthStartKey } from './lib/ai-credits'
 import { courtLimitMessage, userLimitMessage } from './lib/limits'
 import { fitsOneMore, planDefinition, planName } from './lib/plans'
 
@@ -21,6 +23,13 @@ export interface ClubPlanOverview {
   courts: PlanUsage
   /** Active users, the owner included. */
   users: PlanUsage
+  /** AI credits of the current calendar month. Only measured: going over never cuts the bot. */
+  aiCredits: PlanUsage & {
+    /** "2026-10": the month being counted (club-local). */
+    month: string
+    /** Whole percentage of the allowance used (can pass 100); null without an allowance. */
+    percent: number | null
+  }
 }
 
 /**
@@ -32,17 +41,35 @@ export class PlansService {
   constructor(private readonly prisma: PrismaService) {}
 
   async overview(clubId: string): Promise<ClubPlanOverview> {
-    const [club, courts, users] = await Promise.all([
+    const today = todayKey()
+    const [club, courts, users, credits] = await Promise.all([
       this.clubPlan(clubId),
       this.countCourts(clubId),
       this.countActiveUsers(clubId),
+      this.aiCreditsUsed(clubId, today),
     ])
     const plan = planDefinition(club.plan)
+    const allowance = plan?.aiCredits ?? null
     return {
       plan: { key: club.plan, name: planName(club.plan), known: plan !== null },
       courts: { used: courts, limit: plan?.courts ?? null },
       users: { used: users, limit: plan?.users ?? null },
+      aiCredits: {
+        used: credits,
+        limit: allowance,
+        month: monthKeyOf(today),
+        percent: creditPercent(credits, allowance),
+      },
     }
+  }
+
+  /** AI credits the club used in the calendar month of `dateKey` (club-local). */
+  async aiCreditsUsed(clubId: string, dateKey: string = todayKey()): Promise<number> {
+    const { _sum } = await this.prisma.llmUsageDaily.aggregate({
+      where: { clubId, dateKey: { gte: monthStartKey(dateKey), lte: dateKey } },
+      _sum: { calls: true },
+    })
+    return _sum.calls ?? 0
   }
 
   /**

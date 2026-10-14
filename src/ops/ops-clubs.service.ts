@@ -6,6 +6,9 @@ import { subscriptionState, SubscriptionState } from '../clubs/lib/subscription'
 import { shiftDateKey, todayKey } from '../availability/lib/datetime'
 import { generateTempPassword, hashPassword } from '../common/password'
 import { UpdateSubscriptionDto } from './dto/update-subscription.dto'
+import { PlanUsage } from '../plans/plans.service'
+import { creditPercent, monthStartKey } from '../plans/lib/ai-credits'
+import { planDefinition, planName } from '../plans/lib/plans'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 /** Window the per-club activity numbers cover. */
@@ -48,6 +51,17 @@ export interface OpsClubRow {
 
   /** What this club costs us in OpenAI over the same window (micro-USD). */
   llmCostMicroUsd: number
+
+  /** The plan's limits against what the club uses. An unknown key has no limits. */
+  plan: {
+    name: string
+    known: boolean
+    courts: PlanUsage
+    /** Active users, the owner included. */
+    users: PlanUsage
+    /** This calendar month's AI credits. Over 100% never cuts the bot: it's a sales call. */
+    aiCredits: PlanUsage & { percent: number | null }
+  }
 }
 
 /** One panel user of a club, as ops sees it when handling a password-reset support request. */
@@ -78,8 +92,9 @@ export class OpsClubsService {
   async list(): Promise<OpsClubRow[]> {
     const since = new Date(Date.now() - ACTIVITY_DAYS * DAY_MS)
     const sinceKey = shiftDateKey(todayKey(), -(ACTIVITY_DAYS - 1))
+    const today = todayKey()
 
-    const [clubs, bookings, conversations, logins, llm] = await Promise.all([
+    const [clubs, bookings, conversations, logins, llm, activeUsers, monthCredits] = await Promise.all([
       this.prisma.club.findMany({
         orderBy: { createdAt: 'desc' },
         select: {
@@ -121,11 +136,19 @@ export class OpsClubsService {
         where: { dateKey: { gte: sinceKey } },
         _sum: { costMicroUsd: true },
       }),
+      this.prisma.user.groupBy({ by: ['clubId'], where: { isActive: true }, _count: true }),
+      this.prisma.llmUsageDaily.groupBy({
+        by: ['clubId'],
+        where: { dateKey: { gte: monthStartKey(today), lte: today } },
+        _sum: { calls: true },
+      }),
     ])
 
     const conversationsByClub = new Map(conversations.map(c => [c.clubId, c._count]))
     const loginByClub = new Map(logins.map(l => [l.clubId, l._max.lastLoginAt]))
     const llmByClub = new Map(llm.map(l => [l.clubId, l._sum.costMicroUsd ?? 0]))
+    const usersByClub = new Map(activeUsers.map(u => [u.clubId, u._count]))
+    const creditsByClub = new Map(monthCredits.map(c => [c.clubId, c._sum.calls ?? 0]))
 
     const activityByClub = new Map<string, { bot: number; panel: number; deposits: number }>()
     for (const b of bookings) {
@@ -151,6 +174,10 @@ export class OpsClubsService {
       })
       const activity = activityByClub.get(club.id) ?? { bot: 0, panel: 0, deposits: 0 }
       const lastPanelLoginAt = loginByClub.get(club.id) ?? null
+
+      const definition = planDefinition(club.plan)
+      const credits = creditsByClub.get(club.id) ?? 0
+      const allowance = definition?.aiCredits ?? null
 
       const paymentsReady = paymentsConfigured(club)
       const ready = club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0
@@ -181,6 +208,13 @@ export class OpsClubsService {
             (lastPanelLoginAt === null || lastPanelLoginAt < dormantBefore),
         },
         llmCostMicroUsd: llmByClub.get(club.id) ?? 0,
+        plan: {
+          name: planName(club.plan),
+          known: definition !== null,
+          courts: { used: club._count.courts, limit: definition?.courts ?? null },
+          users: { used: usersByClub.get(club.id) ?? 0, limit: definition?.users ?? null },
+          aiCredits: { used: credits, limit: allowance, percent: creditPercent(credits, allowance) },
+        },
       }
     })
   }
@@ -196,11 +230,18 @@ export class OpsClubsService {
     const data: {
       subscriptionStatus: SubscriptionStatus
       plan?: string
+      aiCreditsAlertMonth?: null
+      aiCreditsAlertPercent?: null
       currentPeriodEnd?: Date
       trialEndsAt?: Date
     } = { subscriptionStatus: dto.status }
 
-    if (dto.plan) data.plan = dto.plan
+    if (dto.plan) {
+      data.plan = dto.plan
+      // A new allowance starts its own 80% / 100% alerts.
+      data.aiCreditsAlertMonth = null
+      data.aiCreditsAlertPercent = null
+    }
     if (dto.status === SubscriptionStatus.ACTIVE) {
       data.currentPeriodEnd = new Date(Date.now() + (dto.months ?? 1) * 30 * DAY_MS)
     }
