@@ -5,6 +5,7 @@ import { Logger, ValidationPipe } from '@nestjs/common'
 import { NestExpressApplication } from '@nestjs/platform-express'
 import { AppModule } from './app.module'
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter'
+import { schedulerEnabled } from './common/scheduling'
 
 function localNetworkIp(): string | null {
   for (const ifaces of Object.values(networkInterfaces())) {
@@ -41,5 +42,13 @@ async function bootstrap() {
   const networkIp = localNetworkIp()
   Logger.log(`API running on http://localhost:${port}`, 'Bootstrap')
   if (networkIp) Logger.log(`Network (mobile .env): http://${networkIp}:${port}`, 'Bootstrap')
+  // Said out loud on every boot: a scheduler pointed at a shared database runs payments,
+  // reminders and the sales demo a second time.
+  Logger.log(
+    schedulerEnabled()
+      ? 'Scheduler ON: crons and pollers run in this process'
+      : 'Scheduler OFF (RUN_SCHEDULER=false): no crons or pollers in this process',
+    'Bootstrap',
+  )
 }
 void bootstrap()
