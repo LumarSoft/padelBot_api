@@ -7,6 +7,16 @@ import { hashPassword } from '../common/password'
 import { LoginDto } from './dto/login.dto'
 import { AuthenticatedUser, AuthRole, JwtPayload } from './types/jwt-payload'
 
+/** What a client is told when its token no longer maps to an active user of its club. */
+const SESSION_INVALID_MESSAGE = 'Tu sesión ya no es válida. Ingresá de nuevo.'
+
+/**
+ * How long `validateSession` trusts a session it accepted before reading the user again. It
+ * bounds how long a change that bypasses `forgetSession` (a manual DB edit, another API
+ * instance) takes to cut a session; deactivating someone from the panel cuts it at once.
+ */
+export const SESSION_CACHE_TTL_MS = 30_000
+
 export interface LoginResult {
   token: string
   user: AuthenticatedUser
@@ -39,6 +49,15 @@ function toAuthenticatedUser(user: TokenUser): AuthenticatedUser {
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name)
+
+  /**
+   * Sessions `validateSession` accepted recently, by user id. Bounded by the number of users,
+   * so it needs no eviction beyond the TTL.
+   */
+  private readonly sessionCache = new Map<number, { user: AuthenticatedUser; expiresAt: number }>()
+
+  /** Bumped by `forgetSession`, so a DB read that raced a user change is not cached. */
+  private sessionGeneration = 0
 
   constructor(
     private readonly prisma: PrismaService,
@@ -91,22 +110,22 @@ export class AuthService {
   }
 
   /**
-   * Authoritative session check behind `GET /auth/me`, used by clients to validate a stored
-   * token on boot. A JWT is stateless, so its claims outlive the reality they describe: the
-   * user can be deactivated or deleted, or moved to another club, and the token keeps
-   * verifying until it expires. Trusting the claims there is what makes a client look logged
-   * in while every club-scoped endpoint answers `200` with empty data (they filter by the
-   * token's `clubId`) — a session that shows nothing and never gets a `401` to recover from.
+   * Authoritative session check (uncached; every request goes through `validateSession`, which
+   * caches it). A JWT is stateless, so its claims outlive the reality they describe: the user
+   * can be deactivated or deleted, or moved to another club, and the token keeps verifying
+   * until it expires. Trusting the claims is what lets an employee who left keep using the
+   * panel, and what makes a client look logged in while every club-scoped endpoint answers
+   * `200` with empty data (they filter by the token's `clubId`).
    *
    * So re-read the user from the DB and reject the session when it no longer maps to an active
    * user, or when the token's `clubId` no longer matches theirs (that token would keep scoping
    * requests to the old tenant, so it has to be re-issued). Otherwise return FRESH claims, so
-   * a renamed user/club stops showing a stale name.
+   * a renamed user/club stops showing a stale name and a role change applies at once.
    */
   async getSession(tokenUser: AuthenticatedUser): Promise<AuthenticatedUser> {
     const id = Number.parseInt(tokenUser.id, 10)
     if (!Number.isInteger(id)) {
-      throw new UnauthorizedException('Tu sesión ya no es válida. Ingresá de nuevo.')
+      throw new UnauthorizedException(SESSION_INVALID_MESSAGE)
     }
 
     const user = await this.prisma.user.findUnique({
@@ -124,10 +143,49 @@ export class AuthService {
     })
 
     if (!user || !user.isActive || user.clubId !== tokenUser.clubId) {
-      throw new UnauthorizedException('Tu sesión ya no es válida. Ingresá de nuevo.')
+      throw new UnauthorizedException(SESSION_INVALID_MESSAGE)
     }
 
     return toAuthenticatedUser(user)
+  }
+
+  /**
+   * `getSession` for every authenticated request: `JwtStrategy` runs it after verifying the
+   * signature, so deactivating a user (or moving them to another club) cuts the sessions they
+   * already have open — the desk PC left logged in — instead of leaving each token valid until
+   * it expires (`JWT_EXPIRES_IN`, 7 days by default).
+   *
+   * An accepted session is cached for SESSION_CACHE_TTL_MS so this doesn't add a query to every
+   * request. Rejections are not cached (reactivating someone works at once), and the club is
+   * checked on a hit too: the cached user is fresh, the token presented may be an old one.
+   */
+  async validateSession(tokenUser: AuthenticatedUser): Promise<AuthenticatedUser> {
+    const id = Number.parseInt(tokenUser.id, 10)
+    const cached = this.sessionCache.get(id)
+    if (cached && cached.expiresAt > Date.now()) {
+      if (cached.user.clubId !== tokenUser.clubId) {
+        throw new UnauthorizedException(SESSION_INVALID_MESSAGE)
+      }
+      return cached.user
+    }
+
+    this.sessionCache.delete(id)
+    const generation = this.sessionGeneration
+    const user = await this.getSession(tokenUser)
+    if (generation === this.sessionGeneration) {
+      this.sessionCache.set(id, { user, expiresAt: Date.now() + SESSION_CACHE_TTL_MS })
+    }
+    return user
+  }
+
+  /**
+   * Makes the next request of this user re-read them from the DB. Call it after changing
+   * anything `validateSession` checks or returns (active flag, role, name), so the change
+   * reaches their open sessions now rather than when the cache entry expires.
+   */
+  forgetSession(userId: number): void {
+    this.sessionGeneration++
+    this.sessionCache.delete(userId)
   }
 
   /**

@@ -3,6 +3,7 @@ import * as bcrypt from 'bcrypt'
 import { randomBytes } from 'crypto'
 import { Role } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { AuthService } from '../auth/auth.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { CreateUserDto } from './dto/create-user.dto'
 import { UpdateUserDto } from './dto/update-user.dto'
@@ -22,7 +23,10 @@ const userSelect = {
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly authService: AuthService,
+  ) {}
 
   findAll(clubId: string) {
     return this.prisma.user.findMany({
@@ -61,17 +65,23 @@ export class UsersService {
     }
   }
 
-  /** Updates name/role/active. The caller cannot edit themself (avoids self-lockout). */
+  /**
+   * Updates name/role/active. The caller cannot edit themself (avoids self-lockout). Takes
+   * effect on the user's open sessions right away: deactivating them makes their next request
+   * a `401` (the desk PC they left logged in), a role change applies on the next request.
+   */
   async update(clubId: string, callerId: number, id: number, dto: UpdateUserDto) {
     if (id === callerId) {
       throw new BadRequestException('No podés modificar tu propio usuario desde acá')
     }
     await this.assertInClub(clubId, id)
-    return this.prisma.user.update({
+    const user = await this.prisma.user.update({
       where: { id },
       data: { name: dto.name, role: dto.role, isActive: dto.isActive },
       select: userSelect,
     })
+    this.authService.forgetSession(id)
+    return user
   }
 
   /** Owner resets a team member's password → returns a fresh temporary password. */

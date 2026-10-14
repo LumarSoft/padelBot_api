@@ -20,14 +20,15 @@ export class AuthController {
   }
 
   /**
-   * Session check clients call on boot. It re-reads the user from the DB instead of echoing the
-   * token's claims, so a token whose user/club no longer exists gets a `401` (and the client
-   * can force a re-login) rather than an "authenticated" session with no data behind it.
+   * Session check clients call on boot. The guard already checked the token against the DB
+   * (`AuthService.validateSession`), so a token whose user is gone, deactivated or in another
+   * club gets a `401` (and the client can force a re-login), and `user` holds fresh claims
+   * rather than the token's.
    */
   @Get('me')
   @UseGuards(JwtAuthGuard)
-  async me(@CurrentUser() user: AuthenticatedUser): Promise<{ user: AuthenticatedUser }> {
-    return { user: await this.authService.getSession(user) }
+  me(@CurrentUser() user: AuthenticatedUser): { user: AuthenticatedUser } {
+    return { user }
   }
 
   /**

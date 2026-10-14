@@ -2,6 +2,14 @@
 
 ## Auth
 
+Every route behind `JwtAuthGuard` checks the token against the database, not only its
+signature: a token whose user was deleted or deactivated, or moved to another club, gets
+`401 { "message": "Tu sesión ya no es válida. Ingresá de nuevo." }` on its next request, even
+though it hasn't expired. So deactivating an employee (`PATCH /users/:id`) cuts the sessions
+they left open, not just their next login. The handler then sees **fresh** claims (role, name,
+club name), so a role change applies on the next request too. The check is cached per user for
+up to 30 seconds; a change made through `PATCH /users/:id` skips that wait.
+
 ### POST /auth/login
 
 Authenticates a club staff user by email + password and returns a signed JWT
@@ -58,13 +66,13 @@ whose claims include the user's `clubId` (the tenant). The token must be sent as
 
 ### GET /auth/me
 
-Authoritative session check: validates the caller's JWT **against the database** and returns
-fresh claims (name, club name, role, `mustChangePassword`). Clients call it on boot to decide
-whether a stored token is still a usable session.
+Session check: returns the caller's **fresh** claims (name, club name, role,
+`mustChangePassword`) as read from the database by the guard (see [Auth](#auth)). Clients call it
+on boot to decide whether a stored token is still a usable session.
 
-It re-reads the user instead of echoing the token's claims because a JWT keeps verifying after
-the reality it describes changed. A token whose user was deleted/deactivated — or that points at
-a club the user left — would otherwise look valid while every club-scoped endpoint answers `200`
+The claims come from the database rather than the token because a JWT keeps verifying after the
+reality it describes changed. A token whose user was deleted/deactivated — or that points at a
+club the user left — would otherwise look valid while every club-scoped endpoint answers `200`
 with empty data, leaving the client "logged in" on a session that shows nothing.
 
 **Auth required:** Yes (`Authorization: Bearer <token>`)
@@ -340,8 +348,9 @@ it to the employee out-of-band; no email delivery involved). The user is flagged
 
 ### PATCH /users/:id
 
-Updates a team member's name, role or active state. Deactivated users cannot log in.
-The caller cannot edit themself (avoids self-lockout).
+Updates a team member's name, role or active state. Deactivated users cannot log in, and the
+sessions they already have open get `401` on their next request (see [Auth](#auth)); a role change
+also applies on their next request. The caller cannot edit themself (avoids self-lockout).
 
 **Auth required:** Yes (OWNER only)
 
