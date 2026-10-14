@@ -1920,10 +1920,10 @@ Skipped for clubs with zero bookings that week. Gated by `RUN_SCHEDULER`.
 
 ## Staff help (`/help`)
 
-In-context help for the desk staff: the "Tu primer día" checklist, the club's own house rules
-and the log of help searches that found nothing. The help content itself (the ~25 desk
-questions and the on-screen "Mostrame" guides) lives in the panel
-(`front/src/features/help/content`), not in the API.
+In-context help for the panel: the "Tu primer día" checklist, the club's own house rules,
+the log of help searches that found nothing and which "Novedades" each user has seen. The help
+content itself (the desk and owner questions, the on-screen "Mostrame" guides and the news
+entries) lives in the panel (`front/src/features/help/content`), not in the API.
 
 **How the checklist ticks.** Each task is derived from what that user really did, never from a
 "ya lo leí": `booking` from a `Booking` with `bookedByUserId` = the user; the other four from
@@ -2102,6 +2102,60 @@ and sends each distinct search once; the route is also rate-limited (20/min per 
 
 ```json
 { "statusCode": 429, "message": "ThrottlerException: Too Many Requests" }
+```
+
+### GET /help/news/seen
+
+The newest "Novedades" entry the caller has seen (any role; today only the owner's "?" shows
+news). The entries and their order live in the panel (`content/news.ts`, newest first): the
+panel shows a dot on the "?" while its newest id differs from `seenId`. Stored per user, not
+per browser, because the owner opens the panel from several devices.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — `seenId` is null until the user opens the news for the first time.
+
+```json
+{ "seenId": "confirmacion-fijos" }
+```
+
+`401 Unauthorized` — no or invalid token.
+
+```json
+{ "statusCode": 401, "message": "Unauthorized" }
+```
+
+### POST /help/news/seen
+
+Marks the news as seen up to `newsId` (the newest entry the panel just showed). The server
+doesn't know the entries: it stores the id as given.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field  | Type   | Required | Constraints                                       |
+| ------ | ------ | -------- | ------------------------------------------------- |
+| newsId | string | Yes      | Lowercase slug: `a-z`, `0-9` and `-`, 1–64 chars |
+
+```json
+{ "newsId": "confirmacion-fijos" }
+```
+
+**Responses**
+
+`200 OK`
+
+```json
+{ "seenId": "confirmacion-fijos" }
+```
+
+`400 Bad Request` — `newsId` is not a slug.
+
+```json
+{ "statusCode": 400, "message": ["newsId must be a lowercase slug of up to 64 characters"], "error": "Bad Request" }
 ```
 
 ## Payments (Webhooks)

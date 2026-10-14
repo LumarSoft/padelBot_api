@@ -67,6 +67,29 @@ describe('HelpService', () => {
     })
   })
 
+  describe('news seen', () => {
+    it('reads null for a user who never opened the news', async () => {
+      const prisma = { user: { findUnique: jest.fn().mockResolvedValue({ newsSeenId: null }) } }
+      await expect(createService(prisma).getNewsSeen(7)).resolves.toEqual({ seenId: null })
+      expect(prisma.user.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 7 } }))
+    })
+
+    it('fails for a user that no longer exists', async () => {
+      const prisma = { user: { findUnique: jest.fn().mockResolvedValue(null) } }
+      await expect(createService(prisma).getNewsSeen(7)).rejects.toThrow('not found')
+    })
+
+    it('stores the newest entry seen on the user, not on the club', async () => {
+      const prisma = { user: { update: jest.fn().mockResolvedValue({ id: 7 }) } }
+      await expect(createService(prisma).markNewsSeen(7, 'confirmacion-fijos')).resolves.toEqual({
+        seenId: 'confirmacion-fijos',
+      })
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 7 }, data: { newsSeenId: 'confirmacion-fijos' } }),
+      )
+    })
+  })
+
   describe('getTeamFirstDay', () => {
     it('aggregates each staff member separately, without one query per user', async () => {
       const prisma = {

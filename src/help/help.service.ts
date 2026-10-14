@@ -73,6 +73,22 @@ export class HelpService {
     return { dismissedAt: firstDayDismissedAt ?? new Date() }
   }
 
+  /**
+   * The newest "Novedades" entry the user has seen (null = never opened them). The entries live
+   * in the panel; comparing against them is the panel's job.
+   */
+  async getNewsSeen(userId: number): Promise<{ seenId: string | null }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { newsSeenId: true } })
+    if (!user) throw new NotFoundException(`User ${userId} not found`)
+    return { seenId: user.newsSeenId }
+  }
+
+  /** The user saw the news up to `newsId`: the dot on the "?" goes away on every device. */
+  async markNewsSeen(userId: number, newsId: string): Promise<{ seenId: string }> {
+    await this.prisma.user.update({ where: { id: userId }, data: { newsSeenId: newsId }, select: { id: true } })
+    return { seenId: newsId }
+  }
+
   /** Every STAFF member's progress, for the OWNER's team table. Three queries, not one per user. */
   async getTeamFirstDay(clubId: string): Promise<TeamMemberFirstDay[]> {
     const staff = await this.prisma.user.findMany({

@@ -6,11 +6,12 @@ import { AuthenticatedUser } from '../auth/types/jwt-payload'
 import { FirstDayStatus, HelpService, HouseRule, TeamMemberFirstDay } from './help.service'
 import { UpdateHouseRulesDto } from './dto/update-house-rules.dto'
 import { RecordSearchMissDto } from './dto/record-search-miss.dto'
+import { MarkNewsSeenDto } from './dto/mark-news-seen.dto'
 
 /**
- * In-context help for the desk staff: the "Tu primer día" checklist, the club's house rules
- * and the log of help searches that found nothing. The help content itself (questions and the
- * "Mostrame" guides) lives in the panel.
+ * In-context help for the panel: the "Tu primer día" checklist, the club's house rules, the
+ * log of help searches that found nothing and which "Novedades" each user has seen. The help
+ * content itself (questions, "Mostrame" guides and the news) lives in the panel.
  */
 @Controller('help')
 @UseGuards(JwtAuthGuard)
@@ -28,6 +29,19 @@ export class HelpController {
   @HttpCode(HttpStatus.OK)
   dismissFirstDay(@CurrentUser() user: AuthenticatedUser): Promise<{ dismissedAt: Date }> {
     return this.helpService.dismissFirstDay(parseInt(user.id, 10))
+  }
+
+  /** The newest "Novedades" entry the caller has seen — drives the dot on the panel's "?". */
+  @Get('news/seen')
+  getNewsSeen(@CurrentUser() user: AuthenticatedUser): Promise<{ seenId: string | null }> {
+    return this.helpService.getNewsSeen(parseInt(user.id, 10))
+  }
+
+  /** The caller opened the news up to `newsId`. Per user, so it holds across devices. */
+  @Post('news/seen')
+  @HttpCode(HttpStatus.OK)
+  markNewsSeen(@CurrentUser() user: AuthenticatedUser, @Body() dto: MarkNewsSeenDto): Promise<{ seenId: string }> {
+    return this.helpService.markNewsSeen(parseInt(user.id, 10), dto.newsId)
   }
 
   /** Each employee's progress ("4 de 5"), for the owner's team table. */

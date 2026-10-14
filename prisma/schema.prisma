@@ -283,6 +283,10 @@ model User {
   /// When the user closed the "Tu primer día" card on the panel's Resumen. Null = still shown,
   /// until every task is done (which hides it on its own).
   firstDayDismissedAt DateTime?
+  /// Newest entry of the panel's "Novedades" (front `features/help/content/news.ts`) this user
+  /// has seen. Stored here, not in the browser: the owner opens the panel from several devices.
+  /// Null = never opened them.
+  newsSeenId       String?            @db.VarChar(64)
   firstActions     UserFirstAction[]
   clubId           String
   club             Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
