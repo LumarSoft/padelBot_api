@@ -1,3 +1,4 @@
+import type { DepositMode } from 'generated/prisma/client'
 import { AvailableDate } from '../availability/availability.service'
 import { dayLabelFromKey, dayMonthFromKey, formatDayMonth, formatTimeRange } from '../availability/lib/datetime'
 import { BandOption, BotReply, BotState, MyBookingOption, SessionContext, SlotOption } from './types'
@@ -62,6 +63,8 @@ export const BOOKING_FAILED = `😕 Uy, no pude confirmar la reserva — puede q
 export const PAYMENT_UNAVAILABLE = `😅 Justo no puedo tomar el pago por acá en este momento. Escribile al club así te ayudan a confirmar la reserva. 🎾`
 export const PAYMENT_CLAIM_NO_PENDING = `Mmm, no me figura ninguna reserva tuya esperando pago 🤔. Si transferiste recién, dame un par de minutos y revisá; si no, escribime *reservar* y armamos el turno. 🎾`
 export const ATTACHMENT_NO_PENDING = `Recibí tu archivo 🙌 pero por acá no puedo abrir imágenes. Si transferiste para una reserva, esperá un toque y te confirmo solo; si necesitás otra cosa, escribime con palabras. 🎾`
+/** An unreadable image at a club that charges no seña: there is no transfer to wait for. */
+export const ATTACHMENT_NO_DEPOSIT = `Recibí tu archivo 🙌 pero por acá no puedo abrir imágenes. Si necesitás algo, escribime con palabras. 🎾`
 /** A voice note we couldn't download or transcribe. */
 export const AUDIO_NOT_UNDERSTOOD = `Uy, no pude escuchar bien tu audio 😅. ¿Me lo escribís, porfa? 🎾`
 /** RECEIPT mode: we got an image but the player has no pending booking to attach it to. */
@@ -188,13 +191,15 @@ export function myBookingsList(bookings: MyBookingOption[]): string {
   return `🗓️ *Tus próximos turnos:*\n\n${list}\n\n¿Necesitás mover alguno? Elegilo de la lista. 🎾`
 }
 
-/** The player picked a booking they can move themselves → ask for the new day. */
-export function askRescheduleDate(label: string): string {
-  return (
-    `🔄 Vamos a mover este turno:\n\n🎾 ${label}\n\n` +
-    `No lo cancelo: te lo paso a otro horario y *la seña que pagaste sigue valiendo*. ` +
-    `¿Para qué día lo querés?`
-  )
+/**
+ * The player picked a booking they can move themselves → ask for the new day. The seña is only
+ * mentioned when one rides on the booking — a booking made without seña never had any.
+ */
+export function askRescheduleDate(label: string, carriesDeposit = true): string {
+  const keeps = carriesDeposit
+    ? `No lo cancelo: te lo paso a otro horario y *la seña que pagaste sigue valiendo*. `
+    : `No lo cancelo: te lo paso a otro horario. `
+  return `🔄 Vamos a mover este turno:\n\n🎾 ${label}\n\n${keeps}¿Para qué día lo querés?`
 }
 
 /** The club doesn't let players move bookings from WhatsApp — staff is notified to handle it here. */
@@ -218,31 +223,43 @@ export function rescheduleRequested(reason: 'club-policy' | 'too-late' | 'limit-
 export const RESCHEDULE_NO_DAY_WORKS = `Entiendo 🙏 Le paso tu caso al club así lo ven ellos y te responden por acá. 🎾`
 
 /** The move summary, with the price difference stated BEFORE the player commits to it. */
-export function rescheduleConfirm(oldLabel: string, ctx: SessionContext, priceDiffCents: number): string {
+export function rescheduleConfirm(
+  oldLabel: string,
+  ctx: SessionContext,
+  priceDiffCents: number,
+  carriesDeposit = true,
+): string {
   const head =
     `🔄 *¿Confirmo el cambio?*\n\n` +
     `Antes: ${oldLabel}\n` +
     `Ahora: ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel} · ${ctx.selectedCourtName}\n\n`
 
   if (priceDiffCents > 0) {
+    const rest = carriesDeposit
+      ? `Tu seña sigue aplicada y la diferencia la abonás en el club.`
+      : `La diferencia la abonás en el club.`
     return (
       `${head}Ese horario sale ${fmtPrice(ctx.selectedSlotPrice!)}, o sea *${fmtPrice(priceDiffCents)} más* ` +
-      `que el que tenías. Tu seña sigue aplicada y la diferencia la abonás en el club. ¿Lo muevo?`
+      `que el que tenías. ${rest} ¿Lo muevo?`
     )
   }
   if (priceDiffCents < 0) {
-    return `${head}Ese horario sale ${fmtPrice(ctx.selectedSlotPrice!)} — te queda más barato. Tu seña sigue aplicada. ¿Lo muevo?`
+    const rest = carriesDeposit ? ` Tu seña sigue aplicada.` : ''
+    return `${head}Ese horario sale ${fmtPrice(ctx.selectedSlotPrice!)} — te queda más barato.${rest} ¿Lo muevo?`
   }
-  return `${head}Mismo precio y tu seña sigue aplicada. ¿Lo muevo?`
+  return carriesDeposit ? `${head}Mismo precio y tu seña sigue aplicada. ¿Lo muevo?` : `${head}Mismo precio. ¿Lo muevo?`
 }
 
-export function rescheduleDone(ctx: SessionContext, priceDiffCents: number): string {
+export function rescheduleDone(ctx: SessionContext, priceDiffCents: number, carriesDeposit = true): string {
+  // Without a seña the whole turno is paid at the club, so the new price is what matters.
   const diff =
-    priceDiffCents > 0
-      ? `\n\n💰 La diferencia de *${fmtPrice(priceDiffCents)}* la abonás en el club.`
-      : priceDiffCents < 0
-        ? `\n\n💰 Te queda a favor la diferencia — lo hablás en el mostrador.`
-        : ''
+    priceDiffCents !== 0 && !carriesDeposit
+      ? `\n\n💰 El nuevo horario sale *${fmtPrice(ctx.selectedSlotPrice!)}* y se abona en el club.`
+      : priceDiffCents > 0
+        ? `\n\n💰 La diferencia de *${fmtPrice(priceDiffCents)}* la abonás en el club.`
+        : priceDiffCents < 0
+          ? `\n\n💰 Te queda a favor la diferencia — lo hablás en el mostrador.`
+          : ''
   return (
     `✅ *¡Listo, lo moví!*\n\n` +
     `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n🎾 ${ctx.selectedCourtName}${diff}\n\n` +
@@ -254,11 +271,37 @@ export const RESCHEDULE_ABORTED = `👍 Perfecto, te dejé el turno como estaba.
 /** The target band was taken (or the booking changed) between choosing and confirming. */
 export const RESCHEDULE_FAILED = `😕 No pude mover el turno — puede que alguien haya tomado ese horario justo recién. Probemos con otro.`
 
+/**
+ * The club charges nothing up front (NONE), or the seña worked out to $0: the booking is
+ * confirmed on the spot. No alias, no countdown — the bot is the club's booking book.
+ */
+export function bookingConfirmedNoDeposit(ctx: SessionContext): string {
+  const price = ctx.selectedSlotPrice ? `\n💰 El turno (${fmtPrice(ctx.selectedSlotPrice)}) se abona en el club.` : ''
+  return (
+    `✅ *¡Listo, reserva confirmada!*\n\n` +
+    `📅 ${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}\n` +
+    `🎾 ${ctx.selectedCourtName}\n` +
+    `👤 A nombre de ${ctx.playerName}${price}\n\n` +
+    `Si al final no pueden venir, avisame por acá así le damos la cancha a otro 🙏 ¡Nos vemos! 🎾`
+  )
+}
+
+/**
+ * A player with several no-shows, at a club with no seña to ask up front: nothing is booked and
+ * a person of the club decides (the staff got a push). Never a dead end — they answer on this chat.
+ */
+export function noShowReviewRequested(ctx: SessionContext): string {
+  return (
+    `🙏 Este turno te lo tiene que confirmar alguien del club, porque figuran algunas ausencias en tus reservas anteriores.\n\n` +
+    `📩 Ya les pasé tu pedido (*${fmtDate(ctx.selectedDate!)} · ${ctx.selectedSlotLabel}*) — te responden por acá en un rato. 🎾`
+  )
+}
+
 export function transferPending(
   ctx: SessionContext,
   transfer: { alias: string; holder: string | null },
   transferAmountCents: number,
-  depositMode: 'DEPOSIT' | 'FULL' = 'DEPOSIT',
+  depositMode: DepositMode = 'DEPOSIT',
   requireDni = false,
   verificationMode: 'AUTO' | 'RECEIPT' = 'AUTO',
 ): string {

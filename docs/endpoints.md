@@ -1379,7 +1379,7 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 | ----------------------- | ------ | -------- | ---------------------------------- |
 | transferAlias           | string | No       | max 120 chars                      |
 | transferHolder          | string | No       | max 120 chars                      |
-| depositMode             | enum   | No       | `DEPOSIT` \| `FULL`                |
+| depositMode             | enum   | No       | `DEPOSIT` \| `FULL` \| `NONE`      |
 | depositPercent          | int    | No       | 1–100 (used when `DEPOSIT`)        |
 | cancellationWindowHours | int    | No       | 0–168; cancelling ≥ N h before the slot credits the deposit to the player, later forfeits it |
 | requireDniMatch         | bool   | No       | only relevant in `AUTO` mode       |
@@ -1389,6 +1389,8 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 | maxPlayerReschedules    | int    | No       | 0–10; how many times ONE booking may be moved by the player |
 
 `AUTO` reconciles the deposit automatically via MercadoPago; `RECEIPT` makes the bot ask the player for a receipt photo that an admin verifies manually from the panel (the poller skips RECEIPT clubs).
+
+**`depositMode`.** `DEPOSIT` asks a seña of `depositPercent`% of the court price; `FULL` asks the whole price; `NONE` asks nothing — the bot takes name, day and time and books the court **CONFIRMED** on the spot (no alias, no transfer, no payment window), and the club charges at the desk. With `NONE` the alias, `requireDniMatch` and `paymentVerificationMode` are ignored, and a player at the no-show threshold is handed to the club (push) instead of being asked the full price. A seña that works out to $0 (a court with no price) books the same way as `NONE`.
 
 **Player-side reschedule policy.** The bot never *cancels* a booking — it **moves** it. Rescheduling keeps the deposit alive on the same booking, frees the old court for the waitlist to resell, and takes no money out of the club, which is why a player can be allowed to do it alone. A real cancellation moves money (credit vs forfeit, per `cancellationWindowHours`) and stays a decision of the club, from the panel.
 

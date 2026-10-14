@@ -101,6 +101,8 @@ export interface SessionContext {
   rescheduleFromLabel?: string
   /** Price of the slot being moved away from — the difference the player is told about. */
   rescheduleFromPriceCents?: number
+  /** Whether a seña rides on the booking being moved (absent = yes, for chats mid-flow). */
+  rescheduleCarriesDeposit?: boolean
   /** The player's habitual slot, stamped on the welcome so "repetir" re-books it. */
   habit?: { weekday: number; bandStart: string; courtId: string; courtName: string }
 }

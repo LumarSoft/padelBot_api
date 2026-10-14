@@ -215,7 +215,10 @@ export class LlmService {
     const [club, courts, products] = await Promise.all([
       // botFaq is the club's own Q&A so "¿alquilan paletas?", "¿hay estacionamiento?",
       // "¿puedo pagar en efectivo?" are answered from real config instead of "no lo tengo".
-      this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true, botFaq: true } }),
+      this.prisma.club.findUnique({
+        where: { id: clubId },
+        select: { name: true, botFaq: true, depositMode: true, depositPercent: true },
+      }),
       this.prisma.court.findMany({
         where: { clubId },
         // The real schedule, not just the names: the prompt describes THIS club's bands.
@@ -239,6 +242,7 @@ export class LlmService {
       ctx,
       faq: parseFaq(club?.botFaq),
       products,
+      payment: club ? { mode: club.depositMode, percent: club.depositPercent } : undefined,
     })
 
     const historyMessages: OpenAI.ChatCompletionMessageParam[] = (ctx.history ?? []).map(m => ({

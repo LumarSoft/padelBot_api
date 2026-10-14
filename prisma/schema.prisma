@@ -48,10 +48,11 @@ model Club {
 
   /// How much the bot asks the player to transfer to confirm a booking:
   /// DEPOSIT = a partial deposit (seña) of `depositPercent` of the court price,
-  /// FULL = the whole court price. The owner sets this per club.
+  /// FULL = the whole court price, NONE = nothing: the bot takes the booking down and
+  /// confirms it on the spot (no alias, no transfer). The owner sets this per club.
   depositMode    DepositMode @default(DEPOSIT)
   /// Percentage of the court price charged as the seña when depositMode = DEPOSIT.
-  /// Default 25 (one of four padel players). Ignored when depositMode = FULL.
+  /// Default 25 (one of four padel players). Ignored when depositMode = FULL or NONE.
   depositPercent Int         @default(25)
 
   /// Club voice (acotado, no todo el copy): an extra line the bot appends to its
@@ -148,10 +149,13 @@ enum Role {
   STAFF
 }
 
-/// Whether the bot charges a partial deposit (seña) or the full court price.
+/// What the bot charges up front to confirm a booking: a partial deposit (seña), the full
+/// court price, or nothing at all (NONE — the bot works as a booking book: name, day, time,
+/// confirmed; the club charges at the desk).
 enum DepositMode {
   DEPOSIT
   FULL
+  NONE
 }
 
 /// How a club verifies the deposit transfer: automatically via MercadoPago, or by a

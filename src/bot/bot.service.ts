@@ -1,7 +1,8 @@
 import { ForbiddenException, Injectable, Logger } from '@nestjs/common'
+import { DepositMode, PaymentVerificationMode } from 'generated/prisma/client'
 import { dniFromIdentification } from '../common/identity'
 import { PrismaService } from '../prisma/prisma.service'
-import { BookingsService } from '../bookings/bookings.service'
+import { BookingsService, NoShowReviewRequiredException, PendingBookingResult } from '../bookings/bookings.service'
 import { AvailabilityService } from '../availability/availability.service'
 import {
   dayLabelFromKey,
@@ -47,6 +48,7 @@ import {
   ASK_DATE,
   ASK_NAME,
   BAD_DNI,
+  ATTACHMENT_NO_DEPOSIT,
   ATTACHMENT_NO_PENDING,
   SKIP_DNI_INTENT,
   DNI_NOTED,
@@ -66,11 +68,13 @@ import {
   RECEIPT_CLAIM_ASK_PHOTO,
   TECHNICAL_ERROR,
   askRescheduleDate,
+  bookingConfirmedNoDeposit,
   composeBotReply,
   confirmBooking,
   dayAvailabilityList,
   myBookingsList,
   noAvailabilityWithSuggestions,
+  noShowReviewRequested,
   rescheduleConfirm,
   rescheduleDone,
   rescheduleRequested,
@@ -203,9 +207,8 @@ export class BotService {
     // poller confirm the real money — never from a claim.
     const result =
       (await this.repeatFlowResult(msg, state, session.context, clubId, waId)) ??
-      (isPaymentClaim(msg) && isMenuState
-        ? await this.paymentClaimReply(clubId, waId, session.context)
-        : await this.dispatch(state, msg, session.context, clubId, waId))
+      (isPaymentClaim(msg) && isMenuState ? await this.paymentClaimReply(clubId, waId, session.context) : null) ??
+      (await this.dispatch(state, msg, session.context, clubId, waId))
 
     // What the bot actually said (answer + step prompt) — the history and the admin's chat
     // view must show that, not just the step prompt.
@@ -260,11 +263,14 @@ export class BotService {
 
     if (await this.isHumanHandled(session, waId)) return null
 
-    const mode = await this.paymentVerificationMode(clubId)
+    const payment = await this.paymentSettings(clubId)
+    // No seña to wait for: an image we couldn't read is not a receipt of anything.
     const reply =
-      mode === 'RECEIPT'
-        ? await this.storeReceipt(waId, clubId, media)
-        : await this.acknowledgeReceipt(clubId, waId, media)
+      !pending && payment.depositMode === DepositMode.NONE
+        ? ATTACHMENT_NO_DEPOSIT
+        : payment.verificationMode === 'RECEIPT'
+          ? await this.storeReceipt(waId, clubId, media)
+          : await this.acknowledgeReceipt(clubId, waId, media)
 
     await this.sessionService.saveMessage(session.id, 'BOT', reply)
     return { text: reply }
@@ -395,13 +401,18 @@ export class BotService {
     return receiptReceivedAck(court.name, startsAt, endsAt)
   }
 
-  /** The club's payment verification mode (AUTO reconciliation vs manual receipt review). */
-  private async paymentVerificationMode(clubId: string): Promise<'AUTO' | 'RECEIPT'> {
+  /** How the club charges (seña / full / nothing) and verifies it (AUTO reconciliation vs receipt). */
+  private async paymentSettings(
+    clubId: string,
+  ): Promise<{ depositMode: DepositMode; verificationMode: PaymentVerificationMode }> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { paymentVerificationMode: true },
+      select: { depositMode: true, paymentVerificationMode: true },
     })
-    return club?.paymentVerificationMode ?? 'AUTO'
+    return {
+      depositMode: club?.depositMode ?? DepositMode.DEPOSIT,
+      verificationMode: club?.paymentVerificationMode ?? PaymentVerificationMode.AUTO,
+    }
   }
 
   /**
@@ -521,15 +532,22 @@ export class BotService {
     }
   }
 
-  /** Builds the "we're waiting for your transfer" reply, keeping the FSM state put. */
-  private async paymentClaimReply(clubId: string, waId: string, ctx: SessionContext): Promise<HandlerResult> {
+  /**
+   * Builds the "we're waiting for your transfer" reply, keeping the FSM state put. Null when it
+   * doesn't apply: at a club with no seña and nothing pending, "¿hay que transferir?" is a
+   * question for the normal flow, not a payment claim.
+   */
+  private async paymentClaimReply(clubId: string, waId: string, ctx: SessionContext): Promise<HandlerResult | null> {
     const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
-    if (!pending) return { reply: PAYMENT_CLAIM_NO_PENDING, state: BotState.MENU, ctx: keepName(ctx) }
+    const payment = await this.paymentSettings(clubId)
+    if (!pending) {
+      if (payment.depositMode === DepositMode.NONE) return null
+      return { reply: PAYMENT_CLAIM_NO_PENDING, state: BotState.MENU, ctx: keepName(ctx) }
+    }
     const { startsAt, endsAt, court } = pending.slot
     // In RECEIPT mode a text "ya transferí" isn't enough — ask for the receipt photo.
-    const mode = await this.paymentVerificationMode(clubId)
     const reply =
-      mode === 'RECEIPT'
+      payment.verificationMode === 'RECEIPT'
         ? RECEIPT_CLAIM_ASK_PHOTO
         : paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
     return { reply, state: BotState.MENU, ctx: keepName(ctx) }
@@ -697,13 +715,14 @@ export class BotService {
     }
 
     return {
-      reply: askRescheduleDate(picked.label),
+      reply: askRescheduleDate(picked.label, policy.carriesDeposit),
       state: BotState.RESCHEDULE_DATE,
       ctx: {
         ...keepName(ctx),
         rescheduleBookingId: picked.id,
         rescheduleFromLabel: picked.label,
         rescheduleFromPriceCents: policy.priceCents,
+        rescheduleCarriesDeposit: policy.carriesDeposit,
       },
     }
   }
@@ -780,7 +799,7 @@ export class BotService {
     const next = assigned.ctx
     const priceDiff = (next.selectedSlotPrice ?? 0) - (ctx.rescheduleFromPriceCents ?? 0)
     return {
-      reply: rescheduleConfirm(ctx.rescheduleFromLabel ?? 'tu turno', next, priceDiff),
+      reply: rescheduleConfirm(ctx.rescheduleFromLabel ?? 'tu turno', next, priceDiff, ctx.rescheduleCarriesDeposit),
       state: BotState.RESCHEDULE_CONFIRM,
       ctx: next,
     }
@@ -811,7 +830,11 @@ export class BotService {
     if (!moved) return { reply: RESCHEDULE_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
 
     this.logger.log(`🔄 ${waId}: movió la reserva ${ctx.rescheduleBookingId}`)
-    return { reply: rescheduleDone(ctx, moved.priceDiffCents), state: BotState.MENU, ctx: keepName(ctx) }
+    return {
+      reply: rescheduleDone(ctx, moved.priceDiffCents, ctx.rescheduleCarriesDeposit),
+      state: BotState.MENU,
+      ctx: keepName(ctx),
+    }
   }
 
   /**
@@ -1070,37 +1093,28 @@ export class BotService {
       return { reply: BOOKING_ABORTED, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
-    // The club must have a transfer alias configured before we lock a slot the
-    // player can't actually pay for.
-    const club = await this.prisma.club.findUnique({
-      where: { id: clubId },
-      select: {
-        transferAlias: true,
-        transferHolder: true,
-        depositMode: true,
-        requireDniMatch: true,
-        paymentVerificationMode: true,
-      },
-    })
-    if (!club?.transferAlias) {
+    // A club that charges a seña must have a transfer alias configured before we lock a slot
+    // the player can't actually pay for. A club on NONE charges nothing through the bot.
+    const club = await this.bookingClubSettings(clubId)
+    if (!club) {
       return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
     // Strict (AUTO) mode identifies the payer by DNI — but it never blocks the booking: we reuse
     // a DNI this phone already gave us, and otherwise the player can send their DNI or the
     // receipt photo later, while the deposit is pending (or neither: the club reviews it).
-    if (club.requireDniMatch && club.paymentVerificationMode !== 'RECEIPT' && !ctx.playerDni) {
+    // Without a seña there is no payer to identify.
+    if (
+      club.depositMode !== DepositMode.NONE &&
+      club.requireDniMatch &&
+      club.paymentVerificationMode !== 'RECEIPT' &&
+      !ctx.playerDni
+    ) {
       const knownDni = await this.bookingsService.findKnownDniForPhone(clubId, waId)
       if (knownDni) ctx = { ...ctx, playerDni: knownDni }
     }
 
-    return this.createPendingBooking(clubId, waId, ctx, {
-      transferAlias: club.transferAlias,
-      transferHolder: club.transferHolder,
-      depositMode: club.depositMode,
-      requireDniMatch: club.requireDniMatch,
-      paymentVerificationMode: club.paymentVerificationMode,
-    })
+    return this.createPendingBooking(clubId, waId, ctx, club)
   }
 
   private async onBookDni(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
@@ -1111,6 +1125,20 @@ export class BotService {
       return { reply: BAD_DNI, state: BotState.BOOK_DNI, ctx }
     }
 
+    const club = await this.bookingClubSettings(clubId)
+    if (!club) {
+      return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    return this.createPendingBooking(clubId, waId, skipped ? ctx : { ...ctx, playerDni: dni }, club)
+  }
+
+  /**
+   * How the club charges, for the booking step — or null when it can't take a booking it would
+   * have to charge for: a club that asks a seña (DEPOSIT/FULL) needs an alias to send the player
+   * to. A club on NONE charges nothing through the bot, so it never needs one.
+   */
+  private async bookingClubSettings(clubId: string): Promise<BookingClubSettings | null> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
       select: {
@@ -1121,38 +1149,22 @@ export class BotService {
         paymentVerificationMode: true,
       },
     })
-    if (!club?.transferAlias) {
-      return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
-    }
-
-    return this.createPendingBooking(clubId, waId, skipped ? ctx : { ...ctx, playerDni: dni }, {
-      transferAlias: club.transferAlias,
-      transferHolder: club.transferHolder,
-      depositMode: club.depositMode,
-      requireDniMatch: club.requireDniMatch,
-      paymentVerificationMode: club.paymentVerificationMode,
-    })
+    if (!club || (club.depositMode !== DepositMode.NONE && !club.transferAlias)) return null
+    return club
   }
 
-  /** Locks the slot with a pending booking and tells the player exactly how much to transfer. */
+  /**
+   * Locks the slot for the player. With a seña, the booking is held PENDING and the player is told
+   * exactly how much to transfer; with nothing to charge (club on NONE, or a $0 seña) it is
+   * confirmed on the spot.
+   */
   private async createPendingBooking(
     clubId: string,
     waId: string,
     ctx: SessionContext,
-    club: {
-      transferAlias: string
-      transferHolder: string | null
-      depositMode: 'DEPOSIT' | 'FULL'
-      requireDniMatch: boolean
-      paymentVerificationMode: 'AUTO' | 'RECEIPT'
-    },
+    club: BookingClubSettings,
   ): Promise<HandlerResult> {
-    let pendingBooking: {
-      id: string
-      transferAmountCents: number
-      creditAppliedCents: number
-      confirmedByCredit: boolean
-    }
+    let pendingBooking: PendingBookingResult
     try {
       if (ctx.selectedSlotId) {
         pendingBooking = await this.bookingsService.bookPending(clubId, {
@@ -1172,6 +1184,16 @@ export class BotService {
         })
       }
     } catch (err) {
+      // Too many no-shows and no seña to ask up front: a person of the club decides.
+      if (err instanceof NoShowReviewRequiredException) {
+        await this.notifications.notifyClub(clubId, {
+          title: '🙋 Reserva para revisar',
+          body:
+            `${ctx.playerName} (${err.noShowCount} ausencias) pidió ${dayMonthFromKey(ctx.selectedDate!)} · ` +
+            `${ctx.selectedSlotLabel} · ${ctx.selectedCourtName}. Respondele desde Conversaciones (${waId}).`,
+        })
+        return { reply: noShowReviewRequested(ctx), state: BotState.MENU, ctx: keepName(ctx) }
+      }
       // A blocked player gets the club's message, not the generic "slot taken".
       if (err instanceof ForbiddenException) {
         return {
@@ -1181,6 +1203,11 @@ export class BotService {
         }
       }
       return { reply: BOOKING_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    // Nothing to charge → confirmed on the spot: the bot just took the booking down.
+    if (pendingBooking.confirmedWithoutDeposit) {
+      return { reply: bookingConfirmedNoDeposit(ctx), state: BotState.MENU, ctx: keepName(ctx) }
     }
 
     // Credit covered the whole deposit → the booking is already CONFIRMED, no transfer needed.
@@ -1198,7 +1225,8 @@ export class BotService {
     return {
       reply: transferPending(
         ctx,
-        { alias: club.transferAlias, holder: club.transferHolder },
+        // Non-null: a seña is only asked of a club with an alias (bookingClubSettings).
+        { alias: club.transferAlias!, holder: club.transferHolder },
         pendingBooking.transferAmountCents,
         club.depositMode,
         club.requireDniMatch,
@@ -1208,6 +1236,15 @@ export class BotService {
       ctx: keepName(ctx),
     }
   }
+}
+
+/** What the booking step reads about how the club charges. */
+interface BookingClubSettings {
+  transferAlias: string | null
+  transferHolder: string | null
+  depositMode: DepositMode
+  requireDniMatch: boolean
+  paymentVerificationMode: PaymentVerificationMode
 }
 
 // ── Pure helpers ───────────────────────────────────────────────────────────

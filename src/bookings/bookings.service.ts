@@ -15,7 +15,7 @@ import { SetBookingProductsDto } from './dto/set-booking-products.dto'
 import { LocalPaymentDto } from './dto/local-payment.dto'
 import { AddPlayerPaymentDto } from './dto/add-player-payment.dto'
 import { BookingAccountView, computeAccount } from './lib/account'
-import { DepositOutcome, PlayerRescheduleMode, Prisma, SlotStatus } from 'generated/prisma/client'
+import { DepositMode, DepositOutcome, PlayerRescheduleMode, Prisma, SlotStatus } from 'generated/prisma/client'
 import { bandDateTimes, bandsForDate, courtScheduleSelect, findBandInSchedule } from '../availability/lib/schedule'
 import { resolveBandPriceCents } from '../availability/lib/pricing'
 import { dniFromIdentification, dniMatches } from '../common/identity'
@@ -96,6 +96,7 @@ type BookingForEvent = {
   id: string
   clubId: string
   playerName: string
+  status?: string
   slot: { startsAt: Date; endsAt: Date; court: { name: string } }
 }
 
@@ -135,6 +136,20 @@ const roundToWholePesos = (cents: number): number => Math.round(cents / 100) * 1
 const PAYMENT_WINDOW_MS = (Number(process.env.PAYMENT_WINDOW_MIN) || 30) * 60 * 1000
 /** No-shows before the bot demands the FULL court price as the deposit. */
 const NO_SHOW_FULL_THRESHOLD = Number(process.env.NO_SHOW_FULL_THRESHOLD) || 3
+/** No payer to recognize: nothing will be transferred for this booking. */
+const NO_KNOWN_PAYER = { mpUserId: null, cuit: null }
+
+/**
+ * A player at the no-show threshold asked for a court at a club that charges nothing up front.
+ * Where there is a seña, the bot answers that risk by asking the full price; with nothing to ask,
+ * a person of the club decides. Nothing is booked. Extends ForbiddenException so any caller that
+ * doesn't know it still reads it as a refusal.
+ */
+export class NoShowReviewRequiredException extends ForbiddenException {
+  constructor(readonly noShowCount: number) {
+    super('Por las ausencias anteriores, este turno lo tiene que confirmar el club.')
+  }
+}
 
 export interface PendingBookingResult {
   id: string
@@ -146,6 +161,9 @@ export interface PendingBookingResult {
   creditAppliedCents: number
   /** True when credit covered the whole deposit — the booking is already CONFIRMED. */
   confirmedByCredit: boolean
+  /** True when there was nothing to charge (club on NONE, or a seña that works out to $0): the
+   *  booking was created CONFIRMED on the spot — no transfer, no payment window. */
+  confirmedWithoutDeposit: boolean
 }
 
 type CancelledPendingInfo = { playerPhone: string | null; clubId: string }
@@ -285,6 +303,9 @@ export class BookingsService {
           notes: dto.notes,
           bookedByUserId: bookedByUserId ?? null,
           depositCents,
+          // Nothing to collect up front (club on NONE, or a $0 seña): the booking is simply
+          // confirmed, instead of sitting "pendiente de seña" for money nobody owes.
+          ...(depositCents === 0 ? { status: 'CONFIRMED' as const } : {}),
         },
         select: bookingSelect,
       })
@@ -545,8 +566,8 @@ export class BookingsService {
     if (slot.status !== SlotStatus.AVAILABLE) throw new ConflictException(`Slot ${dto.slotId} is not available`)
 
     const plan = await this.resolvePaymentPlan(clubId, slot.priceCents)
-    const policy = await this.applyPlayerPolicy(clubId, dto, slot.priceCents, plan.depositCents)
-    const known = await this.findKnownPayerIdentity(clubId, dto.playerPhone)
+    const policy = await this.applyPlayerPolicy(clubId, dto, slot.priceCents, plan)
+    const known = policy.depositCents > 0 ? await this.findKnownPayerIdentity(clubId, dto.playerPhone) : NO_KNOWN_PAYER
 
     return this.createPendingWithCredit(clubId, policy, plan.roundAmount, known, async (tx, data) => {
       // Atomic check-and-lock — the loser of a concurrent race gets a clean conflict.
@@ -589,8 +610,9 @@ export class BookingsService {
 
     const bandPriceCents = resolveBandPriceCents(court.priceCents, court.priceRules, input.dateKey, band.start)
     const plan = await this.resolvePaymentPlan(clubId, bandPriceCents)
-    const policy = await this.applyPlayerPolicy(clubId, input, bandPriceCents, plan.depositCents)
-    const known = await this.findKnownPayerIdentity(clubId, input.playerPhone)
+    const policy = await this.applyPlayerPolicy(clubId, input, bandPriceCents, plan)
+    const known =
+      policy.depositCents > 0 ? await this.findKnownPayerIdentity(clubId, input.playerPhone) : NO_KNOWN_PAYER
 
     return this.createPendingWithCredit(clubId, policy, plan.roundAmount, known, async (tx, data) => {
       const existing = await tx.slot.findFirst({
@@ -633,7 +655,8 @@ export class BookingsService {
    * Shared core of the pending-booking flow with player credit: consumes available
    * credit to reduce (or fully cover) the deposit inside the same transaction that
    * locks the slot. When credit covers everything the booking is created CONFIRMED
-   * directly — no transfer, no expiry window.
+   * directly — no transfer, no expiry window. Same when there is nothing to charge at all
+   * (club on NONE, or a seña that works out to $0): the bot works as a booking book.
    */
   private async createPendingWithCredit(
     clubId: string,
@@ -659,13 +682,18 @@ export class BookingsService {
     }>,
   ): Promise<PendingBookingResult> {
     const { depositCents, playerId, availableCreditCents } = policy
-    const creditApplied = playerId ? Math.min(availableCreditCents, depositCents) : 0
+    // Nothing to charge: confirmed on the spot. Holding it PENDING would ask the player for a
+    // $0 transfer nobody can make, and the expiry sweep would hand the court to someone else.
+    // Player credit isn't spent on it: it stays for a booking that does carry a seña.
+    const withoutDeposit = depositCents <= 0
+    const creditApplied = playerId && !withoutDeposit ? Math.min(availableCreditCents, depositCents) : 0
     const remainingCents = depositCents - creditApplied
     const coveredByCredit = creditApplied > 0 && remainingCents === 0
+    const confirmedNow = withoutDeposit || coveredByCredit
 
     const booking = await this.prisma.$transaction(async tx => {
       if (creditApplied > 0) await this.consumeCredit(tx, playerId!, creditApplied)
-      const transferAmountCents = coveredByCredit
+      const transferAmountCents = confirmedNow
         ? null
         : remainingCents === depositCents
           ? await this.resolvePendingTransferAmount(tx, depositCents, roundAmount, known)
@@ -674,61 +702,93 @@ export class BookingsService {
             remainingCents
       return create(tx, {
         playerId,
-        status: coveredByCredit ? 'CONFIRMED' : 'PENDING_PAYMENT',
+        status: confirmedNow ? 'CONFIRMED' : 'PENDING_PAYMENT',
         depositCents,
         creditAppliedCents: creditApplied,
         transferAmountCents,
-        paymentExpiresAt: coveredByCredit ? null : new Date(Date.now() + PAYMENT_WINDOW_MS),
+        paymentExpiresAt: confirmedNow ? null : new Date(Date.now() + PAYMENT_WINDOW_MS),
       })
     })
+
+    // Born CONFIRMED, so no payment confirmation will ever announce it: tell the panel and the
+    // staff app now, or the club only finds out when the players walk in.
+    if (confirmedNow) await this.announceConfirmedBooking(booking.id)
 
     return {
       id: booking.id,
       depositCents: booking.depositCents,
       transferAmountCents: booking.transferAmountCents ?? 0,
       creditAppliedCents: booking.creditAppliedCents,
-      confirmedByCredit: booking.status === 'CONFIRMED',
+      confirmedByCredit: coveredByCredit,
+      confirmedWithoutDeposit: withoutDeposit,
+    }
+  }
+
+  /** Best-effort live event + staff push for a bot booking that was confirmed at creation. */
+  private async announceConfirmedBooking(bookingId: string): Promise<void> {
+    try {
+      const booking = await this.prisma.booking.findUnique({
+        where: { id: bookingId },
+        select: {
+          id: true,
+          clubId: true,
+          playerName: true,
+          status: true,
+          slot: { select: { startsAt: true, endsAt: true, court: { select: { name: true } } } },
+        },
+      })
+      if (booking) this.emitBookingChange('created', booking)
+    } catch (err) {
+      // The booking is already made; failing to announce it must not tell the player it failed.
+      this.logger.warn(`Could not announce confirmed booking ${bookingId}: ${String(err)}`)
     }
   }
 
   /**
    * Resolves the club's payment policy for a booking: how much the player must transfer
-   * (the full court price when depositMode = FULL, else a percentage of it as the seña —
-   * default 25%, one of four padel players; a 0-priced court yields 0), whether the club
-   * requires DNI-matched confirmation, and whether the transfer amount should be a clean
-   * round number. The amount is rounded (no centavos tag) when the deposit isn't reconciled
-   * by a unique amount — i.e. in DNI mode (payer identity disambiguates) or in RECEIPT mode
-   * (an admin verifies the receipt photo by hand, so the centavos trick is unnecessary).
+   * (nothing when depositMode = NONE, the full court price when FULL, else a percentage of it
+   * as the seña — default 25%, one of four padel players; a 0-priced court yields 0, which
+   * books like NONE), whether the club requires DNI-matched confirmation, and whether the
+   * transfer amount should be a clean round number. The amount is rounded (no centavos tag)
+   * when the deposit isn't reconciled by a unique amount — i.e. in DNI mode (payer identity
+   * disambiguates) or in RECEIPT mode (an admin verifies the receipt photo by hand, so the
+   * centavos trick is unnecessary).
    */
   private async resolvePaymentPlan(
     clubId: string,
     priceCents: number,
-  ): Promise<{ depositCents: number; requireDniMatch: boolean; roundAmount: boolean }> {
+  ): Promise<{ depositMode: DepositMode; depositCents: number; requireDniMatch: boolean; roundAmount: boolean }> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
       select: { depositMode: true, depositPercent: true, requireDniMatch: true, paymentVerificationMode: true },
     })
+    const depositMode = club?.depositMode ?? DepositMode.DEPOSIT
     const depositCents =
-      club?.depositMode === 'FULL'
-        ? priceCents
-        : Math.ceil((priceCents * (club?.depositPercent ?? DEFAULT_DEPOSIT_PERCENT)) / 100)
+      depositMode === DepositMode.NONE
+        ? 0
+        : depositMode === DepositMode.FULL
+          ? priceCents
+          : Math.ceil((priceCents * (club?.depositPercent ?? DEFAULT_DEPOSIT_PERCENT)) / 100)
     const requireDniMatch = club?.requireDniMatch ?? false
     const roundAmount = requireDniMatch || club?.paymentVerificationMode === 'RECEIPT'
-    return { depositCents, requireDniMatch, roundAmount }
+    return { depositMode, depositCents, requireDniMatch, roundAmount }
   }
 
   /**
    * CRM hook on the player-facing (bot) booking paths: links/refreshes the Player,
    * refuses blocked players, and at NO_SHOW_FULL_THRESHOLD ausencias escalates the
-   * deposit to the FULL court price (the club stops absorbing the no-show risk).
+   * deposit to the FULL court price (the club stops absorbing the no-show risk). When there
+   * is no price to escalate to (club on NONE, or a court with no price) the booking goes to
+   * a person of the club instead (NoShowReviewRequiredException).
    * Admin-created bookings skip this — the front desk can always override.
    */
   private async applyPlayerPolicy(
     clubId: string,
     input: { playerPhone?: string | null; playerName?: string | null; playerDni?: string | null },
     priceCents: number,
-    depositCents: number,
+    plan: { depositMode: DepositMode; depositCents: number },
   ): Promise<{ depositCents: number; playerId: string | null; availableCreditCents: number }> {
+    const { depositCents } = plan
     const playerId = await this.players.upsertForBooking(clubId, input.playerPhone, {
       name: input.playerName,
       dni: input.playerDni,
@@ -740,7 +800,11 @@ export class BookingsService {
       throw new ForbiddenException('Este número no puede reservar por acá. Comunicate directamente con el club.')
     }
     const availableCreditCents = standing?.creditCents ?? 0
-    if ((standing?.noShowCount ?? 0) >= NO_SHOW_FULL_THRESHOLD) {
+    const noShowCount = standing?.noShowCount ?? 0
+    if (noShowCount >= NO_SHOW_FULL_THRESHOLD) {
+      if (plan.depositMode === DepositMode.NONE || priceCents <= 0) {
+        throw new NoShowReviewRequiredException(noShowCount)
+      }
       return { depositCents: priceCents, playerId, availableCreditCents }
     }
     return { depositCents, playerId, availableCreditCents }
@@ -1411,11 +1475,17 @@ export class BookingsService {
     startsAt: Date
     courtName: string
     priceCents: number
+    /** A seña rides on this booking (paid, or still pending) — the bot only promises it
+     *  "sigue valiendo" when there is one. A booking made without a seña never had any. */
+    carriesDeposit: boolean
   } | null> {
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, clubId, playerPhone, status: { in: ['CONFIRMED', 'PENDING_PAYMENT'] } },
       select: {
+        status: true,
         rescheduleCount: true,
+        transferAmountCents: true,
+        creditAppliedCents: true,
         slot: { select: { startsAt: true, priceCents: true, court: { select: { name: true } } } },
       },
     })
@@ -1432,6 +1502,8 @@ export class BookingsService {
       startsAt: booking.slot.startsAt,
       courtName: booking.slot.court.name,
       priceCents: booking.slot.priceCents,
+      carriesDeposit:
+        booking.status === 'PENDING_PAYMENT' || booking.transferAmountCents !== null || booking.creditAppliedCents > 0,
     }
 
     if (configured !== PlayerRescheduleMode.SELF) {
@@ -1882,7 +1954,8 @@ export class BookingsService {
 
     if (action === 'created') {
       void this.notifications.notifyClub(booking.clubId, {
-        title: 'Nueva reserva pendiente de seña',
+        // Born CONFIRMED (no seña to wait for) vs. a hold the club expects money for.
+        title: booking.status === 'CONFIRMED' ? '✅ Nueva reserva confirmada' : 'Nueva reserva pendiente de seña',
         body: summary,
         data: { bookingId: booking.id },
       })

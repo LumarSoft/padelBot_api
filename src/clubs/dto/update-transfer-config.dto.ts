@@ -14,7 +14,8 @@ export class UpdateTransferConfigDto {
   @MaxLength(120)
   transferHolder?: string
 
-  /** DEPOSIT = charge a seña (depositPercent of the price); FULL = charge the whole court. */
+  /** DEPOSIT = charge a seña (depositPercent of the price); FULL = charge the whole court;
+   *  NONE = charge nothing — the bot books and confirms on the spot. */
   @IsOptional()
   @IsEnum(DepositMode)
   depositMode?: DepositMode
