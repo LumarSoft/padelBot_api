@@ -222,7 +222,9 @@ having opened the wizard.
 
 Steps: `complejo` · `canchas` · `pagos` · `whatsapp` · `fijos` · `equipo` · `kiosco`.
 `required` marks the three the bot cannot operate without (`canchas`, `pagos`, `whatsapp`);
-`ready` is true once all of those are done. Every step is skippable regardless.
+`ready` is true once all of those are done. Every step is skippable regardless. `pagos` is done
+when the club can be paid (MercadoPago connected or an alias loaded) — or right away when
+`depositMode` is `NONE`, since the bot charges nothing.
 
 **Auth required:** Yes
 

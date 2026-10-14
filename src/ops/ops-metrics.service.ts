@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common'
 import { SubscriptionStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 import { shiftDateKey, todayKey, toDateKey } from '../availability/lib/datetime'
 import { planPriceCents } from './lib/pricing'
 
@@ -84,8 +85,7 @@ export class OpsMetricsService {
           plan: true,
           subscriptionStatus: true,
           createdAt: true,
-          transferAlias: true,
-          mpConnectedAt: true,
+          ...paymentSetupSelect,
           _count: { select: { courts: true, whatsappLines: true } },
         },
       }),
@@ -125,8 +125,8 @@ export class OpsMetricsService {
           break
       }
 
-      const paymentsConfigured = Boolean(club.transferAlias) || Boolean(club.mpConnectedAt)
-      if (club._count.courts > 0 && paymentsConfigured && club._count.whatsappLines > 0) counts.ready++
+      const paymentsReady = paymentsConfigured(club)
+      if (club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0) counts.ready++
     }
 
     // ── Activation ────────────────────────────────────────────────────────────

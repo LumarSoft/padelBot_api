@@ -10,6 +10,7 @@ import { SaveSetupProgressDto } from './dto/save-setup-progress.dto'
 import { notifyOps } from '../common/ops-alert'
 import { formatSignupAlert } from './lib/signup-alert'
 import { REQUIRED_STEP_IDS, SETUP_STEP_IDS, SetupProgress, SetupStepId, parseSetupProgress } from './lib/setup-steps'
+import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 
 const BCRYPT_ROUNDS = 10
 /** Free-trial length for new clubs. */
@@ -50,8 +51,7 @@ export interface SetupStatus {
 const setupClubSelect = {
   name: true,
   locationInfo: true,
-  transferAlias: true,
-  mpConnectedAt: true,
+  ...paymentSetupSelect,
   setupCompletedAt: true,
   setupProgress: true,
 } as const
@@ -163,9 +163,9 @@ export class OnboardingService {
     ])
 
     const progress = parseSetupProgress(club.setupProgress)
-    // A club can take deposits once it can tell players WHERE to transfer: either its own
-    // MercadoPago account is connected (auto-reconciled) or an alias is loaded (manual).
-    const canTakePayments = Boolean(club.mpConnectedAt) || Boolean(club.transferAlias)
+    // A club that charges a seña is ready once it can tell players WHERE to transfer (its own
+    // MercadoPago connected, or an alias loaded). A club on NONE charges nothing: done as is.
+    const canTakePayments = paymentsConfigured(club)
 
     const doneByStep: Record<SetupStepId, boolean> = {
       complejo: Boolean(club.locationInfo),

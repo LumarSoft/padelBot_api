@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { Role, SubscriptionStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 import { subscriptionState, SubscriptionState } from '../clubs/lib/subscription'
 import { shiftDateKey, todayKey } from '../availability/lib/datetime'
 import { generateTempPassword, hashPassword } from '../common/password'
@@ -91,8 +92,7 @@ export class OpsClubsService {
           trialEndsAt: true,
           currentPeriodEnd: true,
           setupCompletedAt: true,
-          transferAlias: true,
-          mpConnectedAt: true,
+          ...paymentSetupSelect,
           _count: { select: { courts: true, whatsappLines: true } },
         },
       }),
@@ -152,8 +152,8 @@ export class OpsClubsService {
       const activity = activityByClub.get(club.id) ?? { bot: 0, panel: 0, deposits: 0 }
       const lastPanelLoginAt = loginByClub.get(club.id) ?? null
 
-      const paymentsConfigured = Boolean(club.transferAlias) || Boolean(club.mpConnectedAt)
-      const ready = club._count.courts > 0 && paymentsConfigured && club._count.whatsappLines > 0
+      const paymentsReady = paymentsConfigured(club)
+      const ready = club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0
 
       return {
         id: club.id,
@@ -163,7 +163,7 @@ export class OpsClubsService {
         subscription,
         readiness: {
           courts: club._count.courts,
-          paymentsConfigured,
+          paymentsConfigured: paymentsReady,
           mpConnected: Boolean(club.mpConnectedAt),
           whatsappLines: club._count.whatsappLines,
           ready,

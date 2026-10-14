@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
+import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 import { PaymentsService, PollerHealth } from '../payments/payments.service'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -56,8 +57,7 @@ export class OpsHealthService {
           id: true,
           name: true,
           mpTokenExpiresAt: true,
-          mpConnectedAt: true,
-          transferAlias: true,
+          ...paymentSetupSelect,
           subscriptionStatus: true,
           _count: { select: { courts: true, whatsappLines: true } },
         },
@@ -157,12 +157,12 @@ export class OpsHealthService {
 
       // A club that pays (or is on trial) but cannot take a booking end to end is a club
       // we onboarded badly — and it will churn without ever telling us why.
-      const paymentsConfigured = Boolean(club.transferAlias) || Boolean(club.mpConnectedAt)
-      const live = club._count.courts > 0 && paymentsConfigured && club._count.whatsappLines > 0
+      const paymentsReady = paymentsConfigured(club)
+      const live = club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0
       if (!live && club.subscriptionStatus !== 'CANCELLED') {
         const missing = [
           club._count.courts === 0 && 'canchas',
-          !paymentsConfigured && 'cobros',
+          !paymentsReady && 'cobros',
           club._count.whatsappLines === 0 && 'línea de WhatsApp',
         ].filter(Boolean)
         issues.push({
