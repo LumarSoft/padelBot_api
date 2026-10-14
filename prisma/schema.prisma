@@ -67,6 +67,10 @@ model Club {
   /// panel. Each entry is injected into the LLM system prompt as a Q→A pair. Null/empty = the
   /// bot only knows its courts/schedule and says it doesn't have that info for anything else.
   botFaq          Json?
+  /// "Reglas de la casa": the club's own desk Q&As for its staff (an ordered array of
+  /// { question, answer }, same shape as botFaq), shown next to the built-in answers in the
+  /// panel's "?" help. Edited by the OWNER as a whole; never reaches the bot or the players.
+  houseRules      Json?
 
   /// Hours before the slot start within which a cancellation forfeits the deposit.
   /// Cancelling EARLIER than this window turns the paid deposit into player credit.
@@ -144,6 +148,7 @@ model Club {
   scheduledPriceAdjustments ScheduledPriceAdjustment[]
   bookingPlayerPayments BookingPlayerPayment[]
   llmUsageDaily        LlmUsageDaily[]
+  helpSearchMisses     HelpSearchMiss[]
 }
 
 enum Role {
@@ -275,6 +280,10 @@ model User {
   /// the panel in weeks is churning before it cancels, and this is the only place that
   /// shows it.
   lastLoginAt      DateTime?
+  /// When the user closed the "Tu primer día" card on the panel's Resumen. Null = still shown,
+  /// until every task is done (which hides it on its own).
+  firstDayDismissedAt DateTime?
+  firstActions     UserFirstAction[]
   clubId           String
   club             Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
   bookings         Booking[]
@@ -286,6 +295,50 @@ model User {
   updatedAt        DateTime           @updatedAt
 
   @@index([clubId])
+}
+
+/// Desk actions that leave no per-user trace of their own in the data (a booking already
+/// records who made it in bookedByUserId; these don't).
+enum DeskAction {
+  /// Moved a turno to another time (reprogramar).
+  RESCHEDULE
+  /// Loaded kiosk consumos onto a turno's bill.
+  CONSUMPTION
+  /// Registered a payment at the desk (a player's share or a front-desk collection).
+  DESK_PAYMENT
+  /// Confirmed a pending seña by hand.
+  DEPOSIT_CONFIRMATION
+}
+
+/// The first time a panel user did each desk action. It is the minimum that lets the
+/// "Tu primer día" checklist (HelpService.getFirstDay) tick a task from what that user really
+/// did — never from a "ya lo leí". Written once per user and action, by DeskActionInterceptor
+/// after the real endpoint succeeds.
+model UserFirstAction {
+  userId    Int
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    DeskAction
+  createdAt DateTime   @default(now())
+
+  @@id([userId, action])
+}
+
+/// A search in the panel's "?" help that found nothing, per club and normalized query: the
+/// desk questions the built-in answers are missing. Read across clubs by the ops console.
+model HelpSearchMiss {
+  id        String   @id @default(cuid())
+  clubId    String
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Lowercased, accent-free, whitespace-collapsed text the user typed.
+  query     String   @db.VarChar(80)
+  /// How many times this club searched it without a result.
+  count     Int      @default(1)
+  createdAt DateTime @default(now())
+  /// Last time it was searched.
+  updatedAt DateTime @updatedAt
+
+  @@unique([clubId, query])
+  @@index([updatedAt])
 }
 
 /// A staff-app device registered for push notifications ("Nueva reserva pendiente de seña",

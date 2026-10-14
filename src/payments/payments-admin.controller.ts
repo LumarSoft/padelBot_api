@@ -1,8 +1,10 @@
 import { Body, Controller, HttpCode, HttpStatus, Param, Patch, UseGuards } from '@nestjs/common'
+import { DeskAction } from 'generated/prisma/client'
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { AuthenticatedUser } from '../auth/types/jwt-payload'
 import { PaymentsService } from './payments.service'
+import { RecordsDeskAction } from '../help/lib/desk-action.decorator'
 import { AssignPaymentDto } from './dto/assign-payment.dto'
 
 /**
@@ -22,6 +24,7 @@ export class PaymentsAdminController {
    */
   @Patch(':id/confirm-payment')
   @HttpCode(HttpStatus.OK)
+  @RecordsDeskAction(DeskAction.DEPOSIT_CONFIRMATION)
   confirm(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: AssignPaymentDto) {
     return this.paymentsService.confirmPaymentManually(user.clubId, id, {
       paymentRef: dto.paymentRef ?? null,

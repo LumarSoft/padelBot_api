@@ -1902,6 +1902,192 @@ and in the cash/QR of their payment method. Owner-only. The panel exports this a
 push with last week's numbers (turnos, % ocupación, señas, turnos vendidos por el bot).
 Skipped for clubs with zero bookings that week. Gated by `RUN_SCHEDULER`.
 
+## Staff help (`/help`)
+
+In-context help for the desk staff: the "Tu primer día" checklist, the club's own house rules
+and the log of help searches that found nothing. The help content itself (the ~25 desk
+questions and the on-screen "Mostrame" guides) lives in the panel
+(`front/src/features/help/content`), not in the API.
+
+**How the checklist ticks.** Each task is derived from what that user really did, never from a
+"ya lo leí": `booking` from a `Booking` with `bookedByUserId` = the user; the other four from
+`UserFirstAction`, written once per user by `DeskActionInterceptor` after these endpoints
+succeed (marked with `@RecordsDeskAction`):
+
+| Task          | Endpoint                                   | Counts when                 |
+| ------------- | ------------------------------------------ | --------------------------- |
+| `consumption` | `PUT /bookings/:id/products`               | `items` is not empty        |
+| `deskPayment` | `POST /bookings/:id/payments`              | always                      |
+| `deskPayment` | `PATCH /bookings/:id/local-payment`        | `amountCents` > 0           |
+| `deposit`     | `PATCH /bookings/:id/confirm-payment`      | always                      |
+| `reschedule`  | `PATCH /bookings/:id/reschedule`           | always                      |
+
+Recording never changes or fails the response of those endpoints.
+
+### GET /help/first-day
+
+The caller's "Tu primer día" checklist (any role; the panel shows it to STAFF).
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — tasks in the order the panel teaches them. `dismissedAt` is when the user closed
+the card on the Resumen (null = still showing while incomplete).
+
+```json
+{
+  "tasks": [
+    { "id": "booking", "done": true },
+    { "id": "consumption", "done": false },
+    { "id": "deskPayment", "done": true },
+    { "id": "deposit", "done": false },
+    { "id": "reschedule", "done": false }
+  ],
+  "doneCount": 2,
+  "total": 5,
+  "complete": false,
+  "dismissedAt": null
+}
+```
+
+`401 Unauthorized` — no or invalid token.
+
+```json
+{ "statusCode": 401, "message": "Unauthorized" }
+```
+
+### POST /help/first-day/dismiss
+
+Closes the checklist card on the caller's Resumen. The checklist stays reachable from the "?"
+help.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+{ "dismissedAt": "2026-10-14T19:05:00.000Z" }
+```
+
+### GET /help/first-day/team
+
+Every STAFF member's checklist progress, for the owner's team table ("4 de 5"). **Owner only.**
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  { "userId": 12, "done": ["booking", "deskPayment", "deposit", "reschedule"], "doneCount": 4, "total": 5 },
+  { "userId": 15, "done": [], "doneCount": 0, "total": 5 }
+]
+```
+
+`403 Forbidden` — the caller is not the club owner.
+
+```json
+{ "statusCode": 403, "message": "Solo el dueño del club puede hacer esto" }
+```
+
+### GET /help/house-rules
+
+The club's "reglas de la casa": its own desk questions and answers, in the owner's order. Shown
+next to the built-in answers in the panel's "?" help. Never reaches the bot or the players.
+Empty array when none are loaded.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  { "question": "¿Quién abre los domingos?", "answer": "Lucas. La llave está en la caja fuerte." },
+  { "question": "¿Se fía a los fijos?", "answer": "No. Si no pueden pagar, avisale al dueño." }
+]
+```
+
+### PATCH /help/house-rules
+
+Replaces the whole list (edited as a set from Configuración → Equipo). **Owner only.** Blank
+entries are dropped; order is preserved.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field              | Type   | Required | Constraints  |
+| ------------------ | ------ | -------- | ------------ |
+| entries            | array  | Yes      | Max 40 items |
+| entries[].question | string | Yes      | 2–160 chars  |
+| entries[].answer   | string | Yes      | 1–400 chars  |
+
+```json
+{
+  "entries": [{ "question": "¿Quién abre los domingos?", "answer": "Lucas. La llave está en la caja fuerte." }]
+}
+```
+
+**Responses**
+
+`200 OK` — the saved (cleaned) list.
+
+```json
+[{ "question": "¿Quién abre los domingos?", "answer": "Lucas. La llave está en la caja fuerte." }]
+```
+
+`400 Bad Request` — validation failed (e.g. an answer over 400 chars).
+
+```json
+{ "statusCode": 400, "message": ["entries.0.answer must be shorter than or equal to 400 characters"], "error": "Bad Request" }
+```
+
+`403 Forbidden` — the caller is not the club owner.
+
+```json
+{ "statusCode": 403, "message": "Solo el dueño del club puede hacer esto" }
+```
+
+### POST /help/search-misses
+
+Counts a "?" help search that found nothing, per club and normalized text (lowercase, no
+accents or punctuation, max 80 chars). Searches under 3 characters, or with a run of 6+ digits
+(a phone or a DNI typed in the wrong box), are ignored rather than stored. The panel debounces
+and sends each distinct search once; the route is also rate-limited (20/min per IP).
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field | Type   | Required | Constraints |
+| ----- | ------ | -------- | ----------- |
+| query | string | Yes      | 1–120 chars |
+
+```json
+{ "query": "¿Cómo cierro la caja?" }
+```
+
+**Responses**
+
+`200 OK` — `recorded` is false when the search was ignored.
+
+```json
+{ "recorded": true }
+```
+
+`429 Too Many Requests` — over the rate limit.
+
+```json
+{ "statusCode": 429, "message": "ThrottlerException: Too Many Requests" }
+```
+
 ## Payments (Webhooks)
 
 Deposits are paid by bank transfer to the club's MercadoPago alias/CVU. An incoming transfer is matched to a pending booking by its **exact unique amount** (`transferAmountCents`), then the booking is confirmed and the player notified. These endpoints are unauthenticated by JWT — they are secured by a signature / shared secret instead.

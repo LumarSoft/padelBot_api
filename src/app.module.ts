@@ -23,6 +23,7 @@ import { WhatsAppModule } from './whatsapp/whatsapp.module'
 import { EventsModule } from './events/events.module'
 import { PaymentsModule } from './payments/payments.module'
 import { ClubsModule } from './clubs/clubs.module'
+import { HelpModule } from './help/help.module'
 import { ConversationsModule } from './conversations/conversations.module'
 import { StatsModule } from './stats/stats.module'
 import { PriceRulesModule } from './price-rules/price-rules.module'
@@ -60,6 +61,7 @@ import { FixedConfirmationsModule } from './fixed-confirmations/fixed-confirmati
     EventsModule,
     PaymentsModule,
     ClubsModule,
+    HelpModule,
     ConversationsModule,
     StatsModule,
     PriceRulesModule,
