@@ -285,6 +285,7 @@ export class BotService {
       const downloaded = media ? await this.media.download(media.mediaId, media.phoneNumberId) : null
       const transcript = downloaded
         ? await this.llmService.transcribeAudio(
+            clubId,
             waId,
             downloaded.bytes,
             downloaded.mimeType || media?.mimeType || 'audio/ogg',
@@ -313,6 +314,7 @@ export class BotService {
     const downloaded = await this.media.download(media.mediaId, media.phoneNumberId)
     if (!downloaded) return null
     const description = await this.llmService.describeImage(
+      clubId,
       waId,
       downloaded.bytes,
       downloaded.mimeType || media.mimeType,
@@ -345,7 +347,7 @@ export class BotService {
     if (!pending) return ATTACHMENT_NO_PENDING
     const { startsAt, endsAt, court } = pending.slot
 
-    const reading = await this.readReceipt(waId, media)
+    const reading = await this.readReceipt(clubId, waId, media)
     if (!reading) return paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
 
     await this.bookingsService.recordReceiptReading(pending.id, {
@@ -361,11 +363,11 @@ export class BotService {
     return receiptLinkedAck(court.name, startsAt, endsAt, mismatch)
   }
 
-  private async readReceipt(waId: string, media: InboundMedia | null) {
+  private async readReceipt(clubId: string, waId: string, media: InboundMedia | null) {
     if (!media?.mimeType?.startsWith('image/')) return null
     const downloaded = await this.media.download(media.mediaId, media.phoneNumberId)
     if (!downloaded) return null
-    return this.llmService.readTransferReceipt(waId, downloaded.bytes, downloaded.mimeType || media.mimeType)
+    return this.llmService.readTransferReceipt(clubId, waId, downloaded.bytes, downloaded.mimeType || media.mimeType)
   }
 
   /**

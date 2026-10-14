@@ -75,12 +75,13 @@ export class LlmService {
    * when the audio can't be understood (or the per-player LLM budget is spent) — the caller
    * then asks the player to write instead.
    */
-  async transcribeAudio(waId: string, bytes: Buffer, mimeType: string): Promise<string | null> {
+  async transcribeAudio(clubId: string, waId: string, bytes: Buffer, mimeType: string): Promise<string | null> {
     if (this.isRateLimited(waId)) return null
     const model = process.env.OPENAI_TRANSCRIBE_MODEL ?? 'gpt-4o-mini-transcribe'
     try {
       const file = await toFile(bytes, `audio${audioExtension(mimeType)}`, { type: mimeType.split(';')[0] })
       const result = await this.openai.audio.transcriptions.create({ file, model, language: 'es' })
+      void this.recordUsage(clubId, transcriptionUsage(result.usage))
       const text = result.text?.trim()
       this.logger.log(`🎤 Audio de ${waId} transcripto (${model}): ${logSnippet(text ?? '')}`)
       return text || null
@@ -94,7 +95,13 @@ export class LlmService {
    * One-line description of an image a player sent outside a payment (a flyer, a screenshot of
    * a schedule, a photo of the court…), so the bot can answer it like a text message.
    */
-  async describeImage(waId: string, bytes: Buffer, mimeType: string, caption?: string): Promise<string | null> {
+  async describeImage(
+    clubId: string,
+    waId: string,
+    bytes: Buffer,
+    mimeType: string,
+    caption?: string,
+  ): Promise<string | null> {
     if (this.isRateLimited(waId)) return null
     const model = process.env.OPENAI_VISION_MODEL ?? chatModel()
     try {
@@ -118,6 +125,7 @@ export class LlmService {
         ],
         ...generationParams(model, 200),
       })
+      void this.recordUsage(clubId, completionUsage(model, completion.usage))
       const text = completion.choices[0]?.message?.content?.trim()
       this.logger.log(`🖼️  Imagen de ${waId} interpretada (${model}): ${logSnippet(text ?? '')}`)
       return text || null
@@ -133,7 +141,12 @@ export class LlmService {
    * by itself — the money still has to show up in the club's MercadoPago. Returns null when
    * the image can't be read or isn't a receipt.
    */
-  async readTransferReceipt(waId: string, bytes: Buffer, mimeType: string): Promise<ReceiptReading | null> {
+  async readTransferReceipt(
+    clubId: string,
+    waId: string,
+    bytes: Buffer,
+    mimeType: string,
+  ): Promise<ReceiptReading | null> {
     if (this.isRateLimited(waId)) return null
     const model = process.env.OPENAI_VISION_MODEL ?? chatModel()
     try {
@@ -156,6 +169,7 @@ export class LlmService {
         response_format: { type: 'json_schema', json_schema: RECEIPT_SCHEMA },
         ...generationParams(model, 300),
       })
+      void this.recordUsage(clubId, completionUsage(model, completion.usage))
       const raw = completion.choices[0]?.message?.content
       const parsed = raw ? (JSON.parse(raw) as ReceiptReading) : null
       if (!parsed?.isTransferReceipt) return null
@@ -272,7 +286,11 @@ export class LlmService {
       )
       // The counters above die with the process. This is the copy that survives, and the
       // only way to know what a club actually costs us.
-      void this.recordUsage(clubId, usage.prompt_tokens, usage.completion_tokens, cost)
+      void this.recordUsage(clubId, {
+        inputTokens: usage.prompt_tokens,
+        outputTokens: usage.completion_tokens,
+        costUsd: cost,
+      })
     }
 
     const choice = completion.choices[0]
@@ -447,13 +465,15 @@ export class LlmService {
   // ── Cost accounting ─────────────────────────────────────────────────────────
 
   /**
-   * Rolls this call into the club's daily OpenAI total (read by the ops console).
+   * Rolls one AI step (understanding a message, transcribing an audio, reading an image) into
+   * the club's daily total. Each step is one call — and one AI credit of the club's plan (see
+   * `plans/lib/ai-credits.ts`) — plus its tokens and estimated cost, read by the ops console.
    *
    * Fire-and-forget and never throws: the player is waiting on a WhatsApp reply, and our
    * accounting is not worth failing their booking over. A dropped row costs us a fraction
    * of a cent of visibility; a thrown error costs a customer.
    */
-  private async recordUsage(clubId: string, inputTokens: number, outputTokens: number, costUsd: number): Promise<void> {
+  private async recordUsage(clubId: string, { inputTokens, outputTokens, costUsd }: StepUsage): Promise<void> {
     const dateKey = todayKey()
     const costMicroUsd = Math.round(costUsd * 1_000_000)
 
@@ -516,6 +536,43 @@ function estimateCost(model: string, inputTokens: number, outputTokens: number):
   const override = modelPriceOverride()
   const prices = override ?? MODEL_PRICES[model] ?? MODEL_PRICES['gpt-4o-mini']
   return (inputTokens * prices.input + outputTokens * prices.output) / 1_000_000
+}
+
+/** Tokens and estimated cost of one AI step. */
+interface StepUsage {
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+}
+
+/** A chat completion (text or image) as a step; no usage reported → counted, priced at $0. */
+function completionUsage(model: string, usage: OpenAI.CompletionUsage | undefined): StepUsage {
+  if (!usage) return { inputTokens: 0, outputTokens: 0, costUsd: 0 }
+  return {
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    costUsd: estimateCost(model, usage.prompt_tokens, usage.completion_tokens),
+  }
+}
+
+/**
+ * Transcription list prices (gpt-4o-mini-transcribe): USD per 1M audio-input / text-output
+ * tokens, or per minute when the API reports a duration. Only the ops cost column reads them —
+ * the credit counts the step, whatever it costs.
+ */
+const TRANSCRIBE_PRICES = { input: 3, output: 5, perMinute: 0.003 }
+
+function transcriptionUsage(usage: OpenAI.Audio.Transcription['usage']): StepUsage {
+  if (usage?.type === 'tokens') {
+    return {
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      costUsd:
+        (usage.input_tokens * TRANSCRIBE_PRICES.input + usage.output_tokens * TRANSCRIBE_PRICES.output) / 1_000_000,
+    }
+  }
+  const seconds = usage?.type === 'duration' ? usage.seconds : 0
+  return { inputTokens: 0, outputTokens: 0, costUsd: (seconds / 60) * TRANSCRIBE_PRICES.perMinute }
 }
 
 /** One-line, length-capped version of a message for clean console logs. */
