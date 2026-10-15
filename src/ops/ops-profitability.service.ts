@@ -11,7 +11,10 @@ import {
   MarginFlag,
   messageCost,
   metaMessagePriceUsd,
+  mpFeePercent,
+  netCents,
   NumberMessages,
+  pricesIncludeIva,
   usdToArsCents,
 } from './lib/profitability'
 import { ExchangeRateService, UsdArs } from './exchange-rate.service'
@@ -25,7 +28,8 @@ export interface ClubProfitRow {
   subscriptionStatus: SubscriptionStatus
   /** The sales demo: shown, never added to the totals. */
   isDemo: boolean
-  revenue: { planCents: number; packsCents: number; totalCents: number }
+  /** What it pays (`grossCents`), and what that leaves us: without IVA, packs without MP's fee. */
+  revenue: { grossCents: number; planCents: number; packsCents: number; totalCents: number }
   messages: { total: number; free: number; paid: number }
   cost: { metaCents: number; aiCents: number; totalCents: number }
   marginCents: number
@@ -40,7 +44,13 @@ export interface ProfitabilityReport {
   metaMessagePriceUsd: number
   /** The dollar the costs were converted with, and where it came from. */
   usdArs: UsdArs
+  /** How revenue was netted: IVA taken out of the prices, MercadoPago's fee on packs. */
+  pricesIncludeIva: boolean
+  mpFeePercent: number
   totals: {
+    /** What the clubs paid, IVA included. */
+    grossRevenueCents: number
+    /** What that leaves us (the margin is over this). */
     revenueCents: number
     costCents: number
     metaCents: number
@@ -73,6 +83,8 @@ export class OpsProfitabilityService {
     const priceUsd = metaMessagePriceUsd()
     const usdArs = await this.rates.rateFor(month)
     const rate = usdArs.rate
+    const iva = pricesIncludeIva()
+    const feePercent = mpFeePercent()
 
     const [clubs, messages, ai, packs] = await Promise.all([
       this.prisma.club.findMany({
@@ -122,8 +134,11 @@ export class OpsProfitabilityService {
     const rows = clubs.map((club): ClubProfitRow => {
       const numbers = numbersByClub.get(club.id) ?? []
       const msgs = messageCost(numbers)
-      const planCents = PAYING.has(club.subscriptionStatus) ? planPriceCents(club.plan) : 0
-      const packsCents = packsByClub.get(club.id) ?? 0
+      const planGross = PAYING.has(club.subscriptionStatus) ? planPriceCents(club.plan) : 0
+      const packsGross = packsByClub.get(club.id) ?? 0
+      // Plans are paid by transfer (no fee); packs go through MercadoPago.
+      const planCents = netCents(planGross, { iva })
+      const packsCents = netCents(packsGross, { iva, feePercent })
       const metaCents = usdToArsCents(msgs.paid * priceUsd, rate)
       const aiCents = usdToArsCents((aiByClub.get(club.id) ?? 0) / 1_000_000, rate)
       const revenueCents = planCents + packsCents
@@ -134,7 +149,7 @@ export class OpsProfitabilityService {
         plan: planName(club.plan),
         subscriptionStatus: club.subscriptionStatus,
         isDemo: club.slug === SALES_DEMO_SLUG,
-        revenue: { planCents, packsCents, totalCents: revenueCents },
+        revenue: { grossCents: planGross + packsGross, planCents, packsCents, totalCents: revenueCents },
         messages: msgs,
         cost: { metaCents, aiCents, totalCents: costCents },
         ...margin({ revenueCents, costCents }),
@@ -159,7 +174,10 @@ export class OpsProfitabilityService {
       month,
       metaMessagePriceUsd: priceUsd,
       usdArs,
+      pricesIncludeIva: iva,
+      mpFeePercent: feePercent,
       totals: {
+        grossRevenueCents: sum(r => r.revenue.grossCents),
         revenueCents,
         costCents,
         metaCents: sum(r => r.cost.metaCents),

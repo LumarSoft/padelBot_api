@@ -8,6 +8,29 @@
  * default 0.026). The dollar comes from ExchangeRateService (fetched daily).
  */
 
+/** IVA the plan and pack prices include (they're the prices the clubs pay). */
+export const IVA_RATE = 0.21
+
+/** Prices include IVA unless PRICES_INCLUDE_IVA=false: revenue is shown net of it. */
+export function pricesIncludeIva(): boolean {
+  return process.env.PRICES_INCLUDE_IVA !== 'false'
+}
+
+/**
+ * MercadoPago's fee on a credit pack (Checkout Pro, money available at once), in percent of the
+ * price. MP_FEE_PERCENT overrides it if Lumarsoft's account settles on a slower, cheaper term.
+ */
+export function mpFeePercent(): number {
+  const configured = Number(process.env.MP_FEE_PERCENT)
+  return process.env.MP_FEE_PERCENT && Number.isFinite(configured) && configured >= 0 ? configured : 6.29
+}
+
+/** What a price leaves us: without IVA, and for packs without MercadoPago's fee too. */
+export function netCents(grossCents: number, opts: { iva: boolean; feePercent?: number }): number {
+  const withoutIva = opts.iva ? grossCents / (1 + IVA_RATE) : grossCents
+  return Math.round(withoutIva - grossCents * ((opts.feePercent ?? 0) / 100))
+}
+
 /** Service messages Meta doesn't charge, per phone number and month. */
 export const FREE_SERVICE_MESSAGES_PER_NUMBER = 1_000
 

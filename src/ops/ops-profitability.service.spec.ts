@@ -1,5 +1,5 @@
 import { PrismaService } from '../prisma/prisma.service'
-import { margin, messageCost, usdToArsCents } from './lib/profitability'
+import { margin, messageCost, netCents, usdToArsCents } from './lib/profitability'
 import { OpsProfitabilityService } from './ops-profitability.service'
 import { ExchangeRateService } from './exchange-rate.service'
 
@@ -19,6 +19,13 @@ describe('messageCost', () => {
         { botService: 800, staffService: 0, utility: 0 },
       ]),
     ).toEqual({ total: 1_600, free: 1_600, paid: 0 })
+  })
+})
+
+describe('netCents', () => {
+  it('takes IVA out of a price, and the MercadoPago fee out of a pack', () => {
+    expect(netCents(12_100, { iva: true })).toBe(10_000)
+    expect(netCents(10_000, { iva: false, feePercent: 6.29 })).toBe(9_371)
   })
 })
 
@@ -83,7 +90,13 @@ describe('OpsProfitabilityService.report', () => {
     expect(norte.messages).toEqual({ total: 1_600, free: 1_000, paid: 600 })
     expect(norte.cost.metaCents).toBe(15_600_00)
     expect(norte.cost.aiCents).toBe(2_000_00)
-    expect(norte.revenue).toEqual({ planCents: 4_999_900, packsCents: 8_999_900, totalCents: 13_999_800 })
+    // Revenue net of IVA, and the pack also net of MercadoPago's 6,29%.
+    expect(norte.revenue).toEqual({
+      grossCents: 13_999_800,
+      planCents: 4_132_149,
+      packsCents: 6_871_840,
+      totalCents: 11_003_989,
+    })
     expect(norte.credits).toEqual({ used: 1_500, included: 1_000 })
 
     const trial = report.clubs.find(c => c.id === 'c2')!
@@ -92,7 +105,8 @@ describe('OpsProfitabilityService.report', () => {
     expect(trial.messages.paid).toBe(20)
     expect(trial.flag).toBe('noRevenue')
 
-    expect(report.totals.revenueCents).toBe(13_999_800)
+    expect(report.totals.grossRevenueCents).toBe(13_999_800)
+    expect(report.totals.revenueCents).toBe(11_003_989)
     expect(report.totals.messages.total).toBe(1_820)
     expect(report.clubs.find(c => c.id === 'demo')!.isDemo).toBe(true)
   })

@@ -2954,7 +2954,9 @@ took over). Costs are in **micro-USD** (integers; 1e-6 USD) and come from `LlmUs
 ### GET /ops/profitability
 
 Per club and month: what it pays us (plan + credit packs approved that month), what serving it
-costs (Meta's WhatsApp messages + OpenAI), and the margin. Worst first: losses (`negative`),
+costs (Meta's WhatsApp messages + OpenAI), and the margin. Revenue is **net**: prices without the
+21% IVA they include (`PRICES_INCLUDE_IVA`, default true) and packs also without MercadoPago's fee
+(`MP_FEE_PERCENT`, default 6.29); `revenue.grossCents` is what the club actually paid. Worst first: losses (`negative`),
 then thin margins (`low`, under 30%), then the rest. `noRevenue` marks a club that costs money
 without paying yet (trial). The sales demo is listed (`isDemo`) but left out of `totals`.
 
@@ -2976,8 +2978,11 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
   "month": "2026-10",
   "metaMessagePriceUsd": 0.026,
   "usdArs": { "rate": 1995.5, "quote": "tarjeta", "source": "dolarapi", "dateKey": "2026-10-14" },
+  "pricesIncludeIva": true,
+  "mpFeePercent": 6.29,
   "totals": {
-    "revenueCents": 13999800,
+    "grossRevenueCents": 13999800,
+    "revenueCents": 11003989,
     "costCents": 2640000,
     "metaCents": 2340000,
     "aiCents": 300000,
@@ -2992,7 +2997,7 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
       "plan": "Saque",
       "subscriptionStatus": "ACTIVE",
       "isDemo": false,
-      "revenue": { "planCents": 4999900, "packsCents": 8999900, "totalCents": 13999800 },
+      "revenue": { "grossCents": 13999800, "planCents": 4132149, "packsCents": 6871840, "totalCents": 11003989 },
       "messages": { "total": 1600, "free": 1000, "paid": 600 },
       "cost": { "metaCents": 2340000, "aiCents": 300000, "totalCents": 2640000 },
       "marginCents": 11359800,
