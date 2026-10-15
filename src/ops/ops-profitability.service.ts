@@ -11,10 +11,12 @@ import {
   MarginFlag,
   messageCost,
   metaMessagePriceUsd,
+  effectiveRate,
   mpFeePercent,
   netCents,
   NumberMessages,
-  pricesIncludeIva,
+  taxRegime,
+  TaxRegime,
   usdToArsCents,
 } from './lib/profitability'
 import { ExchangeRateService, UsdArs } from './exchange-rate.service'
@@ -44,8 +46,8 @@ export interface ProfitabilityReport {
   metaMessagePriceUsd: number
   /** The dollar the costs were converted with, and where it came from. */
   usdArs: UsdArs
-  /** How revenue was netted: IVA taken out of the prices, MercadoPago's fee on packs. */
-  pricesIncludeIva: boolean
+  /** Where IVA lands (see TAX_REGIME), and MercadoPago's fee on packs. */
+  taxRegime: TaxRegime
   mpFeePercent: number
   totals: {
     /** What the clubs paid, IVA included. */
@@ -82,8 +84,9 @@ export class OpsProfitabilityService {
     const to = `${month}-31`
     const priceUsd = metaMessagePriceUsd()
     const usdArs = await this.rates.rateFor(month)
-    const rate = usdArs.rate
-    const iva = pricesIncludeIva()
+    const regime = taxRegime()
+    // On monotributo the IVA on Meta and OpenAI (paid in pesos) is ours to bear.
+    const rate = effectiveRate(usdArs.rate, regime)
     const feePercent = mpFeePercent()
 
     const [clubs, messages, ai, packs] = await Promise.all([
@@ -137,8 +140,8 @@ export class OpsProfitabilityService {
       const planGross = PAYING.has(club.subscriptionStatus) ? planPriceCents(club.plan) : 0
       const packsGross = packsByClub.get(club.id) ?? 0
       // Plans are paid by transfer (no fee); packs go through MercadoPago.
-      const planCents = netCents(planGross, { iva })
-      const packsCents = netCents(packsGross, { iva, feePercent })
+      const planCents = netCents(planGross, { regime })
+      const packsCents = netCents(packsGross, { regime, feePercent })
       const metaCents = usdToArsCents(msgs.paid * priceUsd, rate)
       const aiCents = usdToArsCents((aiByClub.get(club.id) ?? 0) / 1_000_000, rate)
       const revenueCents = planCents + packsCents
@@ -174,7 +177,7 @@ export class OpsProfitabilityService {
       month,
       metaMessagePriceUsd: priceUsd,
       usdArs,
-      pricesIncludeIva: iva,
+      taxRegime: regime,
       mpFeePercent: feePercent,
       totals: {
         grossRevenueCents: sum(r => r.revenue.grossCents),

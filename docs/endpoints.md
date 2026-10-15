@@ -2954,9 +2954,11 @@ took over). Costs are in **micro-USD** (integers; 1e-6 USD) and come from `LlmUs
 ### GET /ops/profitability
 
 Per club and month: what it pays us (plan + credit packs approved that month), what serving it
-costs (Meta's WhatsApp messages + OpenAI), and the margin. Revenue is **net**: prices without the
-21% IVA they include (`PRICES_INCLUDE_IVA`, default true) and packs also without MercadoPago's fee
-(`MP_FEE_PERCENT`, default 6.29); `revenue.grossCents` is what the club actually paid. Worst first: losses (`negative`),
+costs (Meta's WhatsApp messages + OpenAI), and the margin. IVA follows Lumarsoft's `TAX_REGIME`:
+`monotributo` (default) keeps the whole price as revenue and adds the 21% IVA on digital services
+(Meta, OpenAI) and on MercadoPago's fee to the costs; `inscripto` takes the 21% IVA out of the
+prices instead. Packs also lose MercadoPago's fee (`MP_FEE_PERCENT`, default 6.29);
+`revenue.grossCents` is what the club actually paid. Worst first: losses (`negative`),
 then thin margins (`low`, under 30%), then the rest. `noRevenue` marks a club that costs money
 without paying yet (trial). The sales demo is listed (`isDemo`) but left out of `totals`.
 
@@ -2978,7 +2980,7 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
   "month": "2026-10",
   "metaMessagePriceUsd": 0.026,
   "usdArs": { "rate": 1995.5, "quote": "tarjeta", "source": "dolarapi", "dateKey": "2026-10-14", "stale": false },
-  "pricesIncludeIva": true,
+  "taxRegime": "monotributo",
   "mpFeePercent": 6.29,
   "totals": {
     "grossRevenueCents": 13999800,

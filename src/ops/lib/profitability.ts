@@ -8,27 +8,40 @@
  * default 0.026). The dollar comes from ExchangeRateService (fetched daily).
  */
 
-/** IVA the plan and pack prices include (they're the prices the clubs pay). */
 export const IVA_RATE = 0.21
 
-/** Prices include IVA unless PRICES_INCLUDE_IVA=false: revenue is shown net of it. */
-export function pricesIncludeIva(): boolean {
-  return process.env.PRICES_INCLUDE_IVA !== 'false'
+/**
+ * Lumarsoft's tax regime (TAX_REGIME), which decides where IVA lands:
+ * - monotributo (default, as of 2026-10): prices carry no IVA, so revenue is the price; but the
+ *   21% IVA on digital services paid in pesos (Meta, OpenAI) and on MercadoPago's fee can't be
+ *   recovered, so it's a cost.
+ * - inscripto: prices include 21% IVA, which isn't ours; the IVA we pay is credited back.
+ */
+export type TaxRegime = 'monotributo' | 'inscripto'
+
+export function taxRegime(): TaxRegime {
+  return process.env.TAX_REGIME === 'inscripto' ? 'inscripto' : 'monotributo'
 }
 
 /**
  * MercadoPago's fee on a credit pack (Checkout Pro, money available at once), in percent of the
- * price. MP_FEE_PERCENT overrides it if Lumarsoft's account settles on a slower, cheaper term.
+ * price and before its IVA. MP_FEE_PERCENT overrides it on a slower, cheaper term.
  */
 export function mpFeePercent(): number {
   const configured = Number(process.env.MP_FEE_PERCENT)
   return process.env.MP_FEE_PERCENT && Number.isFinite(configured) && configured >= 0 ? configured : 6.29
 }
 
-/** What a price leaves us: without IVA, and for packs without MercadoPago's fee too. */
-export function netCents(grossCents: number, opts: { iva: boolean; feePercent?: number }): number {
-  const withoutIva = opts.iva ? grossCents / (1 + IVA_RATE) : grossCents
-  return Math.round(withoutIva - grossCents * ((opts.feePercent ?? 0) / 100))
+/** What a price leaves us: without IVA we owe, and for packs without MercadoPago's fee too. */
+export function netCents(grossCents: number, opts: { regime: TaxRegime; feePercent?: number }): number {
+  const fee = grossCents * ((opts.feePercent ?? 0) / 100)
+  if (opts.regime === 'inscripto') return Math.round(grossCents / (1 + IVA_RATE) - fee)
+  return Math.round(grossCents - fee * (1 + IVA_RATE))
+}
+
+/** Pesos a dollar really costs us: on monotributo, the digital-services IVA comes on top. */
+export function effectiveRate(rate: number, regime: TaxRegime): number {
+  return regime === 'monotributo' ? rate * (1 + IVA_RATE) : rate
 }
 
 /** Service messages Meta doesn't charge, per phone number and month. */

@@ -1,5 +1,5 @@
 import { PrismaService } from '../prisma/prisma.service'
-import { margin, messageCost, netCents, usdToArsCents } from './lib/profitability'
+import { effectiveRate, margin, messageCost, netCents, usdToArsCents } from './lib/profitability'
 import { OpsProfitabilityService } from './ops-profitability.service'
 import { ExchangeRateService } from './exchange-rate.service'
 
@@ -22,10 +22,16 @@ describe('messageCost', () => {
   })
 })
 
-describe('netCents', () => {
-  it('takes IVA out of a price, and the MercadoPago fee out of a pack', () => {
-    expect(netCents(12_100, { iva: true })).toBe(10_000)
-    expect(netCents(10_000, { iva: false, feePercent: 6.29 })).toBe(9_371)
+describe('netCents and the tax regime', () => {
+  it('on monotributo keeps the whole price and pays the IVA of the MercadoPago fee', () => {
+    expect(netCents(10_000, { regime: 'monotributo' })).toBe(10_000)
+    expect(netCents(10_000, { regime: 'monotributo', feePercent: 6.29 })).toBe(9_239)
+    expect(effectiveRate(2000, 'monotributo')).toBeCloseTo(2420)
+  })
+
+  it('as inscripto takes the IVA out of the price, and credits the IVA it pays', () => {
+    expect(netCents(12_100, { regime: 'inscripto' })).toBe(10_000)
+    expect(effectiveRate(2000, 'inscripto')).toBe(2000)
   })
 })
 
@@ -47,6 +53,7 @@ describe('OpsProfitabilityService.report', () => {
   beforeEach(() => {
     process.env.PLAN_PRICE_SAQUE_CENTS = '4999900'
     process.env.META_MESSAGE_PRICE_USD = '0.026'
+    process.env.TAX_REGIME = 'inscripto'
   })
   afterEach(() => {
     process.env = { ...env }
@@ -109,5 +116,16 @@ describe('OpsProfitabilityService.report', () => {
     expect(report.totals.revenueCents).toBe(11_003_989)
     expect(report.totals.messages.total).toBe(1_820)
     expect(report.clubs.find(c => c.id === 'demo')!.isDemo).toBe(true)
+  })
+
+  it('on monotributo keeps the whole price and adds the digital-services IVA to Meta and OpenAI', async () => {
+    process.env.TAX_REGIME = 'monotributo'
+    const report = await setup().report('2026-10')
+    const norte = report.clubs.find(c => c.id === 'c1')!
+
+    expect(report.taxRegime).toBe('monotributo')
+    expect(norte.revenue.planCents).toBe(4_999_900)
+    // 600 billed messages × US$0,026 × ($1.000 + 21% IVA).
+    expect(norte.cost.metaCents).toBe(18_876_00)
   })
 })
