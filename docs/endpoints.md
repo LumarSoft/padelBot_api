@@ -1343,7 +1343,15 @@ Open to STAFF too.
   "plan": { "key": "saque", "name": "Saque", "known": true },
   "courts": { "used": 2, "limit": 2 },
   "users": { "used": 1, "limit": 2 },
-  "aiCredits": { "used": 640, "limit": 1000, "month": "2026-10", "percent": 64 },
+  "aiCredits": {
+    "used": 640,
+    "limit": 1000,
+    "month": "2026-10",
+    "percent": 64,
+    "fromPacks": 0,
+    "extraBalance": 500,
+    "available": 1500
+  },
   "features": {
     "fixedConfirmation": { "enabled": false, "plan": "Bandeja" },
     "kioscoStock": { "enabled": false, "plan": "Bandeja" },
@@ -1360,9 +1368,12 @@ includes it. Clubs that existed before the plans were enforced have `grandfather
 and every module. Only switching a module ON is refused (`403`, message naming the plan); what
 the club already has running keeps working.
 
-`aiCredits` counts this calendar month (club-local): one credit per AI step — a message the
-bot needed AI to understand, an audio transcribed, an image or receipt read. It is only
-measured: going over never cuts the bot (ops is alerted at 80% and 100%).
+`aiCredits` counts this calendar month (club-local): one credit per WhatsApp message the bot
+sends (replies, buttons, payment notices, reminders, fijo confirmations). Understanding audios
+and reading receipts costs nothing; replies the staff types from the panel never count. `limit`
+is the plan's (Saque 1.000, Bandeja 2.000, Smash 3.000); past it, messages spend credit packs
+(`fromPacks`), and `available` = plan credits + pack credits spent this month + `extraBalance`
+(pack credits left). Going over never cuts the bot (ops is alerted at 80% and 100%).
 
 ### GET /clubs/me/faq
 
@@ -2670,10 +2681,11 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
 ]
 ```
 
-`plan.aiCredits` is this calendar month (club-local): one credit per AI step (a message
-understood, an audio transcribed, an image or receipt read). Going over never cuts the bot; an
-hourly job posts to `OPS_ALERT_WEBHOOK_URL` when a club crosses 80% and 100% (once each per
-month, the sales demo excluded).
+`plan.aiCredits` is this calendar month (club-local): one credit per WhatsApp message the bot
+sends. Going over never cuts the bot; an hourly job posts to `OPS_ALERT_WEBHOOK_URL` when a club
+crosses 80% and 100% of its plan's credits (once each per month, the sales demo excluded), with
+the pack credits it has left. A send Meta refuses for payment (Graph code 131042) also alerts
+ops, once an hour per number, because the bot is mute on that number until it's fixed.
 
 ### PATCH /ops/clubs/:id/subscription
 

@@ -1,7 +1,8 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { todayKey } from '../availability/lib/datetime'
-import { creditPercent, monthKeyOf, monthStartKey } from './lib/ai-credits'
+import { CreditsService } from './credits.service'
+import { creditPercent, monthKeyOf } from './lib/ai-credits'
 import { featureLockedMessage } from './lib/features'
 import { courtLimitMessage, userLimitMessage } from './lib/limits'
 import {
@@ -34,12 +35,22 @@ export interface ClubPlanOverview {
   courts: PlanUsage
   /** Active users, the owner included. */
   users: PlanUsage
-  /** AI credits of the current calendar month. Only measured: going over never cuts the bot. */
+  /**
+   * Credits of the current calendar month: one per WhatsApp message the bot sends. `limit` is
+   * the plan's; `available` adds the credit packs (spent this month + still left). Going over
+   * never cuts the bot.
+   */
   aiCredits: PlanUsage & {
     /** "2026-10": the month being counted (club-local). */
     month: string
-    /** Whole percentage of the allowance used (can pass 100); null without an allowance. */
+    /** Whole percentage of the plan's credits used (can pass 100); null without an allowance. */
     percent: number | null
+    /** Of `used`, the ones paid from credit packs. */
+    fromPacks: number
+    /** Pack credits still left (not expired). */
+    extraBalance: number
+    /** Plan credits + pack credits spent this month + pack credits left: the bar's total. */
+    available: number | null
   }
   /** Each module: whether the club may use it, and the cheapest plan that includes it. */
   features: Record<PlanFeature, { enabled: boolean; plan: string }>
@@ -53,16 +64,21 @@ export interface ClubPlanOverview {
  */
 @Injectable()
 export class PlansService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly credits: CreditsService,
+  ) {}
 
   async overview(clubId: string): Promise<ClubPlanOverview> {
     const today = todayKey()
-    const [club, courts, users, credits] = await Promise.all([
+    const [club, courts, users, month, packs] = await Promise.all([
       this.clubPlan(clubId),
       this.countCourts(clubId),
       this.countActiveUsers(clubId),
-      this.aiCreditsUsed(clubId, today),
+      this.credits.monthCredits(clubId, today),
+      this.credits.activePacks(clubId),
     ])
+    const extraBalance = packs.reduce((sum, pack) => sum + pack.remaining, 0)
     const plan = planDefinition(club.plan)
     const allowance = plan?.aiCredits ?? null
     const features = Object.fromEntries(
@@ -76,10 +92,13 @@ export class PlansService {
       courts: { used: courts, limit: plan?.courts ?? null },
       users: { used: users, limit: plan?.users ?? null },
       aiCredits: {
-        used: credits,
+        used: month.used,
         limit: allowance,
         month: monthKeyOf(today),
-        percent: creditPercent(credits, allowance),
+        percent: creditPercent(month.used, allowance),
+        fromPacks: month.fromPacks,
+        extraBalance,
+        available: allowance === null ? null : allowance + month.fromPacks + extraBalance,
       },
       features,
       grandfatheredFeatures: club.grandfatheredFeatures,
@@ -97,15 +116,6 @@ export class PlansService {
    */
   async assertFeature(clubId: string, feature: PlanFeature): Promise<void> {
     if (!(await this.hasFeature(clubId, feature))) throw new ForbiddenException(featureLockedMessage(feature))
-  }
-
-  /** AI credits the club used in the calendar month of `dateKey` (club-local). */
-  async aiCreditsUsed(clubId: string, dateKey: string = todayKey()): Promise<number> {
-    const { _sum } = await this.prisma.llmUsageDaily.aggregate({
-      where: { clubId, dateKey: { gte: monthStartKey(dateKey), lte: dateKey } },
-      _sum: { calls: true },
-    })
-    return _sum.calls ?? 0
   }
 
   /**

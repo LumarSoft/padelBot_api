@@ -1,6 +1,7 @@
 import { notifyOps } from '../common/ops-alert'
 import { PrismaService } from '../prisma/prisma.service'
 import { AiCreditAlertsService } from './ai-credit-alerts.service'
+import { CreditsService } from './credits.service'
 
 jest.mock('../common/ops-alert', () => ({ notifyOps: jest.fn().mockResolvedValue(undefined) }))
 
@@ -14,17 +15,27 @@ interface ClubRow {
   aiCreditsAlertPercent: number | null
 }
 
-function setup(usage: { clubId: string; calls: number }[], clubs: ClubRow[]) {
+function setup(
+  usage: { clubId: string; calls: number }[],
+  clubs: ClubRow[],
+  opts: { packs?: { remaining: number }[] } = {},
+) {
   const prisma = {
-    llmUsageDaily: {
-      groupBy: jest.fn().mockResolvedValue(usage.map(u => ({ clubId: u.clubId, _sum: { calls: u.calls } }))),
+    whatsAppMessageDaily: {
+      groupBy: jest
+        .fn()
+        .mockResolvedValue(usage.map(u => ({ clubId: u.clubId, _sum: { botService: u.calls - 10, utility: 10 } }))),
     },
     club: {
       findMany: jest.fn().mockResolvedValue(clubs),
       update: jest.fn().mockResolvedValue({}),
     },
   }
-  return { prisma, service: new AiCreditAlertsService(prisma as unknown as PrismaService) }
+  const credits = { activePacks: jest.fn().mockResolvedValue(opts.packs ?? []) }
+  return {
+    prisma,
+    service: new AiCreditAlertsService(prisma as unknown as PrismaService, credits as unknown as CreditsService),
+  }
 }
 
 const club = (over: Partial<ClubRow> = {}): ClubRow => ({
@@ -68,17 +79,19 @@ describe('AiCreditAlertsService', () => {
     expect(prisma.club.update).not.toHaveBeenCalled()
   })
 
-  it('sends the 100% alert after the 80% one, saying the bot keeps working', async () => {
+  it('sends the 100% alert after the 80% one, saying the bot keeps working and what packs are left', async () => {
     const { service } = setup(
-      [{ clubId: 'c1', calls: 3_100 }],
+      [{ clubId: 'c1', calls: 2_100 }],
       [club({ plan: 'bandeja', aiCreditsAlertMonth: '2026-10', aiCreditsAlertPercent: 80 })],
+      { packs: [{ remaining: 400 }] },
     )
 
     await service.alertCrossedThresholds(TODAY)
 
     const message = jest.mocked(notifyOps).mock.calls[0][0]
-    expect(message).toMatch(/superó sus créditos.*3\.100 de 3\.000/)
+    expect(message).toMatch(/superó sus créditos.*2\.100 de 2\.000/)
     expect(message).toContain('El bot sigue atendiendo igual')
+    expect(message).toContain('Le quedan 400 créditos de paquetes')
     expect(message).toContain('Smash')
   })
 

@@ -32,7 +32,8 @@ export interface PlanDefinition {
   courts: number | null
   /** Active panel/app users, the owner included; null = no limit. */
   users: number | null
-  /** AI credits included per calendar month. One credit = one AI step (see `ai-credits.ts`). */
+  /** Credits included per calendar month. One credit = one WhatsApp message the bot sends
+   *  (see `ai-credits.ts`); the panel and the landing call them "créditos de IA". */
   aiCredits: number
   features: readonly PlanFeature[]
   /** We load the club's fijos and players ourselves (a service, nothing to switch on). */
@@ -54,7 +55,7 @@ export const PLANS: Record<PlanKey, PlanDefinition> = {
     name: 'Bandeja',
     courts: 4,
     users: 5,
-    aiCredits: 3_000,
+    aiCredits: 2_000,
     features: PLAN_FEATURES,
     initialDataLoad: false,
   },
@@ -63,7 +64,7 @@ export const PLANS: Record<PlanKey, PlanDefinition> = {
     name: 'Smash',
     courts: null,
     users: null,
-    aiCredits: 8_000,
+    aiCredits: 3_000,
     features: PLAN_FEATURES,
     initialDataLoad: true,
   },

@@ -4,12 +4,13 @@ import { noAvailabilityWithSuggestions } from '../bot/messages'
 import { ClubsService } from '../clubs/clubs.service'
 import { CourtsService } from '../courts/courts.service'
 import { PrismaService } from '../prisma/prisma.service'
+import { CreditsService } from './credits.service'
 import { PlansService } from './plans.service'
 
 /** A real PlansService over a club row: Saque, Bandeja, or a club that predates the plans. */
 function plansFor(club: { plan: string; grandfatheredFeatures: boolean }) {
   const prisma = { club: { findUnique: jest.fn().mockResolvedValue(club) } }
-  return new PlansService(prisma as unknown as PrismaService)
+  return new PlansService(prisma as unknown as PrismaService, {} as CreditsService)
 }
 
 const NEW_SAQUE = { plan: 'saque', grandfatheredFeatures: false }
@@ -39,9 +40,11 @@ describe('PlansService modules', () => {
       club: { findUnique: jest.fn().mockResolvedValue(NEW_SAQUE) },
       court: { count: jest.fn().mockResolvedValue(1) },
       user: { count: jest.fn().mockResolvedValue(1) },
-      llmUsageDaily: { aggregate: jest.fn().mockResolvedValue({ _sum: { calls: 0 } }) },
+      whatsAppMessageDaily: { aggregate: jest.fn().mockResolvedValue({ _sum: {} }) },
+      creditPackPurchase: { findMany: jest.fn().mockResolvedValue([]) },
     }
-    const overview = await new PlansService(prisma as unknown as PrismaService).overview('c1')
+    const db = prisma as unknown as PrismaService
+    const overview = await new PlansService(db, new CreditsService(db)).overview('c1')
 
     expect(overview.features.kioscoStock).toEqual({ enabled: false, plan: 'Bandeja' })
     expect(overview.features.waitlist.enabled).toBe(false)
@@ -61,7 +64,7 @@ describe('fijo confirmation and the plan', () => {
         update: jest.fn().mockResolvedValue({}),
       },
     }
-    const plans = new PlansService(prisma as unknown as PrismaService)
+    const plans = new PlansService(prisma as unknown as PrismaService, {} as CreditsService)
     return { prisma, service: new ClubsService(prisma as never, {} as never, {} as never, plans) }
   }
 

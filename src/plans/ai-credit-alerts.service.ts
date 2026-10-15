@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service'
 import { todayKey } from '../availability/lib/datetime'
 import { notifyOps } from '../common/ops-alert'
 import { schedulerEnabled } from '../common/scheduling'
+import { CreditsService } from './credits.service'
 import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
 import {
   AiCreditAlertPercent,
@@ -17,14 +18,18 @@ import { nextPlanWithRoom, planDefinition, PlanDefinition } from './lib/plans'
 
 /**
  * Tells ops when a club nears or passes its monthly AI credits (80% / 100%), once per threshold
- * and month. Going over is never enforced — the bot keeps answering — so this alert is the whole
- * consequence: someone talks to the club about a bigger plan.
+ * and month. Credits are the messages the bot sends; going over is never enforced — the bot keeps
+ * answering, paid from the club's credit packs if it has any — so this alert is the cue to follow
+ * up: a pack or a bigger plan.
  */
 @Injectable()
 export class AiCreditAlertsService {
   private readonly logger = new Logger(AiCreditAlertsService.name)
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly credits: CreditsService,
+  ) {}
 
   @Cron(CronExpression.EVERY_HOUR)
   async checkUsage(): Promise<void> {
@@ -39,10 +44,10 @@ export class AiCreditAlertsService {
   /** One grouped query for the month's usage, then one alert (and one update) per crossing. */
   async alertCrossedThresholds(today: string = todayKey()): Promise<void> {
     const month = monthKeyOf(today)
-    const usage = await this.prisma.llmUsageDaily.groupBy({
+    const usage = await this.prisma.whatsAppMessageDaily.groupBy({
       by: ['clubId'],
       where: { dateKey: { gte: monthStartKey(today), lte: today } },
-      _sum: { calls: true },
+      _sum: { botService: true, utility: true },
     })
     if (usage.length === 0) return
 
@@ -51,7 +56,7 @@ export class AiCreditAlertsService {
       where: { id: { in: usage.map(u => u.clubId) }, slug: { not: SALES_DEMO_SLUG } },
       select: { id: true, name: true, plan: true, aiCreditsAlertMonth: true, aiCreditsAlertPercent: true },
     })
-    const usedByClub = new Map(usage.map(u => [u.clubId, u._sum.calls ?? 0]))
+    const usedByClub = new Map(usage.map(u => [u.clubId, (u._sum.botService ?? 0) + (u._sum.utility ?? 0)]))
 
     for (const club of clubs) {
       const plan = planDefinition(club.plan)
@@ -62,7 +67,9 @@ export class AiCreditAlertsService {
       const alreadySent = club.aiCreditsAlertMonth === month ? (club.aiCreditsAlertPercent ?? 0) : 0
       if (crossed <= alreadySent) continue
 
-      await notifyOps(aiCreditAlert(club.name, plan, used, crossed, month))
+      const packs = await this.credits.activePacks(club.id)
+      const extra = packs.reduce((sum, pack) => sum + pack.remaining, 0)
+      await notifyOps(aiCreditAlert(club.name, plan, used, crossed, month, extra))
       await this.prisma.club.update({
         where: { id: club.id },
         data: { aiCreditsAlertMonth: month, aiCreditsAlertPercent: crossed },
@@ -80,12 +87,14 @@ export function aiCreditAlert(
   used: number,
   crossed: AiCreditAlertPercent,
   month: string,
+  extraBalance = 0,
 ): string {
   // A plan with more credits than both this one and what the club already uses.
   const next = nextPlanWithRoom(p => p.aiCredits, Math.max(used, plan.aiCredits))
-  const offer = next ? ` Ofrecele pasar a ${next.name}.` : ''
-  const usage = `${count(used)} de ${count(plan.aiCredits)} créditos de IA de ${monthName(month)} (plan ${plan.name})`
+  const offer = next ? ` Ofrecele un paquete de créditos o pasar a ${next.name}.` : ' Ofrecele un paquete de créditos.'
+  const usage = `${count(used)} de ${count(plan.aiCredits)} créditos de ${monthName(month)} (plan ${plan.name})`
+  const packs = extraBalance > 0 ? ` Le quedan ${count(extraBalance)} créditos de paquetes.` : ''
   return crossed === 100
-    ? `🔴 *${clubName}* superó sus créditos: ${usage}. El bot sigue atendiendo igual.${offer}`
-    : `🟡 *${clubName}* ya usó el ${creditPercent(used, plan.aiCredits)}%: ${usage}.${offer}`
+    ? `🔴 *${clubName}* superó sus créditos: ${usage}. El bot sigue atendiendo igual.${packs}${offer}`
+    : `🟡 *${clubName}* ya usó el ${creditPercent(used, plan.aiCredits)}%: ${usage}.${packs}${offer}`
 }

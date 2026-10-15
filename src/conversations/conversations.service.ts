@@ -148,7 +148,7 @@ export class ConversationsService {
     // Send via WhatsApp
     const phoneNumberId = session.club.whatsappLines[0]?.phoneNumberId
     if (phoneNumberId) {
-      await this.whatsapp.sendText(phoneNumberId, session.waId, content)
+      await this.whatsapp.sendText(phoneNumberId, session.waId, content, 'staff')
     }
 
     return message

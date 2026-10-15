@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common'
 import { AiCreditAlertsService } from './ai-credit-alerts.service'
+import { CreditsService } from './credits.service'
 import { PlansController } from './plans.controller'
 import { PlansService } from './plans.service'
 
@@ -11,7 +12,7 @@ import { PlansService } from './plans.service'
 @Global()
 @Module({
   controllers: [PlansController],
-  providers: [PlansService, AiCreditAlertsService],
-  exports: [PlansService],
+  providers: [PlansService, CreditsService, AiCreditAlertsService],
+  exports: [PlansService, CreditsService],
 })
 export class PlansModule {}

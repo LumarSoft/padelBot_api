@@ -158,6 +158,8 @@ model Club {
   scheduledPriceAdjustments ScheduledPriceAdjustment[]
   bookingPlayerPayments BookingPlayerPayment[]
   llmUsageDaily        LlmUsageDaily[]
+  whatsAppMessageDaily WhatsAppMessageDaily[]
+  creditPackPurchases  CreditPackPurchase[]
   helpSearchMisses     HelpSearchMiss[]
 }
 
@@ -806,14 +808,73 @@ model PlatformAdmin {
 /// it, "is this club profitable at $X/month?" is unanswerable. It's a daily aggregate and
 /// not a row per call on purpose — the per-call detail is already in the logs, and one row
 /// per club per day stays small forever.
+/// WhatsApp messages the Graph API accepted, per number and club-local day. Two things read it:
+/// the club's credits (one per message the BOT sends: `botService` + `utility`) and our Meta cost
+/// (service messages past the number's monthly free tier, plus every utility template).
+model WhatsAppMessageDaily {
+  id            String   @id @default(cuid())
+  clubId        String
+  club          Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// The number that sent them (Meta's free tier is per number).
+  phoneNumberId String
+  /// Club-local day ("YYYY-MM-DD").
+  dateKey       String
+  /// Free-form messages the bot sent (replies, buttons, lists, payment notices).
+  botService    Int      @default(0)
+  /// Replies the staff typed from the panel: our Meta cost, never the club's credits.
+  staffService  Int      @default(0)
+  /// Utility templates (reminder, fijo confirmation): credits for the club, always billed by Meta.
+  utility       Int      @default(0)
+  /// Of this day's credits, how many came out of a credit pack (past the month's plan credits).
+  packCredits   Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([phoneNumberId, dateKey])
+  @@index([clubId, dateKey])
+  @@index([dateKey])
+}
+
+enum CreditPackStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// A one-off pack of extra credits bought with MercadoPago Checkout Pro, paid into LUMARSOFT's
+/// account (not the club's). Credited when MP approves the payment; spent after the month's plan
+/// credits, soonest expiry first; expires 6 months after approval.
+model CreditPackPurchase {
+  id              String           @id @default(cuid())
+  clubId          String
+  club            Club             @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Catalog key (`billing/lib/credit-packs.ts`), with credits and price copied at purchase time.
+  packKey         String
+  credits         Int
+  priceCents      Int
+  status          CreditPackStatus @default(PENDING)
+  creditsUsed     Int              @default(0)
+  mpPreferenceId  String?
+  /// The approved MercadoPago payment. Unique, so a replayed webhook can't credit twice.
+  mpPaymentId     String?          @unique
+  approvedAt      DateTime?
+  expiresAt       DateTime?
+  createdByUserId Int?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([clubId, status])
+  @@index([approvedAt])
+}
+
 model LlmUsageDaily {
   id           String   @id @default(cuid())
   clubId       String
   club         Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   /// Club-local day ("YYYY-MM-DD"), same convention as everywhere else.
   dateKey      String
-  /// AI steps (a message understood, an audio transcribed, an image or receipt read). Each one
-  /// is one AI credit of the club's plan (`plans/lib/ai-credits.ts`).
+  /// AI steps (a message understood, an audio transcribed, an image or receipt read). Only our
+  /// cost: the club's credits are counted in WhatsApp messages (WhatsAppMessageDaily).
   calls        Int      @default(0)
   inputTokens  Int      @default(0)
   outputTokens Int      @default(0)

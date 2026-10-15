@@ -6,6 +6,10 @@ import { PrismaService } from '../prisma/prisma.service'
 import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { Interactive } from '../bot/types'
 import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
+import { CreditsService, OutboundKind } from '../plans/credits.service'
+
+/** Who wrote a free-form message: the bot (a credit of the club) or the staff from the panel. */
+export type OutboundSender = 'bot' | 'staff'
 
 @Injectable()
 export class WhatsAppService {
@@ -14,6 +18,7 @@ export class WhatsAppService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly lines: WhatsAppLinesService,
+    private readonly credits: CreditsService,
   ) {}
 
   private get apiVersion() {
@@ -24,8 +29,9 @@ export class WhatsAppService {
     return process.env.WHATSAPP_TOKEN ?? process.env.META_ACCESS_TOKEN ?? ''
   }
 
-  async sendText(phoneNumberId: string, to: string, body: string): Promise<boolean> {
-    return this.postMessage(phoneNumberId, to, { type: 'text', text: { body } })
+  /** `sender: 'staff'` for a reply typed in the panel: it's our cost, never the club's credits. */
+  async sendText(phoneNumberId: string, to: string, body: string, sender: OutboundSender = 'bot'): Promise<boolean> {
+    return this.postMessage(phoneNumberId, to, { type: 'text', text: { body } }, sender)
   }
 
   /**
@@ -104,7 +110,12 @@ export class WhatsAppService {
    * Posts a message object to the Graph API, normalizing the recipient and logging
    * failures. Returns whether Graph accepted the message (used by the retry path).
    */
-  private async postMessage(phoneNumberId: string, to: string, message: Record<string, unknown>): Promise<boolean> {
+  private async postMessage(
+    phoneNumberId: string,
+    to: string,
+    message: Record<string, unknown>,
+    sender: OutboundSender = 'bot',
+  ): Promise<boolean> {
     const url = `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}/messages`
     // Argentina mobile wa_ids arrive as 549XXXXXXXXXX but the API requires 54XXXXXXXXXX
     const recipient = to.startsWith('549') && to.length === 13 ? '54' + to.slice(3) : to
@@ -122,6 +133,8 @@ export class WhatsAppService {
       })
       if (response.ok) {
         this.logger.log(`✅ WA enviado a ${recipient}: ${describeOutbound(message)}`)
+        // Only what Graph accepted counts: a credit for the club, a message on our Meta bill.
+        void this.credits.recordSent(phoneNumberId, outboundKind(message, sender))
         return true
       }
       const text = await response.text()
@@ -191,6 +204,12 @@ export class WhatsAppService {
       return false
     }
   }
+}
+
+/** Templates are Meta's utility category; everything else is a service message. */
+function outboundKind(message: Record<string, unknown>, sender: OutboundSender): OutboundKind {
+  if (message.type === 'template') return 'utility'
+  return sender === 'staff' ? 'staffService' : 'botService'
 }
 
 /** A one-line, length-capped summary of an outbound message object, for clean send logs. */

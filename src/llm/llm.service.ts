@@ -469,8 +469,8 @@ export class LlmService {
 
   /**
    * Rolls one AI step (understanding a message, transcribing an audio, reading an image) into
-   * the club's daily total. Each step is one call — and one AI credit of the club's plan (see
-   * `plans/lib/ai-credits.ts`) — plus its tokens and estimated cost, read by the ops console.
+   * the club's daily total: one call plus its tokens and estimated cost, read by the ops console
+   * (OpenAI cost, profitability). Not the club's credits — those count WhatsApp messages.
    *
    * Fire-and-forget and never throws: the player is waiting on a WhatsApp reply, and our
    * accounting is not worth failing their booking over. A dropped row costs us a fraction

@@ -1,5 +1,6 @@
 import { ForbiddenException } from '@nestjs/common'
 import { AuthService } from '../auth/auth.service'
+import { CreditsService } from '../plans/credits.service'
 import { PlansService } from '../plans/plans.service'
 import { PrismaService } from '../prisma/prisma.service'
 import { UsersService } from './users.service'
@@ -50,7 +51,7 @@ describe('UsersService and the plan user limit', () => {
     const service = new UsersService(
       prisma as unknown as PrismaService,
       { forgetSession: jest.fn() } as unknown as AuthService,
-      new PlansService(prisma as unknown as PrismaService),
+      new PlansService(prisma as unknown as PrismaService, {} as CreditsService),
     )
     return { prisma, service }
   }

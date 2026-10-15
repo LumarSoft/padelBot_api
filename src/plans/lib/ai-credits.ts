@@ -1,13 +1,15 @@
 /**
- * AI credits: what a plan's monthly AI allowance is counted in.
+ * Credits ("créditos de IA" in the panel and on the landing): what a plan's monthly allowance is
+ * counted in.
  *
- * One credit = one AI step: understanding a message, transcribing an audio, reading an image or
- * a receipt (the landing's own wording). Messages the bot resolves without AI (menu, buttons,
- * plain dates and times) cost nothing. Each step is one `LlmUsageDaily.calls`, so a month's
- * credits are the sum of `calls` over that month's club-local day keys.
+ * One credit = one WhatsApp message the BOT sends: replies, buttons, payment notices, reminders,
+ * fijo confirmations (`WhatsAppMessageDaily.botService + utility`). Understanding audios and
+ * reading receipts is included and costs nothing — the AI is cheap, Meta's per-message price is
+ * what costs us. Replies the staff types from the panel are never the club's credits.
  *
- * Going over is never enforced: the bot keeps working, the owner sees it in the panel and ops
- * gets an alert to talk to the club. Nothing here may cut the bot.
+ * Past the month's plan credits, messages spend the club's credit packs (soonest expiry first).
+ * Without packs, going over is only measured: the bot keeps working, the owner sees it in the
+ * panel and ops gets an alert. Nothing here may cut the bot.
  */
 
 /** Usage that triggers an ops alert, once per club and month each. */
