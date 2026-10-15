@@ -3011,6 +3011,7 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
       "model": "gpt-6-luna",
       "inputPerMTokUsd": 0.1,
       "outputPerMTokUsd": 0.5,
+      "priceEstimated": false,
       "steps": 1800,
       "inputTokens": 4500000,
       "outputTokens": 300000,

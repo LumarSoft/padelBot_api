@@ -59,6 +59,8 @@ export interface ProfitabilityReport {
       model: string
       inputPerMTokUsd: number
       outputPerMTokUsd: number
+      /** The model's price isn't known: a stand-in is used (set OPENAI_PRICE_*_PER_MTOK). */
+      priceEstimated: boolean
       /** AI steps: messages understood, audios transcribed, images and receipts read. */
       steps: number
       inputTokens: number
@@ -217,6 +219,7 @@ export class OpsProfitabilityService {
           model: pricing.model,
           inputPerMTokUsd: pricing.inputPerMTok,
           outputPerMTokUsd: pricing.outputPerMTok,
+          priceEstimated: pricing.estimated,
           steps: aiTotals.steps,
           inputTokens: aiTotals.inputTokens,
           outputTokens: aiTotals.outputTokens,

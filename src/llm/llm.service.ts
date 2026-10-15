@@ -545,8 +545,9 @@ export class LlmService {
 
 // ── Types & pure helpers ─────────────────────────────────────────────────────
 
-/** Prices in USD per 1 M tokens (input / output). Updated June 2025. */
+/** Prices in USD per 1 M tokens (input / output). Updated June 2025; gpt-6-luna October 2026. */
 const MODEL_PRICES: Record<string, { input: number; output: number }> = {
+  'gpt-6-luna': { input: 0.1, output: 0.5 },
   'gpt-4o-mini': { input: 0.15, output: 0.6 },
   'gpt-4o': { input: 2.5, output: 10.0 },
   'gpt-4-turbo': { input: 10.0, output: 30.0 },
@@ -702,10 +703,17 @@ function modelPriceOverride(): { input: number; output: number } | null {
 }
 
 /** The chat model and what it costs per million tokens (USD), as the cost log prices it. */
-export function chatModelPricing(): { model: string; inputPerMTok: number; outputPerMTok: number } {
+export function chatModelPricing(): {
+  model: string
+  inputPerMTok: number
+  outputPerMTok: number
+  /** True when the model has no known price and gpt-4o-mini's stands in for it. */
+  estimated: boolean
+} {
   const model = chatModel()
-  const prices = modelPriceOverride() ?? MODEL_PRICES[model] ?? MODEL_PRICES['gpt-4o-mini']
-  return { model, inputPerMTok: prices.input, outputPerMTok: prices.output }
+  const known = modelPriceOverride() ?? MODEL_PRICES[model]
+  const prices = known ?? MODEL_PRICES['gpt-4o-mini']
+  return { model, inputPerMTok: prices.input, outputPerMTok: prices.output, estimated: !known }
 }
 
 /** What a transfer receipt photo says. Every field may be null when it isn't legible. */
