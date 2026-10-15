@@ -2936,6 +2936,59 @@ took over). Costs are in **micro-USD** (integers; 1e-6 USD) and come from `LlmUs
 }
 ```
 
+
+### GET /ops/profitability
+
+Per club and month: what it pays us (plan + credit packs approved that month), what serving it
+costs (Meta's WhatsApp messages + OpenAI), and the margin. Worst first: losses (`negative`),
+then thin margins (`low`, under 30%), then the rest. `noRevenue` marks a club that costs money
+without paying yet (trial). The sales demo is listed (`isDemo`) but left out of `totals`.
+
+Meta is estimated as Lumarsoft pays it: service messages (bot and staff replies) past the first
+1.000 of each number in the month, plus every utility template, at `META_MESSAGE_PRICE_USD`
+(default 0.026). Dollars become pesos at `USD_ARS_RATE` (default 1500). Plan revenue uses each
+club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancelled don't) and
+`PLAN_PRICE_<KEY>_CENTS`, so a past month is an approximation.
+
+**Auth required:** Yes (ops token)
+
+**Query** — `month` (optional, `YYYY-MM`; default the current month)
+
+`200 OK`
+```json
+{
+  "month": "2026-10",
+  "metaMessagePriceUsd": 0.026,
+  "usdArsRate": 1500,
+  "totals": {
+    "revenueCents": 13999800,
+    "costCents": 2640000,
+    "metaCents": 2340000,
+    "aiCents": 300000,
+    "marginCents": 11359800,
+    "marginPercent": 81,
+    "messages": { "total": 1600, "free": 1000, "paid": 600 }
+  },
+  "clubs": [
+    {
+      "id": "clx…",
+      "name": "Padel Norte",
+      "plan": "Saque",
+      "subscriptionStatus": "ACTIVE",
+      "isDemo": false,
+      "revenue": { "planCents": 4999900, "packsCents": 8999900, "totalCents": 13999800 },
+      "messages": { "total": 1600, "free": 1000, "paid": 600 },
+      "cost": { "metaCents": 2340000, "aiCents": 300000, "totalCents": 2640000 },
+      "marginCents": 11359800,
+      "marginPercent": 81,
+      "flag": null,
+      "credits": { "used": 1500, "included": 1000 }
+    }
+  ]
+}
+```
+
+`400 Bad Request` — `month` not `YYYY-MM`
 ### GET /ops/health
 
 Everything that needs a human, across every club. **An empty `issues` array means nothing is

@@ -10,6 +10,7 @@ import { OpsClubsService } from './ops-clubs.service'
 import { OpsMetricsService } from './ops-metrics.service'
 import { OpsHealthService } from './ops-health.service'
 import { OpsHelpService } from './ops-help.service'
+import { OpsProfitabilityService } from './ops-profitability.service'
 import { OpsJwtStrategy } from './strategies/ops-jwt.strategy'
 import { opsJwtSecret } from './lib/ops-secret'
 
@@ -46,6 +47,7 @@ import { opsJwtSecret } from './lib/ops-secret'
     OpsMetricsService,
     OpsHealthService,
     OpsHelpService,
+    OpsProfitabilityService,
     OpsJwtStrategy,
   ],
 })

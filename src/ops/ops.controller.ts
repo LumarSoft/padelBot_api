@@ -22,12 +22,14 @@ import { OpsClubsService, OpsClubRow, ClubUserRow } from './ops-clubs.service'
 import { OpsMetricsService, BusinessMetrics, BotMetrics } from './ops-metrics.service'
 import { OpsHealthService, OpsHealth } from './ops-health.service'
 import { OpsHelpService, HelpSearchMissRow } from './ops-help.service'
+import { OpsProfitabilityService, ProfitabilityReport } from './ops-profitability.service'
 import { SubscriptionState } from '../clubs/lib/subscription'
 import { OpsLoginDto } from './dto/ops-login.dto'
 import { UpdateLeadDto } from './dto/update-lead.dto'
 import { ProvisionLeadDto } from './dto/provision-lead.dto'
 import { UpdateSubscriptionDto } from './dto/update-subscription.dto'
 import { ListLeadsQueryDto } from './dto/list-leads-query.dto'
+import { ProfitabilityQueryDto } from './dto/profitability-query.dto'
 
 /**
  * The Lumarsoft ops console (`/ops` in the panel). EVERY route here reads across tenants,
@@ -44,6 +46,7 @@ export class OpsController {
     private readonly metrics: OpsMetricsService,
     private readonly health: OpsHealthService,
     private readonly help: OpsHelpService,
+    private readonly profitability: OpsProfitabilityService,
   ) {}
 
   // ── Auth ──────────────────────────────────────────────────────────────────
@@ -142,6 +145,13 @@ export class OpsController {
   @UseGuards(OpsAuthGuard)
   bot(): Promise<BotMetrics> {
     return this.metrics.getBot()
+  }
+
+  /** Per club and month: revenue, Meta + OpenAI cost and margin. */
+  @Get('profitability')
+  @UseGuards(OpsAuthGuard)
+  profit(@Query() query: ProfitabilityQueryDto): Promise<ProfitabilityReport> {
+    return this.profitability.report(query.month)
   }
 
   // ── Health ────────────────────────────────────────────────────────────────
