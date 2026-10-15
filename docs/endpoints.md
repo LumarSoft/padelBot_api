@@ -2903,8 +2903,8 @@ without paying yet (trial). The sales demo is listed (`isDemo`) but left out of 
 
 Meta is estimated as Lumarsoft pays it: service messages (bot and staff replies) past the first
 1.000 of each number in the month, plus every utility template, at `META_MESSAGE_PRICE_USD`
-(default 0.026). Dollars become pesos at the month's last stored quote of `USD_ARS_QUOTE`
-(`tarjeta` by default, fetched daily from dolarapi.com; `usdArs.source` says if it fell back to
+(default 0.025). Dollars become pesos at the month's last stored quote of `USD_ARS_QUOTE`
+(`oficial` by default, since Lumarsoft pays in dollars; fetched daily from dolarapi.com; `usdArs.source` says if it fell back to
 `USD_ARS_RATE` or the built-in rate). Plan revenue uses each
 club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancelled don't) and
 `PLAN_PRICE_<KEY>_CENTS`, so a past month is an approximation.
@@ -2917,8 +2917,8 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
 ```json
 {
   "month": "2026-10",
-  "metaMessagePriceUsd": 0.026,
-  "usdArs": { "rate": 1995.5, "quote": "tarjeta", "source": "dolarapi", "dateKey": "2026-10-14", "stale": false },
+  "metaMessagePriceUsd": 0.025,
+  "usdArs": { "rate": 1530, "quote": "oficial", "source": "dolarapi", "dateKey": "2026-10-15", "stale": false },
   "taxRegime": "monotributo",
   "breakdown": {
     "ai": {
@@ -2931,8 +2931,8 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
       "outputTokens": 300000,
       "costUsd": 0.6
     },
-    "meta": { "messages": 1600, "free": 1000, "paid": 600, "costUsd": 15.6 },
-    "effectiveRate": 2414.56
+    "meta": { "messages": 1600, "free": 1000, "paid": 600, "costUsd": 15 },
+    "effectiveRate": 1851.3
   },
   "totals": {
     "grossRevenueCents": 4999900,

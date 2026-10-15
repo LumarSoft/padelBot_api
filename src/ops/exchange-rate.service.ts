@@ -11,13 +11,12 @@ export const DOLLAR_QUOTES = ['tarjeta', 'oficial'] as const
 export type DollarQuote = (typeof DOLLAR_QUOTES)[number]
 
 /**
- * "tarjeta" unless USD_ARS_QUOTE says "oficial": Meta and OpenAI charge Lumarsoft's card in
- * dollars, and an Argentine card pays them at the card rate (oficial + the 30% tax advance).
- * The conservative choice — it never shows a margin better than the real one.
+ * "oficial" unless USD_ARS_QUOTE says "tarjeta": Lumarsoft pays Meta and OpenAI in dollars
+ * (confirmed 2026-10-15), not in pesos at the card rate (oficial + the 30% tax advance).
  */
 export function dollarQuote(): DollarQuote {
   const quote = process.env.USD_ARS_QUOTE as DollarQuote | undefined
-  return quote && DOLLAR_QUOTES.includes(quote) ? quote : 'tarjeta'
+  return quote && DOLLAR_QUOTES.includes(quote) ? quote : 'oficial'
 }
 
 /** Rates of 2026-10-14, used only until the first fetch lands (and nothing is configured). */
