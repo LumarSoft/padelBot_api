@@ -870,6 +870,23 @@ model CreditPackPurchase {
   @@index([approvedAt])
 }
 
+/// The dollar the ops console turns Meta's and OpenAI's USD costs into pesos with. Fetched every
+/// day from dolarapi.com (ExchangeRateService) so nobody has to remember to update it; one row
+/// per quote and club-local day, so a past month keeps the rate it had.
+model ExchangeRate {
+  id        String   @id @default(cuid())
+  /// "tarjeta" (what a USD charge on an Argentine card costs) or "oficial".
+  quote     String
+  /// Club-local day ("YYYY-MM-DD") of the quote.
+  dateKey   String
+  /// Pesos per dollar (selling rate), in cents.
+  arsCents  Int
+  source    String
+  fetchedAt DateTime @default(now())
+
+  @@unique([quote, dateKey])
+}
+
 model LlmUsageDaily {
   id           String   @id @default(cuid())
   clubId       String

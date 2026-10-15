@@ -4,8 +4,8 @@
  *
  * Meta, as Lumarsoft pays it from its own portfolio: every service message (bot or staff reply
  * inside the 24h window) past the first 1.000 of each number in the month, and every utility
- * template (reminders, fijo confirmations), at one price per message. Config:
- *   META_MESSAGE_PRICE_USD (default 0.026)   USD_ARS_RATE (default 1535, the official rate on 2026-10-14)
+ * template (reminders, fijo confirmations), at one price per message (META_MESSAGE_PRICE_USD,
+ * default 0.026). The dollar comes from ExchangeRateService (fetched daily).
  */
 
 /** Service messages Meta doesn't charge, per phone number and month. */
@@ -16,10 +16,6 @@ export const LOW_MARGIN_PERCENT = 30
 
 export function metaMessagePriceUsd(): number {
   return Number(process.env.META_MESSAGE_PRICE_USD) || 0.026
-}
-
-export function usdArsRate(): number {
-  return Number(process.env.USD_ARS_RATE) || 1535
 }
 
 /** One number's messages in the month. */

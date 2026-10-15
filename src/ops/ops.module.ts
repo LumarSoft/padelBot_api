@@ -11,6 +11,7 @@ import { OpsMetricsService } from './ops-metrics.service'
 import { OpsHealthService } from './ops-health.service'
 import { OpsHelpService } from './ops-help.service'
 import { OpsProfitabilityService } from './ops-profitability.service'
+import { ExchangeRateService } from './exchange-rate.service'
 import { OpsJwtStrategy } from './strategies/ops-jwt.strategy'
 import { opsJwtSecret } from './lib/ops-secret'
 
@@ -48,6 +49,7 @@ import { opsJwtSecret } from './lib/ops-secret'
     OpsHealthService,
     OpsHelpService,
     OpsProfitabilityService,
+    ExchangeRateService,
     OpsJwtStrategy,
   ],
 })

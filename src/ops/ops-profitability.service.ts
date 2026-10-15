@@ -12,9 +12,9 @@ import {
   messageCost,
   metaMessagePriceUsd,
   NumberMessages,
-  usdArsRate,
   usdToArsCents,
 } from './lib/profitability'
+import { ExchangeRateService, UsdArs } from './exchange-rate.service'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -38,7 +38,8 @@ export interface ProfitabilityReport {
   month: string
   /** The assumptions behind the pesos, shown in the console. */
   metaMessagePriceUsd: number
-  usdArsRate: number
+  /** The dollar the costs were converted with, and where it came from. */
+  usdArs: UsdArs
   totals: {
     revenueCents: number
     costCents: number
@@ -61,13 +62,17 @@ const PAYING = new Set<SubscriptionStatus>([SubscriptionStatus.ACTIVE, Subscript
  */
 @Injectable()
 export class OpsProfitabilityService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly rates: ExchangeRateService,
+  ) {}
 
   async report(month: string = monthKeyOf(todayKey())): Promise<ProfitabilityReport> {
     const from = `${month}-01`
     const to = `${month}-31`
     const priceUsd = metaMessagePriceUsd()
-    const rate = usdArsRate()
+    const usdArs = await this.rates.rateFor(month)
+    const rate = usdArs.rate
 
     const [clubs, messages, ai, packs] = await Promise.all([
       this.prisma.club.findMany({
@@ -153,7 +158,7 @@ export class OpsProfitabilityService {
     return {
       month,
       metaMessagePriceUsd: priceUsd,
-      usdArsRate: rate,
+      usdArs,
       totals: {
         revenueCents,
         costCents,

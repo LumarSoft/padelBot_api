@@ -1,6 +1,7 @@
 import { PrismaService } from '../prisma/prisma.service'
 import { margin, messageCost, usdToArsCents } from './lib/profitability'
 import { OpsProfitabilityService } from './ops-profitability.service'
+import { ExchangeRateService } from './exchange-rate.service'
 
 describe('messageCost', () => {
   it('bills service messages only past 1.000 per number, and every template', () => {
@@ -39,7 +40,6 @@ describe('OpsProfitabilityService.report', () => {
   beforeEach(() => {
     process.env.PLAN_PRICE_SAQUE_CENTS = '4999900'
     process.env.META_MESSAGE_PRICE_USD = '0.026'
-    process.env.USD_ARS_RATE = '1000'
   })
   afterEach(() => {
     process.env = { ...env }
@@ -68,7 +68,11 @@ describe('OpsProfitabilityService.report', () => {
           .mockResolvedValue([{ clubId: 'c1', priceCents: 8_999_900, approvedAt: new Date('2026-10-12T15:00:00Z') }]),
       },
     }
-    return new OpsProfitabilityService(prisma as unknown as PrismaService)
+    // A round dollar keeps the arithmetic readable: $1.000 per US$.
+    const rates = {
+      rateFor: jest.fn().mockResolvedValue({ rate: 1000, quote: 'tarjeta', source: 'dolarapi', dateKey: '2026-10-14' }),
+    }
+    return new OpsProfitabilityService(prisma as unknown as PrismaService, rates as unknown as ExchangeRateService)
   }
 
   it('adds plan and packs, costs Meta and OpenAI in pesos, and leaves the demo out of the totals', async () => {
