@@ -299,6 +299,9 @@ model User {
   /// has seen. Stored here, not in the browser: the owner opens the panel from several devices.
   /// Null = never opened them.
   newsSeenId       String?            @db.VarChar(64)
+  /// The "te quedan pocos créditos" notice this user closed: "2026-10:80" (month and level, 80 or
+  /// 100). Closed, it stays closed for that month; it comes back once when the credits run out.
+  creditsNoticeDismissed String?        @db.VarChar(16)
   firstActions     UserFirstAction[]
   clubId           String
   club             Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)

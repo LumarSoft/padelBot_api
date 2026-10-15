@@ -1359,9 +1359,13 @@ Open to STAFF too.
     "splitPayment": { "enabled": false, "plan": "Bandeja" },
     "scheduledPriceAdjustments": { "enabled": false, "plan": "Bandeja" }
   },
-  "grandfatheredFeatures": false
+  "grandfatheredFeatures": false,
+  "creditsNotice": { "level": 80, "dismissed": false }
 }
 ```
+
+`creditsNotice` drives the owner's "te quedan pocos créditos" banner: `level` 80 / 100 of plan +
+pack credits (null below 80%), and whether the calling user closed it at that level this month.
 
 `features` says whether the club may use (turn on) each module and the cheapest plan that
 includes it. Clubs that existed before the plans were enforced have `grandfatheredFeatures`
@@ -1374,6 +1378,16 @@ and reading receipts costs nothing; replies the staff types from the panel never
 is the plan's (Saque 1.000, Bandeja 2.000, Smash 3.000); past it, messages spend credit packs
 (`fromPacks`), and `available` = plan credits + pack credits spent this month + `extraBalance`
 (pack credits left). Going over never cuts the bot (ops is alerted at 80% and 100%).
+
+### POST /clubs/me/plan/credits-notice/dismiss
+
+Closes the credits banner for the calling user at the level it's showing now: it stays closed for
+the rest of the month and comes back once if the credits run out (level 100). Facturación always
+shows the state.
+
+**Auth required:** Yes
+
+`204 No Content`
 
 ### GET /clubs/me/faq
 

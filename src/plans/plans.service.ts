@@ -2,7 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { PrismaService } from '../prisma/prisma.service'
 import { todayKey } from '../availability/lib/datetime'
 import { CreditsService } from './credits.service'
-import { creditPercent, monthKeyOf } from './lib/ai-credits'
+import { creditPercent, CreditsNoticeLevel, creditsNoticeKey, creditsNoticeLevel, monthKeyOf } from './lib/ai-credits'
 import { featureLockedMessage } from './lib/features'
 import { courtLimitMessage, userLimitMessage } from './lib/limits'
 import {
@@ -56,6 +56,11 @@ export interface ClubPlanOverview {
   features: Record<PlanFeature, { enabled: boolean; plan: string }>
   /** The club predates the plans and keeps every module, whatever its plan says. */
   grandfatheredFeatures: boolean
+  /**
+   * The owner's "te quedan pocos créditos" banner: 80% / 100% of plan + pack credits, and
+   * whether THIS user closed it (it stays closed that month; it returns once at 100%).
+   */
+  creditsNotice: { level: CreditsNoticeLevel | null; dismissed: boolean }
 }
 
 /**
@@ -69,18 +74,23 @@ export class PlansService {
     private readonly credits: CreditsService,
   ) {}
 
-  async overview(clubId: string): Promise<ClubPlanOverview> {
+  async overview(clubId: string, userId?: number): Promise<ClubPlanOverview> {
     const today = todayKey()
-    const [club, courts, users, month, packs] = await Promise.all([
+    const [club, courts, users, month, packs, viewer] = await Promise.all([
       this.clubPlan(clubId),
       this.countCourts(clubId),
       this.countActiveUsers(clubId),
       this.credits.monthCredits(clubId, today),
       this.credits.activePacks(clubId),
+      userId
+        ? this.prisma.user.findFirst({ where: { id: userId, clubId }, select: { creditsNoticeDismissed: true } })
+        : null,
     ])
     const extraBalance = packs.reduce((sum, pack) => sum + pack.remaining, 0)
     const plan = planDefinition(club.plan)
     const allowance = plan?.aiCredits ?? null
+    const available = allowance === null ? null : allowance + month.fromPacks + extraBalance
+    const noticeLevel = creditsNoticeLevel(month.used, available)
     const features = Object.fromEntries(
       PLAN_FEATURES.map(feature => [
         feature,
@@ -98,11 +108,26 @@ export class PlansService {
         percent: creditPercent(month.used, allowance),
         fromPacks: month.fromPacks,
         extraBalance,
-        available: allowance === null ? null : allowance + month.fromPacks + extraBalance,
+        available,
       },
       features,
       grandfatheredFeatures: club.grandfatheredFeatures,
+      creditsNotice: {
+        level: noticeLevel,
+        dismissed:
+          noticeLevel !== null && viewer?.creditsNoticeDismissed === creditsNoticeKey(monthKeyOf(today), noticeLevel),
+      },
     }
+  }
+
+  /** Closes the credits notice for this user, at the level it's showing now, until next month. */
+  async dismissCreditsNotice(clubId: string, userId: number): Promise<void> {
+    const { creditsNotice, aiCredits } = await this.overview(clubId)
+    if (creditsNotice.level === null) return
+    await this.prisma.user.updateMany({
+      where: { id: userId, clubId },
+      data: { creditsNoticeDismissed: creditsNoticeKey(aiCredits.month, creditsNotice.level) },
+    })
   }
 
   /** Whether the club's plan includes a module (always, for a club that predates the plans). */

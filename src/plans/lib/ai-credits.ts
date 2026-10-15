@@ -59,3 +59,17 @@ const MONTHS = [
 export function monthName(monthKey: string): string {
   return MONTHS[Number(monthKey.slice(5, 7)) - 1] ?? monthKey
 }
+
+/** Level of the owner's "te quedan pocos créditos" notice: against plan + pack credits. */
+export type CreditsNoticeLevel = 80 | 100
+
+export function creditsNoticeLevel(used: number, available: number | null): CreditsNoticeLevel | null {
+  if (!available) return null
+  const percent = Math.floor((used * 100) / available)
+  return percent >= 100 ? 100 : percent >= 80 ? 80 : null
+}
+
+/** What `User.creditsNoticeDismissed` stores for a closed notice: "2026-10:80". */
+export function creditsNoticeKey(month: string, level: CreditsNoticeLevel): string {
+  return `${month}:${level}`
+}
