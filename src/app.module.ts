@@ -9,6 +9,7 @@ import { CryptoModule } from './common/crypto/crypto.module'
 import { StorageModule } from './storage/storage.module'
 import { PricingModule } from './pricing/pricing.module'
 import { PlansModule } from './plans/plans.module'
+import { BillingModule } from './billing/billing.module'
 import { AuthModule } from './auth/auth.module'
 import { UsersModule } from './users/users.module'
 import { OnboardingModule } from './onboarding/onboarding.module'
@@ -48,6 +49,7 @@ import { FixedConfirmationsModule } from './fixed-confirmations/fixed-confirmati
     StorageModule,
     PricingModule,
     PlansModule,
+    BillingModule,
     AuthModule,
     UsersModule,
     OnboardingModule,

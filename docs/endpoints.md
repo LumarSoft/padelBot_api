@@ -1605,6 +1605,111 @@ Disconnects the club's MercadoPago account (clears stored tokens). **Owner only.
 
 `403 Forbidden` — caller is not the club owner
 
+## Billing (credits and credit packs)
+
+What a club pays Lumarsoft beyond its plan. Credits are one per WhatsApp message the bot sends;
+a pack adds credits that are spent after the month's plan credits (soonest expiry first) and
+expire 6 months after MercadoPago approves the payment. Packs are paid with MercadoPago Checkout
+Pro into **Lumarsoft's** account (`BILLING_MP_ACCESS_TOKEN`), never the club's.
+
+### GET /billing
+
+The owner's "Facturación" page in one call: plan, renewal date (`currentPeriodEnd`, or
+`trialEndsAt` on a trial), this month's credits, packs left, purchase history and the pack
+catalog. Purchases still waiting for MercadoPago (an abandoned checkout) are left out.
+
+**Auth required:** Yes (OWNER only)
+
+`200 OK`
+
+```json
+{
+  "plan": { "key": "bandeja", "name": "Bandeja", "known": true },
+  "subscription": { "status": "ACTIVE", "severity": "ok", "renewsAt": "2026-11-10T21:00:00.000Z" },
+  "credits": {
+    "month": "2026-10",
+    "used": 2150,
+    "included": 2000,
+    "fromPacks": 150,
+    "extraBalance": 850,
+    "available": 3000,
+    "percent": 107
+  },
+  "packs": [{ "id": "clx…", "credits": 1000, "remaining": 850, "expiresAt": "2027-04-12T15:00:00.000Z" }],
+  "purchases": [
+    {
+      "id": "clx…",
+      "packKey": "pack-1000",
+      "credits": 1000,
+      "priceCents": 8999900,
+      "status": "APPROVED",
+      "createdAt": "2026-10-12T14:58:00.000Z",
+      "approvedAt": "2026-10-12T15:00:00.000Z",
+      "expiresAt": "2027-04-12T15:00:00.000Z"
+    }
+  ],
+  "catalog": [
+    { "key": "pack-500", "credits": 500, "priceCents": 4999900, "popular": false },
+    { "key": "pack-1000", "credits": 1000, "priceCents": 8999900, "popular": true },
+    { "key": "pack-2500", "credits": 2500, "priceCents": 19999900, "popular": false }
+  ],
+  "validityMonths": 6,
+  "canBuy": true
+}
+```
+
+`403 Forbidden` — caller is not the club owner
+
+### POST /billing/credit-packs
+
+Starts a pack purchase: stores it as `PENDING` and creates the MercadoPago preference. The panel
+sends the owner to `checkoutUrl`; MercadoPago returns them to `/panel/facturacion?compra=<id>`.
+
+**Auth required:** Yes (OWNER only)
+
+**Request body**
+
+| Field   | Type   | Required | Constraints                                  |
+| ------- | ------ | -------- | -------------------------------------------- |
+| packKey | string | Yes      | `pack-500` \| `pack-1000` \| `pack-2500`     |
+
+`201 Created`
+
+```json
+{ "purchaseId": "clx…", "checkoutUrl": "https://www.mercadopago.com.ar/checkout/v1/redirect?pref_id=…" }
+```
+
+`403 Forbidden` — not the owner, or the subscription is no longer active ·
+`503 Service Unavailable` — `BILLING_MP_ACCESS_TOKEN` is not set, or MercadoPago didn't answer
+
+### POST /billing/credit-packs/:id/confirm
+
+The owner is back from MercadoPago with its `payment_id`. The payment is fetched from MercadoPago
+(never trusted from the URL), must belong to this purchase, and is applied exactly like the
+webhook: approved → the pack is credited (once); rejected/cancelled → `REJECTED`; pending → no
+change. Lets a local panel (no public webhook) and a fast return both work.
+
+**Auth required:** Yes (OWNER only)
+
+**Request body** — `{ "paymentId": "123456789" }` (digits)
+
+`200 OK` — the purchase (`status` `PENDING` | `APPROVED` | `REJECTED`) ·
+`400 Bad Request` — the payment belongs to another purchase · `404 Not Found`
+
+### POST /billing/mercadopago/webhook
+
+MercadoPago's payment notifications for Lumarsoft's account (`notification_url` of each pack
+preference, built from `API_PUBLIC_URL`). Checks `x-signature` (HMAC-SHA256 with
+`BILLING_MP_WEBHOOK_SECRET` over `id:<data.id>;request-id:<x-request-id>;ts:<ts>;`), fetches the
+payment from MercadoPago and applies it. Idempotent: `mpPaymentId` is unique and a pack is only
+approved once. Anything that isn't a pack payment (`external_reference` without the
+`gtp-credits:` prefix) is ignored.
+
+**Auth required:** No (signature)
+
+`200 OK` — `{ "received": true }` · `403 Forbidden` — bad signature ·
+`500` — MercadoPago unreachable (MercadoPago retries)
+
 ## Products
 
 The club's kiosk catalog (balls, drinks, snacks, accessories). Stock is **opt-in per product**:
