@@ -701,6 +701,13 @@ function modelPriceOverride(): { input: number; output: number } | null {
   return Number.isFinite(input) && Number.isFinite(output) && input > 0 ? { input, output } : null
 }
 
+/** The chat model and what it costs per million tokens (USD), as the cost log prices it. */
+export function chatModelPricing(): { model: string; inputPerMTok: number; outputPerMTok: number } {
+  const model = chatModel()
+  const prices = modelPriceOverride() ?? MODEL_PRICES[model] ?? MODEL_PRICES['gpt-4o-mini']
+  return { model, inputPerMTok: prices.input, outputPerMTok: prices.output }
+}
+
 /** What a transfer receipt photo says. Every field may be null when it isn't legible. */
 export interface ReceiptReading {
   isTransferReceipt: boolean

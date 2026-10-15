@@ -20,6 +20,7 @@ import {
   usdToArsCents,
 } from './lib/profitability'
 import { ExchangeRateService, UsdArs } from './exchange-rate.service'
+import { chatModelPricing } from '../llm/llm.service'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -49,6 +50,25 @@ export interface ProfitabilityReport {
   /** Where IVA lands (see TAX_REGIME), and MercadoPago's fee on packs. */
   taxRegime: TaxRegime
   mpFeePercent: number
+  /**
+   * The month's numbers step by step (real clubs only), so the console can explain the margin:
+   * what the AI did and cost, what Meta billed, how dollars became pesos.
+   */
+  breakdown: {
+    ai: {
+      model: string
+      inputPerMTokUsd: number
+      outputPerMTokUsd: number
+      /** AI steps: messages understood, audios transcribed, images and receipts read. */
+      steps: number
+      inputTokens: number
+      outputTokens: number
+      costUsd: number
+    }
+    meta: { messages: number; free: number; paid: number; costUsd: number }
+    /** Pesos per dollar actually paid: the quote, plus the IVA on monotributo. */
+    effectiveRate: number
+  }
   totals: {
     /** What the clubs paid, IVA included. */
     grossRevenueCents: number
@@ -102,7 +122,7 @@ export class OpsProfitabilityService {
       this.prisma.llmUsageDaily.groupBy({
         by: ['clubId'],
         where: { dateKey: { gte: from, lte: to } },
-        _sum: { costMicroUsd: true },
+        _sum: { costMicroUsd: true, calls: true, inputTokens: true, outputTokens: true },
       }),
       // A day either side, then filtered by the club-local day: approvedAt is an instant.
       this.prisma.creditPackPurchase.findMany({
@@ -164,6 +184,19 @@ export class OpsProfitabilityService {
     })
 
     const counted = rows.filter(row => !row.isDemo)
+    const countedIds = new Set(counted.map(row => row.id))
+    const aiTotals = ai
+      .filter(row => countedIds.has(row.clubId))
+      .reduce(
+        (acc, row) => ({
+          steps: acc.steps + (row._sum.calls ?? 0),
+          inputTokens: acc.inputTokens + (row._sum.inputTokens ?? 0),
+          outputTokens: acc.outputTokens + (row._sum.outputTokens ?? 0),
+          costMicroUsd: acc.costMicroUsd + (row._sum.costMicroUsd ?? 0),
+        }),
+        { steps: 0, inputTokens: 0, outputTokens: 0, costMicroUsd: 0 },
+      )
+    const pricing = chatModelPricing()
     const sum = (pick: (row: ClubProfitRow) => number) => counted.reduce((total, row) => total + pick(row), 0)
     const revenueCents = sum(r => r.revenue.totalCents)
     const costCents = sum(r => r.cost.totalCents)
@@ -179,6 +212,24 @@ export class OpsProfitabilityService {
       usdArs,
       taxRegime: regime,
       mpFeePercent: feePercent,
+      breakdown: {
+        ai: {
+          model: pricing.model,
+          inputPerMTokUsd: pricing.inputPerMTok,
+          outputPerMTokUsd: pricing.outputPerMTok,
+          steps: aiTotals.steps,
+          inputTokens: aiTotals.inputTokens,
+          outputTokens: aiTotals.outputTokens,
+          costUsd: aiTotals.costMicroUsd / 1_000_000,
+        },
+        meta: {
+          messages: sum(r => r.messages.total),
+          free: sum(r => r.messages.free),
+          paid: sum(r => r.messages.paid),
+          costUsd: sum(r => r.messages.paid) * priceUsd,
+        },
+        effectiveRate: rate,
+      },
       totals: {
         grossRevenueCents: sum(r => r.revenue.grossCents),
         revenueCents,

@@ -75,7 +75,15 @@ describe('OpsProfitabilityService.report', () => {
           { clubId: 'demo', phoneNumberId: 'n3', _sum: { botService: 5_000, staffService: 0, utility: 0 } },
         ]),
       },
-      llmUsageDaily: { groupBy: jest.fn().mockResolvedValue([{ clubId: 'c1', _sum: { costMicroUsd: 2_000_000 } }]) },
+      llmUsageDaily: {
+        groupBy: jest.fn().mockResolvedValue([
+          {
+            clubId: 'c1',
+            _sum: { costMicroUsd: 2_000_000, calls: 1_800, inputTokens: 4_500_000, outputTokens: 300_000 },
+          },
+          { clubId: 'demo', _sum: { costMicroUsd: 9_000_000, calls: 9_000, inputTokens: 1, outputTokens: 1 } },
+        ]),
+      },
       creditPackPurchase: {
         findMany: jest
           .fn()
@@ -116,6 +124,19 @@ describe('OpsProfitabilityService.report', () => {
     expect(report.totals.revenueCents).toBe(11_003_989)
     expect(report.totals.messages.total).toBe(1_820)
     expect(report.clubs.find(c => c.id === 'demo')!.isDemo).toBe(true)
+  })
+
+  it('explains the month step by step, real clubs only', async () => {
+    const report = await setup().report('2026-10')
+
+    expect(report.breakdown.ai).toMatchObject({
+      steps: 1_800,
+      inputTokens: 4_500_000,
+      outputTokens: 300_000,
+      costUsd: 2,
+    })
+    expect(report.breakdown.meta).toEqual({ messages: 1_820, free: 1_200, paid: 620, costUsd: 620 * 0.026 })
+    expect(report.breakdown.effectiveRate).toBe(1000)
   })
 
   it('on monotributo keeps the whole price and adds the digital-services IVA to Meta and OpenAI', async () => {

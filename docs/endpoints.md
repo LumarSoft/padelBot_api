@@ -2980,7 +2980,10 @@ costs (Meta's WhatsApp messages + OpenAI), and the margin. IVA follows Lumarsoft
 `monotributo` (default) keeps the whole price as revenue and adds the 21% IVA on digital services
 (Meta, OpenAI) and on MercadoPago's fee to the costs; `inscripto` takes the 21% IVA out of the
 prices instead. Packs also lose MercadoPago's fee (`MP_FEE_PERCENT`, default 6.29);
-`revenue.grossCents` is what the club actually paid. Worst first: losses (`negative`),
+`revenue.grossCents` is what the club actually paid.
+`breakdown` walks the month's totals step by step (real clubs only): AI steps, tokens and the
+model's price per million tokens; Meta messages free vs billed; and the pesos per dollar actually
+paid (`effectiveRate`: the quote, plus 21% IVA on monotributo). Worst first: losses (`negative`),
 then thin margins (`low`, under 30%), then the rest. `noRevenue` marks a club that costs money
 without paying yet (trial). The sales demo is listed (`isDemo`) but left out of `totals`.
 
@@ -3003,6 +3006,19 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
   "metaMessagePriceUsd": 0.026,
   "usdArs": { "rate": 1995.5, "quote": "tarjeta", "source": "dolarapi", "dateKey": "2026-10-14", "stale": false },
   "taxRegime": "monotributo",
+  "breakdown": {
+    "ai": {
+      "model": "gpt-6-luna",
+      "inputPerMTokUsd": 0.1,
+      "outputPerMTokUsd": 0.5,
+      "steps": 1800,
+      "inputTokens": 4500000,
+      "outputTokens": 300000,
+      "costUsd": 0.6
+    },
+    "meta": { "messages": 1600, "free": 1000, "paid": 600, "costUsd": 15.6 },
+    "effectiveRate": 2414.56
+  },
   "mpFeePercent": 6.29,
   "totals": {
     "grossRevenueCents": 13999800,
