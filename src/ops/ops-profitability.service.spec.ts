@@ -23,14 +23,13 @@ describe('messageCost', () => {
 })
 
 describe('netCents and the tax regime', () => {
-  it('on monotributo keeps the whole price and pays the IVA of the MercadoPago fee', () => {
-    expect(netCents(10_000, { regime: 'monotributo' })).toBe(10_000)
-    expect(netCents(10_000, { regime: 'monotributo', feePercent: 6.29 })).toBe(9_239)
+  it('on monotributo keeps the whole price and pays the IVA of what it buys in dollars', () => {
+    expect(netCents(10_000, 'monotributo')).toBe(10_000)
     expect(effectiveRate(2000, 'monotributo')).toBeCloseTo(2420)
   })
 
   it('as inscripto takes the IVA out of the price, and credits the IVA it pays', () => {
-    expect(netCents(12_100, { regime: 'inscripto' })).toBe(10_000)
+    expect(netCents(12_100, 'inscripto')).toBe(10_000)
     expect(effectiveRate(2000, 'inscripto')).toBe(2000)
   })
 })
@@ -84,11 +83,6 @@ describe('OpsProfitabilityService.report', () => {
           { clubId: 'demo', _sum: { costMicroUsd: 9_000_000, calls: 9_000, inputTokens: 1, outputTokens: 1 } },
         ]),
       },
-      creditPackPurchase: {
-        findMany: jest
-          .fn()
-          .mockResolvedValue([{ clubId: 'c1', priceCents: 8_999_900, approvedAt: new Date('2026-10-12T15:00:00Z') }]),
-      },
     }
     // A round dollar keeps the arithmetic readable: $1.000 per US$.
     const rates = {
@@ -97,7 +91,7 @@ describe('OpsProfitabilityService.report', () => {
     return new OpsProfitabilityService(prisma as unknown as PrismaService, rates as unknown as ExchangeRateService)
   }
 
-  it('adds plan and packs, costs Meta and OpenAI in pesos, and leaves the demo out of the totals', async () => {
+  it('takes the plan net of IVA, costs Meta and OpenAI in pesos, and leaves the demo out of the totals', async () => {
     const report = await setup().report('2026-10')
     const norte = report.clubs.find(c => c.id === 'c1')!
 
@@ -105,13 +99,8 @@ describe('OpsProfitabilityService.report', () => {
     expect(norte.messages).toEqual({ total: 1_600, free: 1_000, paid: 600 })
     expect(norte.cost.metaCents).toBe(15_600_00)
     expect(norte.cost.aiCents).toBe(2_000_00)
-    // Revenue net of IVA, and the pack also net of MercadoPago's 6,29%.
-    expect(norte.revenue).toEqual({
-      grossCents: 13_999_800,
-      planCents: 4_132_149,
-      packsCents: 6_871_840,
-      totalCents: 11_003_989,
-    })
+    // Revenue net of IVA.
+    expect(norte.revenue).toEqual({ grossCents: 4_999_900, totalCents: 4_132_149 })
     expect(norte.credits).toEqual({ used: 1_500, included: 1_000 })
 
     const trial = report.clubs.find(c => c.id === 'c2')!
@@ -120,8 +109,8 @@ describe('OpsProfitabilityService.report', () => {
     expect(trial.messages.paid).toBe(20)
     expect(trial.flag).toBe('noRevenue')
 
-    expect(report.totals.grossRevenueCents).toBe(13_999_800)
-    expect(report.totals.revenueCents).toBe(11_003_989)
+    expect(report.totals.grossRevenueCents).toBe(4_999_900)
+    expect(report.totals.revenueCents).toBe(4_132_149)
     expect(report.totals.messages.total).toBe(1_820)
     expect(report.clubs.find(c => c.id === 'demo')!.isDemo).toBe(true)
   })
@@ -145,7 +134,7 @@ describe('OpsProfitabilityService.report', () => {
     const norte = report.clubs.find(c => c.id === 'c1')!
 
     expect(report.taxRegime).toBe('monotributo')
-    expect(norte.revenue.planCents).toBe(4_999_900)
+    expect(norte.revenue.totalCents).toBe(4_999_900)
     // 600 billed messages × US$0,026 × ($1.000 + 21% IVA).
     expect(norte.cost.metaCents).toBe(18_876_00)
   })

@@ -7,9 +7,8 @@
  * reading receipts is included and costs nothing — the AI is cheap, Meta's per-message price is
  * what costs us. Replies the staff types from the panel are never the club's credits.
  *
- * Past the month's plan credits, messages spend the club's credit packs (soonest expiry first).
- * Without packs, going over is only measured: the bot keeps working, the owner sees it in the
- * panel and ops gets an alert. Nothing here may cut the bot.
+ * Going over the month's plan credits is only measured: the bot keeps working, the owner sees it
+ * in the panel and ops gets an alert. Nothing here may cut the bot.
  */
 
 /** Usage that triggers an ops alert, once per club and month each. */
@@ -60,12 +59,12 @@ export function monthName(monthKey: string): string {
   return MONTHS[Number(monthKey.slice(5, 7)) - 1] ?? monthKey
 }
 
-/** Level of the owner's "te quedan pocos créditos" notice: against plan + pack credits. */
+/** Level of the owner's "te quedan pocos créditos" notice: against the plan's credits. */
 export type CreditsNoticeLevel = 80 | 100
 
-export function creditsNoticeLevel(used: number, available: number | null): CreditsNoticeLevel | null {
-  if (!available) return null
-  const percent = Math.floor((used * 100) / available)
+export function creditsNoticeLevel(used: number, allowance: number | null): CreditsNoticeLevel | null {
+  const percent = creditPercent(used, allowance)
+  if (percent === null) return null
   return percent >= 100 ? 100 : percent >= 80 ? 80 : null
 }
 

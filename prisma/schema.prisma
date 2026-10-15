@@ -159,7 +159,6 @@ model Club {
   bookingPlayerPayments BookingPlayerPayment[]
   llmUsageDaily        LlmUsageDaily[]
   whatsAppMessageDaily WhatsAppMessageDaily[]
-  creditPackPurchases  CreditPackPurchase[]
   helpSearchMisses     HelpSearchMiss[]
 }
 
@@ -828,46 +827,12 @@ model WhatsAppMessageDaily {
   staffService  Int      @default(0)
   /// Utility templates (reminder, fijo confirmation): credits for the club, always billed by Meta.
   utility       Int      @default(0)
-  /// Of this day's credits, how many came out of a credit pack (past the month's plan credits).
-  packCredits   Int      @default(0)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   @@unique([phoneNumberId, dateKey])
   @@index([clubId, dateKey])
   @@index([dateKey])
-}
-
-enum CreditPackStatus {
-  PENDING
-  APPROVED
-  REJECTED
-}
-
-/// A one-off pack of extra credits bought with MercadoPago Checkout Pro, paid into LUMARSOFT's
-/// account (not the club's). Credited when MP approves the payment; spent after the month's plan
-/// credits, soonest expiry first; expires 6 months after approval.
-model CreditPackPurchase {
-  id              String           @id @default(cuid())
-  clubId          String
-  club            Club             @relation(fields: [clubId], references: [id], onDelete: Cascade)
-  /// Catalog key (`billing/lib/credit-packs.ts`), with credits and price copied at purchase time.
-  packKey         String
-  credits         Int
-  priceCents      Int
-  status          CreditPackStatus @default(PENDING)
-  creditsUsed     Int              @default(0)
-  mpPreferenceId  String?
-  /// The approved MercadoPago payment. Unique, so a replayed webhook can't credit twice.
-  mpPaymentId     String?          @unique
-  approvedAt      DateTime?
-  expiresAt       DateTime?
-  createdByUserId Int?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-
-  @@index([clubId, status])
-  @@index([approvedAt])
 }
 
 /// The dollar the ops console turns Meta's and OpenAI's USD costs into pesos with. Fetched every

@@ -41,7 +41,6 @@ describe('PlansService modules', () => {
       court: { count: jest.fn().mockResolvedValue(1) },
       user: { count: jest.fn().mockResolvedValue(1) },
       whatsAppMessageDaily: { aggregate: jest.fn().mockResolvedValue({ _sum: {} }) },
-      creditPackPurchase: { findMany: jest.fn().mockResolvedValue([]) },
     }
     const db = prisma as unknown as PrismaService
     const overview = await new PlansService(db, new CreditsService(db)).overview('c1')

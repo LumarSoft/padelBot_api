@@ -10,7 +10,7 @@ function club(over: Partial<ClubHealthInput> = {}): ClubHealthInput {
     subscription: { subscriptionStatus: 'ACTIVE', severity: 'ok', daysLeft: null },
     readiness: { courts: 3, paymentsConfigured: true, whatsappLines: 1, ready: true },
     activity: { bookingsBot: 120, dormant: false },
-    credits: { used: 900, available: 2_000 },
+    credits: { used: 900, limit: 2_000 },
     ...over,
   }
 }
@@ -50,8 +50,8 @@ describe('clubHealth', () => {
     )
   })
 
-  it('flags a club past its plan and pack credits', () => {
-    expect(clubHealth(club({ credits: { used: 2_300, available: 2_000 } }), NOW)).toEqual({
+  it('flags a club past its plan credits', () => {
+    expect(clubHealth(club({ credits: { used: 2_300, limit: 2_000 } }), NOW)).toEqual({
       status: 'overCredits',
       reasons: ['Pasado de créditos: 2300 de 2000 este mes'],
     })

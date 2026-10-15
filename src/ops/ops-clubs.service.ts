@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
-import { CreditPackStatus, Role, SubscriptionStatus } from 'generated/prisma/client'
+import { Role, SubscriptionStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 import { subscriptionState, SubscriptionState } from '../clubs/lib/subscription'
@@ -66,11 +66,7 @@ export interface OpsClubRow {
     /** Active users, the owner included. */
     users: PlanUsage
     /** This calendar month's AI credits. Over 100% never cuts the bot: it's a sales call. */
-    aiCredits: PlanUsage & {
-      percent: number | null
-      /** Plan + pack credits spent this month + pack credits left (null = no allowance). */
-      available: number | null
-    }
+    aiCredits: PlanUsage & { percent: number | null }
     /** Predates the plans: keeps every module whatever its plan, until we clear it. */
     grandfatheredFeatures: boolean
   }
@@ -106,7 +102,7 @@ export class OpsClubsService {
     const sinceKey = shiftDateKey(todayKey(), -(ACTIVITY_DAYS - 1))
     const today = todayKey()
 
-    const [clubs, bookings, conversations, logins, llm, activeUsers, monthCredits, packs] = await Promise.all([
+    const [clubs, bookings, conversations, logins, llm, activeUsers, monthCredits] = await Promise.all([
       this.prisma.club.findMany({
         orderBy: { createdAt: 'desc' },
         select: {
@@ -154,11 +150,7 @@ export class OpsClubsService {
       this.prisma.whatsAppMessageDaily.groupBy({
         by: ['clubId'],
         where: { dateKey: { gte: monthStartKey(today), lte: today } },
-        _sum: { botService: true, utility: true, packCredits: true },
-      }),
-      this.prisma.creditPackPurchase.findMany({
-        where: { status: CreditPackStatus.APPROVED, expiresAt: { gt: new Date() } },
-        select: { clubId: true, credits: true, creditsUsed: true },
+        _sum: { botService: true, utility: true },
       }),
     ])
 
@@ -167,12 +159,6 @@ export class OpsClubsService {
     const llmByClub = new Map(llm.map(l => [l.clubId, l._sum.costMicroUsd ?? 0]))
     const usersByClub = new Map(activeUsers.map(u => [u.clubId, u._count]))
     const creditsByClub = new Map(monthCredits.map(c => [c.clubId, (c._sum.botService ?? 0) + (c._sum.utility ?? 0)]))
-    const fromPacksByClub = new Map(monthCredits.map(c => [c.clubId, c._sum.packCredits ?? 0]))
-    const packBalanceByClub = new Map<string, number>()
-    for (const pack of packs) {
-      const left = Math.max(0, pack.credits - pack.creditsUsed)
-      packBalanceByClub.set(pack.clubId, (packBalanceByClub.get(pack.clubId) ?? 0) + left)
-    }
 
     const activityByClub = new Map<string, { bot: number; panel: number; deposits: number }>()
     for (const b of bookings) {
@@ -202,10 +188,6 @@ export class OpsClubsService {
       const definition = planDefinition(club.plan)
       const credits = creditsByClub.get(club.id) ?? 0
       const allowance = definition?.aiCredits ?? null
-      const available =
-        allowance === null
-          ? null
-          : allowance + (fromPacksByClub.get(club.id) ?? 0) + (packBalanceByClub.get(club.id) ?? 0)
 
       const paymentsReady = paymentsConfigured(club)
       const ready = club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0
@@ -240,7 +222,7 @@ export class OpsClubsService {
           subscription,
           readiness,
           activity: clubActivity,
-          credits: { used: credits, available },
+          credits: { used: credits, limit: allowance },
         }),
         subscription,
         readiness,
@@ -251,7 +233,7 @@ export class OpsClubsService {
           known: definition !== null,
           courts: { used: club._count.courts, limit: definition?.courts ?? null },
           users: { used: usersByClub.get(club.id) ?? 0, limit: definition?.users ?? null },
-          aiCredits: { used: credits, limit: allowance, percent: creditPercent(credits, allowance), available },
+          aiCredits: { used: credits, limit: allowance, percent: creditPercent(credits, allowance) },
           grandfatheredFeatures: club.grandfatheredFeatures,
         },
       }

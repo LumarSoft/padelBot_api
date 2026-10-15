@@ -4,7 +4,6 @@ import { PrismaService } from '../prisma/prisma.service'
 import { todayKey } from '../availability/lib/datetime'
 import { notifyOps } from '../common/ops-alert'
 import { schedulerEnabled } from '../common/scheduling'
-import { CreditsService } from './credits.service'
 import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
 import {
   AiCreditAlertPercent,
@@ -19,17 +18,13 @@ import { nextPlanWithRoom, planDefinition, PlanDefinition } from './lib/plans'
 /**
  * Tells ops when a club nears or passes its monthly AI credits (80% / 100%), once per threshold
  * and month. Credits are the messages the bot sends; going over is never enforced — the bot keeps
- * answering, paid from the club's credit packs if it has any — so this alert is the cue to follow
- * up: a pack or a bigger plan.
+ * answering — so this alert is the cue to follow up with a bigger plan.
  */
 @Injectable()
 export class AiCreditAlertsService {
   private readonly logger = new Logger(AiCreditAlertsService.name)
 
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly credits: CreditsService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   @Cron(CronExpression.EVERY_HOUR)
   async checkUsage(): Promise<void> {
@@ -67,9 +62,7 @@ export class AiCreditAlertsService {
       const alreadySent = club.aiCreditsAlertMonth === month ? (club.aiCreditsAlertPercent ?? 0) : 0
       if (crossed <= alreadySent) continue
 
-      const packs = await this.credits.activePacks(club.id)
-      const extra = packs.reduce((sum, pack) => sum + pack.remaining, 0)
-      await notifyOps(aiCreditAlert(club.name, plan, used, crossed, month, extra))
+      await notifyOps(aiCreditAlert(club.name, plan, used, crossed, month))
       await this.prisma.club.update({
         where: { id: club.id },
         data: { aiCreditsAlertMonth: month, aiCreditsAlertPercent: crossed },
@@ -87,14 +80,12 @@ export function aiCreditAlert(
   used: number,
   crossed: AiCreditAlertPercent,
   month: string,
-  extraBalance = 0,
 ): string {
   // A plan with more credits than both this one and what the club already uses.
   const next = nextPlanWithRoom(p => p.aiCredits, Math.max(used, plan.aiCredits))
-  const offer = next ? ` Ofrecele un paquete de créditos o pasar a ${next.name}.` : ' Ofrecele un paquete de créditos.'
+  const offer = next ? ` Ofrecele pasar a ${next.name}.` : ' Ningún plan le alcanza: hablalo con el club.'
   const usage = `${count(used)} de ${count(plan.aiCredits)} créditos de ${monthName(month)} (plan ${plan.name})`
-  const packs = extraBalance > 0 ? ` Le quedan ${count(extraBalance)} créditos de paquetes.` : ''
   return crossed === 100
-    ? `🔴 *${clubName}* superó sus créditos: ${usage}. El bot sigue atendiendo igual.${packs}${offer}`
-    : `🟡 *${clubName}* ya usó el ${creditPercent(used, plan.aiCredits)}%: ${usage}.${packs}${offer}`
+    ? `🔴 *${clubName}* superó sus créditos: ${usage}. El bot sigue atendiendo igual.${offer}`
+    : `🟡 *${clubName}* ya usó el ${creditPercent(used, plan.aiCredits)}%: ${usage}.${offer}`
 }

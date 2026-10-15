@@ -1347,10 +1347,7 @@ Open to STAFF too.
     "used": 640,
     "limit": 1000,
     "month": "2026-10",
-    "percent": 64,
-    "fromPacks": 0,
-    "extraBalance": 500,
-    "available": 1500
+    "percent": 64
   },
   "features": {
     "fixedConfirmation": { "enabled": false, "plan": "Bandeja" },
@@ -1364,8 +1361,8 @@ Open to STAFF too.
 }
 ```
 
-`creditsNotice` drives the owner's "te quedan pocos créditos" banner: `level` 80 / 100 of plan +
-pack credits (null below 80%), and whether the calling user closed it at that level this month.
+`creditsNotice` drives the owner's "te quedan pocos créditos" banner: `level` 80 / 100 of the
+plan's credits (null below 80%), and whether the calling user closed it at that level this month.
 
 `features` says whether the club may use (turn on) each module and the cheapest plan that
 includes it. Clubs that existed before the plans were enforced have `grandfatheredFeatures`
@@ -1375,9 +1372,8 @@ the club already has running keeps working.
 `aiCredits` counts this calendar month (club-local): one credit per WhatsApp message the bot
 sends (replies, buttons, payment notices, reminders, fijo confirmations). Understanding audios
 and reading receipts costs nothing; replies the staff types from the panel never count. `limit`
-is the plan's (Saque 1.000, Bandeja 2.000, Smash 3.000); past it, messages spend credit packs
-(`fromPacks`), and `available` = plan credits + pack credits spent this month + `extraBalance`
-(pack credits left). Going over never cuts the bot (ops is alerted at 80% and 100%).
+is the plan's (Saque 1.000, Bandeja 2.000, Smash 3.000). Going over never cuts the bot (ops is
+alerted at 80% and 100%).
 
 ### POST /clubs/me/plan/credits-notice/dismiss
 
@@ -1619,18 +1615,15 @@ Disconnects the club's MercadoPago account (clears stored tokens). **Owner only.
 
 `403 Forbidden` — caller is not the club owner
 
-## Billing (credits and credit packs)
+## Billing
 
-What a club pays Lumarsoft beyond its plan. Credits are one per WhatsApp message the bot sends;
-a pack adds credits that are spent after the month's plan credits (soonest expiry first) and
-expire 6 months after MercadoPago approves the payment. Packs are paid with MercadoPago Checkout
-Pro into **Lumarsoft's** account (`BILLING_MP_ACCESS_TOKEN`), never the club's.
+The owner's "Facturación" page. Credits are one per WhatsApp message the bot sends, counted
+against the plan's monthly credits; there is nothing to buy.
 
 ### GET /billing
 
 The owner's "Facturación" page in one call: plan, renewal date (`currentPeriodEnd`, or
-`trialEndsAt` on a trial), this month's credits, packs left, purchase history and the pack
-catalog. Purchases still waiting for MercadoPago (an abandoned checkout) are left out.
+`trialEndsAt` on a trial) and this month's credits.
 
 **Auth required:** Yes (OWNER only)
 
@@ -1640,89 +1633,11 @@ catalog. Purchases still waiting for MercadoPago (an abandoned checkout) are lef
 {
   "plan": { "key": "bandeja", "name": "Bandeja", "known": true },
   "subscription": { "status": "ACTIVE", "severity": "ok", "renewsAt": "2026-11-10T21:00:00.000Z" },
-  "credits": {
-    "month": "2026-10",
-    "used": 2150,
-    "included": 2000,
-    "fromPacks": 150,
-    "extraBalance": 850,
-    "available": 3000,
-    "percent": 107
-  },
-  "packs": [{ "id": "clx…", "credits": 1000, "remaining": 850, "expiresAt": "2027-04-12T15:00:00.000Z" }],
-  "purchases": [
-    {
-      "id": "clx…",
-      "packKey": "pack-1000",
-      "credits": 1000,
-      "priceCents": 8999900,
-      "status": "APPROVED",
-      "createdAt": "2026-10-12T14:58:00.000Z",
-      "approvedAt": "2026-10-12T15:00:00.000Z",
-      "expiresAt": "2027-04-12T15:00:00.000Z"
-    }
-  ],
-  "catalog": [
-    { "key": "pack-500", "credits": 500, "priceCents": 4999900, "popular": false },
-    { "key": "pack-1000", "credits": 1000, "priceCents": 8999900, "popular": true },
-    { "key": "pack-2500", "credits": 2500, "priceCents": 19999900, "popular": false }
-  ],
-  "validityMonths": 6,
-  "canBuy": true
+  "credits": { "month": "2026-10", "used": 2150, "included": 2000, "percent": 107 }
 }
 ```
 
 `403 Forbidden` — caller is not the club owner
-
-### POST /billing/credit-packs
-
-Starts a pack purchase: stores it as `PENDING` and creates the MercadoPago preference. The panel
-sends the owner to `checkoutUrl`; MercadoPago returns them to `/panel/facturacion?compra=<id>`.
-
-**Auth required:** Yes (OWNER only)
-
-**Request body**
-
-| Field   | Type   | Required | Constraints                                  |
-| ------- | ------ | -------- | -------------------------------------------- |
-| packKey | string | Yes      | `pack-500` \| `pack-1000` \| `pack-2500`     |
-
-`201 Created`
-
-```json
-{ "purchaseId": "clx…", "checkoutUrl": "https://www.mercadopago.com.ar/checkout/v1/redirect?pref_id=…" }
-```
-
-`403 Forbidden` — not the owner, or the subscription is no longer active ·
-`503 Service Unavailable` — `BILLING_MP_ACCESS_TOKEN` is not set, or MercadoPago didn't answer
-
-### POST /billing/credit-packs/:id/confirm
-
-The owner is back from MercadoPago with its `payment_id`. The payment is fetched from MercadoPago
-(never trusted from the URL), must belong to this purchase, and is applied exactly like the
-webhook: approved → the pack is credited (once); rejected/cancelled → `REJECTED`; pending → no
-change. Lets a local panel (no public webhook) and a fast return both work.
-
-**Auth required:** Yes (OWNER only)
-
-**Request body** — `{ "paymentId": "123456789" }` (digits)
-
-`200 OK` — the purchase (`status` `PENDING` | `APPROVED` | `REJECTED`) ·
-`400 Bad Request` — the payment belongs to another purchase · `404 Not Found`
-
-### POST /billing/mercadopago/webhook
-
-MercadoPago's payment notifications for Lumarsoft's account (`notification_url` of each pack
-preference, built from `API_PUBLIC_URL`). Checks `x-signature` (HMAC-SHA256 with
-`BILLING_MP_WEBHOOK_SECRET` over `id:<data.id>;request-id:<x-request-id>;ts:<ts>;`), fetches the
-payment from MercadoPago and applies it. Idempotent: `mpPaymentId` is unique and a pack is only
-approved once. Anything that isn't a pack payment (`external_reference` without the
-`gtp-credits:` prefix) is ignored.
-
-**Auth required:** No (signature)
-
-`200 OK` — `{ "received": true }` · `403 Forbidden` — bad signature ·
-`500` — MercadoPago unreachable (MercadoPago retries)
 
 ## Products
 
@@ -2808,7 +2723,7 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
       "known": true,
       "courts": { "used": 2, "limit": 2 },
       "users": { "used": 1, "limit": 2 },
-      "aiCredits": { "used": 830, "limit": 1000, "percent": 83, "available": 1000 },
+      "aiCredits": { "used": 830, "limit": 1000, "percent": 83 },
       "grandfatheredFeatures": true
     }
   }
@@ -2818,14 +2733,14 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
 `health` is one word per club, the most urgent that applies (`lib/club-health.ts`), with every
 signal behind it in `reasons`: `inactive` (the bot no longer answers) · `atRisk` (lapsed, nobody
 opens the panel in 14 days, or a live club whose bot booked nothing in 30 days) · `overCredits`
-(past plan + pack credits this month) · `trialEnding` (5 days or less) · `setup` (can't take a
+(past its plan's credits this month) · `trialEnding` (5 days or less) · `setup` (can't take a
 booking: no courts, payments or WhatsApp) · `starting` (trial, already live) · `healthy`. Rows come
 sorted by that urgency, the sales demo (`isDemo`) last.
 
 `plan.aiCredits` is this calendar month (club-local): one credit per WhatsApp message the bot
 sends. Going over never cuts the bot; an hourly job posts to `OPS_ALERT_WEBHOOK_URL` when a club
-crosses 80% and 100% of its plan's credits (once each per month, the sales demo excluded), with
-the pack credits it has left. A send Meta refuses for payment (Graph code 131042) also alerts
+crosses 80% and 100% of its plan's credits (once each per month, the sales demo excluded), naming
+the plan to offer. A send Meta refuses for payment (Graph code 131042) also alerts
 ops, once an hour per number, because the bot is mute on that number until it's fixed.
 
 ### PATCH /ops/clubs/:id/subscription
@@ -2975,12 +2890,11 @@ took over). Costs are in **micro-USD** (integers; 1e-6 USD) and come from `LlmUs
 
 ### GET /ops/profitability
 
-Per club and month: what it pays us (plan + credit packs approved that month), what serving it
-costs (Meta's WhatsApp messages + OpenAI), and the margin. IVA follows Lumarsoft's `TAX_REGIME`:
-`monotributo` (default) keeps the whole price as revenue and adds the 21% IVA on digital services
-(Meta, OpenAI) and on MercadoPago's fee to the costs; `inscripto` takes the 21% IVA out of the
-prices instead. Packs also lose MercadoPago's fee (`MP_FEE_PERCENT`, default 6.29);
-`revenue.grossCents` is what the club actually paid.
+Per club and month: what it pays us (its plan), what serving it costs (Meta's WhatsApp messages +
+OpenAI), and the margin. IVA follows Lumarsoft's `TAX_REGIME`: `monotributo` (default) keeps the
+whole price as revenue and adds the 21% IVA on digital services (Meta, OpenAI) to the costs;
+`inscripto` takes the 21% IVA out of the prices instead. `revenue.grossCents` is what the club
+actually paid, `revenue.totalCents` what it leaves us.
 `breakdown` walks the month's totals step by step (real clubs only): AI steps, tokens and the
 model's price per million tokens; Meta messages free vs billed; and the pesos per dollar actually
 paid (`effectiveRate`: the quote, plus 21% IVA on monotributo). Worst first: losses (`negative`),
@@ -3020,15 +2934,14 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
     "meta": { "messages": 1600, "free": 1000, "paid": 600, "costUsd": 15.6 },
     "effectiveRate": 2414.56
   },
-  "mpFeePercent": 6.29,
   "totals": {
-    "grossRevenueCents": 13999800,
-    "revenueCents": 11003989,
+    "grossRevenueCents": 4999900,
+    "revenueCents": 4999900,
     "costCents": 2640000,
     "metaCents": 2340000,
     "aiCents": 300000,
-    "marginCents": 11359800,
-    "marginPercent": 81,
+    "marginCents": 2359900,
+    "marginPercent": 47,
     "messages": { "total": 1600, "free": 1000, "paid": 600 }
   },
   "clubs": [
@@ -3038,11 +2951,11 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
       "plan": "Saque",
       "subscriptionStatus": "ACTIVE",
       "isDemo": false,
-      "revenue": { "grossCents": 13999800, "planCents": 4132149, "packsCents": 6871840, "totalCents": 11003989 },
+      "revenue": { "grossCents": 4999900, "totalCents": 4999900 },
       "messages": { "total": 1600, "free": 1000, "paid": 600 },
       "cost": { "metaCents": 2340000, "aiCents": 300000, "totalCents": 2640000 },
-      "marginCents": 11359800,
-      "marginPercent": 81,
+      "marginCents": 2359900,
+      "marginPercent": 47,
       "flag": null,
       "credits": { "used": 1500, "included": 1000 }
     }

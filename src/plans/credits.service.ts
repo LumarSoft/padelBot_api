@@ -1,41 +1,22 @@
 import { Injectable, Logger } from '@nestjs/common'
-import { CreditPackStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { todayKey } from '../availability/lib/datetime'
 import { KeyedSerialQueue } from '../common/keyed-serial-queue'
 import { monthStartKey } from './lib/ai-credits'
-import { planDefinition } from './lib/plans'
 
 /** What an outbound WhatsApp message is, for credits (bot) and for our Meta cost (all). */
 export type OutboundKind = 'botService' | 'staffService' | 'utility'
-
-/** A credit pack still usable: approved, not expired, with credits left. */
-export interface ActivePack {
-  id: string
-  credits: number
-  remaining: number
-  expiresAt: Date
-}
-
-/** The club's credits in one calendar month. */
-export interface MonthCredits {
-  /** Messages the bot sent this month (each one a credit). */
-  used: number
-  /** Of those, how many were paid from credit packs (past the plan's credits). */
-  fromPacks: number
-}
 
 /** Cache of phoneNumberId → clubId: lines almost never move, and every message asks. */
 const LINE_CACHE_MS = 10 * 60 * 1000
 
 /**
  * Counts the club's credits: one per WhatsApp message the bot sends. Every message the Graph API
- * accepts is recorded here (WhatsAppService), and a bot message past the month's plan credits
- * spends one credit of the club's soonest-expiring pack.
+ * accepts is recorded here (WhatsAppService).
  *
  * Recording never throws and never blocks a send — a lost count costs us a fraction of a cent of
  * visibility, a thrown error would cost a reply. Messages of one number are recorded in order
- * (KeyedSerialQueue) so two of them can't both take the last credit of a pack.
+ * (KeyedSerialQueue) so the day's first two can't race to create the same row.
  */
 @Injectable()
 export class CreditsService {
@@ -52,25 +33,13 @@ export class CreditsService {
       .catch(err => this.logger.error(`Could not record a WhatsApp message of ${phoneNumberId}`, err))
   }
 
-  /** The bot's messages this month (club-local) and how many came out of packs. */
-  async monthCredits(clubId: string, dateKey: string = todayKey()): Promise<MonthCredits> {
+  /** The credits the club used this month (club-local): the messages its bot sent. */
+  async monthUsed(clubId: string, dateKey: string = todayKey()): Promise<number> {
     const { _sum } = await this.prisma.whatsAppMessageDaily.aggregate({
       where: { clubId, dateKey: { gte: monthStartKey(dateKey), lte: dateKey } },
-      _sum: { botService: true, utility: true, packCredits: true },
+      _sum: { botService: true, utility: true },
     })
-    return { used: (_sum.botService ?? 0) + (_sum.utility ?? 0), fromPacks: _sum.packCredits ?? 0 }
-  }
-
-  /** Packs the club can still spend, soonest expiry first (the order they're spent in). */
-  async activePacks(clubId: string, now: Date = new Date()): Promise<ActivePack[]> {
-    const packs = await this.prisma.creditPackPurchase.findMany({
-      where: { clubId, status: CreditPackStatus.APPROVED, expiresAt: { gt: now } },
-      select: { id: true, credits: true, creditsUsed: true, expiresAt: true },
-      orderBy: [{ expiresAt: 'asc' }, { approvedAt: 'asc' }],
-    })
-    return packs
-      .filter(p => p.creditsUsed < p.credits)
-      .map(p => ({ id: p.id, credits: p.credits, remaining: p.credits - p.creditsUsed, expiresAt: p.expiresAt! }))
+    return (_sum.botService ?? 0) + (_sum.utility ?? 0)
   }
 
   private async record(phoneNumberId: string, kind: OutboundKind): Promise<void> {
@@ -81,30 +50,6 @@ export class CreditsService {
       where: { phoneNumberId_dateKey: { phoneNumberId, dateKey } },
       create: { clubId, phoneNumberId, dateKey, [kind]: 1 },
       update: { [kind]: { increment: 1 } },
-    })
-    if (kind !== 'staffService') await this.spendPackIfPastPlan(clubId, phoneNumberId, dateKey)
-  }
-
-  /** Past the month's plan credits, this message is paid by the soonest-expiring pack. */
-  private async spendPackIfPastPlan(clubId: string, phoneNumberId: string, dateKey: string): Promise<void> {
-    const [club, month] = await Promise.all([
-      this.prisma.club.findUnique({ where: { id: clubId }, select: { plan: true } }),
-      this.monthCredits(clubId, dateKey),
-    ])
-    const plan = club ? planDefinition(club.plan) : null
-    if (!plan || month.used <= plan.aiCredits) return
-
-    const [pack] = await this.activePacks(clubId)
-    if (!pack) return // No pack: the bot keeps going; the owner and ops are told elsewhere.
-    // Guarded on the count we read, so a concurrent spend from another instance can't overdraw.
-    const { count } = await this.prisma.creditPackPurchase.updateMany({
-      where: { id: pack.id, creditsUsed: pack.credits - pack.remaining },
-      data: { creditsUsed: { increment: 1 } },
-    })
-    if (count === 0) return
-    await this.prisma.whatsAppMessageDaily.update({
-      where: { phoneNumberId_dateKey: { phoneNumberId, dateKey } },
-      data: { packCredits: { increment: 1 } },
     })
   }
 

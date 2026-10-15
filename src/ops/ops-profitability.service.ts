@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common'
-import { CreditPackStatus, SubscriptionStatus } from 'generated/prisma/client'
+import { SubscriptionStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
-import { toDateKey, todayKey } from '../availability/lib/datetime'
+import { todayKey } from '../availability/lib/datetime'
 import { monthKeyOf } from '../plans/lib/ai-credits'
 import { planDefinition, planName } from '../plans/lib/plans'
 import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
@@ -12,7 +12,6 @@ import {
   messageCost,
   metaMessagePriceUsd,
   effectiveRate,
-  mpFeePercent,
   netCents,
   NumberMessages,
   taxRegime,
@@ -22,8 +21,6 @@ import {
 import { ExchangeRateService, UsdArs } from './exchange-rate.service'
 import { chatModelPricing } from '../llm/llm.service'
 
-const DAY_MS = 24 * 60 * 60 * 1000
-
 export interface ClubProfitRow {
   id: string
   name: string
@@ -31,8 +28,8 @@ export interface ClubProfitRow {
   subscriptionStatus: SubscriptionStatus
   /** The sales demo: shown, never added to the totals. */
   isDemo: boolean
-  /** What it pays (`grossCents`), and what that leaves us: without IVA, packs without MP's fee. */
-  revenue: { grossCents: number; planCents: number; packsCents: number; totalCents: number }
+  /** What its plan pays (`grossCents`), and what that leaves us once IVA is out (`totalCents`). */
+  revenue: { grossCents: number; totalCents: number }
   messages: { total: number; free: number; paid: number }
   cost: { metaCents: number; aiCents: number; totalCents: number }
   marginCents: number
@@ -47,9 +44,8 @@ export interface ProfitabilityReport {
   metaMessagePriceUsd: number
   /** The dollar the costs were converted with, and where it came from. */
   usdArs: UsdArs
-  /** Where IVA lands (see TAX_REGIME), and MercadoPago's fee on packs. */
+  /** Where IVA lands (see TAX_REGIME). */
   taxRegime: TaxRegime
-  mpFeePercent: number
   /**
    * The month's numbers step by step (real clubs only), so the console can explain the margin:
    * what the AI did and cost, what Meta billed, how dollars became pesos.
@@ -90,7 +86,7 @@ export interface ProfitabilityReport {
 const PAYING = new Set<SubscriptionStatus>([SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE])
 
 /**
- * Per club and month: revenue (plan + packs bought), Meta messages (free vs billed), Meta and
+ * Per club and month: revenue (the plan), Meta messages (free vs billed), Meta and
  * OpenAI cost in pesos, and the margin. Plan revenue uses each club's CURRENT plan and status —
  * billing is manual and keeps no history — so a past month is an approximation.
  */
@@ -109,9 +105,8 @@ export class OpsProfitabilityService {
     const regime = taxRegime()
     // On monotributo the IVA on Meta and OpenAI (paid in pesos) is ours to bear.
     const rate = effectiveRate(usdArs.rate, regime)
-    const feePercent = mpFeePercent()
 
-    const [clubs, messages, ai, packs] = await Promise.all([
+    const [clubs, messages, ai] = await Promise.all([
       this.prisma.club.findMany({
         select: { id: true, name: true, slug: true, plan: true, subscriptionStatus: true },
         orderBy: { name: 'asc' },
@@ -126,17 +121,6 @@ export class OpsProfitabilityService {
         where: { dateKey: { gte: from, lte: to } },
         _sum: { costMicroUsd: true, calls: true, inputTokens: true, outputTokens: true },
       }),
-      // A day either side, then filtered by the club-local day: approvedAt is an instant.
-      this.prisma.creditPackPurchase.findMany({
-        where: {
-          status: CreditPackStatus.APPROVED,
-          approvedAt: {
-            gte: new Date(`${from}T00:00:00Z`),
-            lt: new Date(new Date(`${to}T00:00:00Z`).getTime() + 2 * DAY_MS),
-          },
-        },
-        select: { clubId: true, priceCents: true, approvedAt: true },
-      }),
     ])
 
     const numbersByClub = new Map<string, NumberMessages[]>()
@@ -150,23 +134,14 @@ export class OpsProfitabilityService {
       numbersByClub.set(row.clubId, list)
     }
     const aiByClub = new Map(ai.map(row => [row.clubId, row._sum.costMicroUsd ?? 0]))
-    const packsByClub = new Map<string, number>()
-    for (const pack of packs) {
-      if (!pack.approvedAt || monthKeyOf(toDateKey(pack.approvedAt)) !== month) continue
-      packsByClub.set(pack.clubId, (packsByClub.get(pack.clubId) ?? 0) + pack.priceCents)
-    }
 
     const rows = clubs.map((club): ClubProfitRow => {
       const numbers = numbersByClub.get(club.id) ?? []
       const msgs = messageCost(numbers)
-      const planGross = PAYING.has(club.subscriptionStatus) ? planPriceCents(club.plan) : 0
-      const packsGross = packsByClub.get(club.id) ?? 0
-      // Plans are paid by transfer (no fee); packs go through MercadoPago.
-      const planCents = netCents(planGross, { regime })
-      const packsCents = netCents(packsGross, { regime, feePercent })
+      const grossCents = PAYING.has(club.subscriptionStatus) ? planPriceCents(club.plan) : 0
       const metaCents = usdToArsCents(msgs.paid * priceUsd, rate)
       const aiCents = usdToArsCents((aiByClub.get(club.id) ?? 0) / 1_000_000, rate)
-      const revenueCents = planCents + packsCents
+      const revenueCents = netCents(grossCents, regime)
       const costCents = metaCents + aiCents
       return {
         id: club.id,
@@ -174,7 +149,7 @@ export class OpsProfitabilityService {
         plan: planName(club.plan),
         subscriptionStatus: club.subscriptionStatus,
         isDemo: club.slug === SALES_DEMO_SLUG,
-        revenue: { grossCents: planGross + packsGross, planCents, packsCents, totalCents: revenueCents },
+        revenue: { grossCents, totalCents: revenueCents },
         messages: msgs,
         cost: { metaCents, aiCents, totalCents: costCents },
         ...margin({ revenueCents, costCents }),
@@ -213,7 +188,6 @@ export class OpsProfitabilityService {
       metaMessagePriceUsd: priceUsd,
       usdArs,
       taxRegime: regime,
-      mpFeePercent: feePercent,
       breakdown: {
         ai: {
           model: pricing.model,

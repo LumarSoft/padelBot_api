@@ -19,16 +19,15 @@ function setup(used: number, dismissed: string | null = null) {
       }),
     },
     whatsAppMessageDaily: {
-      aggregate: jest.fn().mockResolvedValue({ _sum: { botService: used, utility: 0, packCredits: 0 } }),
+      aggregate: jest.fn().mockResolvedValue({ _sum: { botService: used, utility: 0 } }),
     },
-    creditPackPurchase: { findMany: jest.fn().mockResolvedValue([]) },
   }
   const db = prisma as unknown as PrismaService
   return { prisma, user, service: new PlansService(db, new CreditsService(db)) }
 }
 
 describe('creditsNoticeLevel', () => {
-  it('speaks up at 80% and at 100% of plan + pack credits', () => {
+  it('speaks up at 80% and at 100% of the plan credits', () => {
     expect(creditsNoticeLevel(790, 1_000)).toBeNull()
     expect(creditsNoticeLevel(800, 1_000)).toBe(80)
     expect(creditsNoticeLevel(1_000, 1_000)).toBe(100)

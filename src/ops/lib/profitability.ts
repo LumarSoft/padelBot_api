@@ -1,5 +1,5 @@
 /**
- * What each club leaves us in a month: what it pays (plan + credit packs) minus what serving it
+ * What each club leaves us in a month: what it pays (its plan) minus what serving it
  * costs (Meta's WhatsApp messages + OpenAI). Pure, so the console's numbers are testable.
  *
  * Meta, as Lumarsoft pays it from its own portfolio: every service message (bot or staff reply
@@ -13,8 +13,7 @@ export const IVA_RATE = 0.21
 /**
  * Lumarsoft's tax regime (TAX_REGIME), which decides where IVA lands:
  * - monotributo (default, as of 2026-10): prices carry no IVA, so revenue is the price; but the
- *   21% IVA on digital services paid in pesos (Meta, OpenAI) and on MercadoPago's fee can't be
- *   recovered, so it's a cost.
+ *   21% IVA on digital services paid in pesos (Meta, OpenAI) can't be recovered, so it's a cost.
  * - inscripto: prices include 21% IVA, which isn't ours; the IVA we pay is credited back.
  */
 export type TaxRegime = 'monotributo' | 'inscripto'
@@ -23,20 +22,9 @@ export function taxRegime(): TaxRegime {
   return process.env.TAX_REGIME === 'inscripto' ? 'inscripto' : 'monotributo'
 }
 
-/**
- * MercadoPago's fee on a credit pack (Checkout Pro, money available at once), in percent of the
- * price and before its IVA. MP_FEE_PERCENT overrides it on a slower, cheaper term.
- */
-export function mpFeePercent(): number {
-  const configured = Number(process.env.MP_FEE_PERCENT)
-  return process.env.MP_FEE_PERCENT && Number.isFinite(configured) && configured >= 0 ? configured : 6.29
-}
-
-/** What a price leaves us: without IVA we owe, and for packs without MercadoPago's fee too. */
-export function netCents(grossCents: number, opts: { regime: TaxRegime; feePercent?: number }): number {
-  const fee = grossCents * ((opts.feePercent ?? 0) / 100)
-  if (opts.regime === 'inscripto') return Math.round(grossCents / (1 + IVA_RATE) - fee)
-  return Math.round(grossCents - fee * (1 + IVA_RATE))
+/** What a price leaves us: without the IVA we owe as inscripto, the whole price on monotributo. */
+export function netCents(grossCents: number, regime: TaxRegime): number {
+  return regime === 'inscripto' ? Math.round(grossCents / (1 + IVA_RATE)) : grossCents
 }
 
 /** Pesos a dollar really costs us: on monotributo, the digital-services IVA comes on top. */

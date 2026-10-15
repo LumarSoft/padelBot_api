@@ -1,12 +1,10 @@
 import { Module } from '@nestjs/common'
-import { BillingController, BillingWebhookController } from './billing.controller'
-import { BillingMercadoPagoService } from './billing-mercadopago.service'
+import { BillingController } from './billing.controller'
 import { BillingService } from './billing.service'
 
-/** What clubs pay Lumarsoft beyond the plan: credit packs by MercadoPago (Lumarsoft's account). */
+/** The owner's "Facturación" page: what the club has with Lumarsoft (plan, subscription, credits). */
 @Module({
-  controllers: [BillingController, BillingWebhookController],
-  providers: [BillingService, BillingMercadoPagoService],
-  exports: [BillingService],
+  controllers: [BillingController],
+  providers: [BillingService],
 })
 export class BillingModule {}

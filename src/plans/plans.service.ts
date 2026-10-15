@@ -36,28 +36,21 @@ export interface ClubPlanOverview {
   /** Active users, the owner included. */
   users: PlanUsage
   /**
-   * Credits of the current calendar month: one per WhatsApp message the bot sends. `limit` is
-   * the plan's; `available` adds the credit packs (spent this month + still left). Going over
-   * never cuts the bot.
+   * Credits of the current calendar month: one per WhatsApp message the bot sends, against the
+   * plan's `limit`. Going over never cuts the bot.
    */
   aiCredits: PlanUsage & {
     /** "2026-10": the month being counted (club-local). */
     month: string
     /** Whole percentage of the plan's credits used (can pass 100); null without an allowance. */
     percent: number | null
-    /** Of `used`, the ones paid from credit packs. */
-    fromPacks: number
-    /** Pack credits still left (not expired). */
-    extraBalance: number
-    /** Plan credits + pack credits spent this month + pack credits left: the bar's total. */
-    available: number | null
   }
   /** Each module: whether the club may use it, and the cheapest plan that includes it. */
   features: Record<PlanFeature, { enabled: boolean; plan: string }>
   /** The club predates the plans and keeps every module, whatever its plan says. */
   grandfatheredFeatures: boolean
   /**
-   * The owner's "te quedan pocos créditos" banner: 80% / 100% of plan + pack credits, and
+   * The owner's "te quedan pocos créditos" banner: 80% / 100% of the plan's credits, and
    * whether THIS user closed it (it stays closed that month; it returns once at 100%).
    */
   creditsNotice: { level: CreditsNoticeLevel | null; dismissed: boolean }
@@ -76,21 +69,18 @@ export class PlansService {
 
   async overview(clubId: string, userId?: number): Promise<ClubPlanOverview> {
     const today = todayKey()
-    const [club, courts, users, month, packs, viewer] = await Promise.all([
+    const [club, courts, users, used, viewer] = await Promise.all([
       this.clubPlan(clubId),
       this.countCourts(clubId),
       this.countActiveUsers(clubId),
-      this.credits.monthCredits(clubId, today),
-      this.credits.activePacks(clubId),
+      this.credits.monthUsed(clubId, today),
       userId
         ? this.prisma.user.findFirst({ where: { id: userId, clubId }, select: { creditsNoticeDismissed: true } })
         : null,
     ])
-    const extraBalance = packs.reduce((sum, pack) => sum + pack.remaining, 0)
     const plan = planDefinition(club.plan)
     const allowance = plan?.aiCredits ?? null
-    const available = allowance === null ? null : allowance + month.fromPacks + extraBalance
-    const noticeLevel = creditsNoticeLevel(month.used, available)
+    const noticeLevel = creditsNoticeLevel(used, allowance)
     const features = Object.fromEntries(
       PLAN_FEATURES.map(feature => [
         feature,
@@ -102,13 +92,10 @@ export class PlansService {
       courts: { used: courts, limit: plan?.courts ?? null },
       users: { used: users, limit: plan?.users ?? null },
       aiCredits: {
-        used: month.used,
+        used,
         limit: allowance,
         month: monthKeyOf(today),
-        percent: creditPercent(month.used, allowance),
-        fromPacks: month.fromPacks,
-        extraBalance,
-        available,
+        percent: creditPercent(used, allowance),
       },
       features,
       grandfatheredFeatures: club.grandfatheredFeatures,

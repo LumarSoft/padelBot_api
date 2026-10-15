@@ -1,7 +1,6 @@
 import { notifyOps } from '../common/ops-alert'
 import { PrismaService } from '../prisma/prisma.service'
 import { AiCreditAlertsService } from './ai-credit-alerts.service'
-import { CreditsService } from './credits.service'
 
 jest.mock('../common/ops-alert', () => ({ notifyOps: jest.fn().mockResolvedValue(undefined) }))
 
@@ -15,11 +14,7 @@ interface ClubRow {
   aiCreditsAlertPercent: number | null
 }
 
-function setup(
-  usage: { clubId: string; calls: number }[],
-  clubs: ClubRow[],
-  opts: { packs?: { remaining: number }[] } = {},
-) {
+function setup(usage: { clubId: string; calls: number }[], clubs: ClubRow[]) {
   const prisma = {
     whatsAppMessageDaily: {
       groupBy: jest
@@ -31,11 +26,7 @@ function setup(
       update: jest.fn().mockResolvedValue({}),
     },
   }
-  const credits = { activePacks: jest.fn().mockResolvedValue(opts.packs ?? []) }
-  return {
-    prisma,
-    service: new AiCreditAlertsService(prisma as unknown as PrismaService, credits as unknown as CreditsService),
-  }
+  return { prisma, service: new AiCreditAlertsService(prisma as unknown as PrismaService) }
 }
 
 const club = (over: Partial<ClubRow> = {}): ClubRow => ({
@@ -79,11 +70,10 @@ describe('AiCreditAlertsService', () => {
     expect(prisma.club.update).not.toHaveBeenCalled()
   })
 
-  it('sends the 100% alert after the 80% one, saying the bot keeps working and what packs are left', async () => {
+  it('sends the 100% alert after the 80% one, saying the bot keeps working', async () => {
     const { service } = setup(
       [{ clubId: 'c1', calls: 2_100 }],
       [club({ plan: 'bandeja', aiCreditsAlertMonth: '2026-10', aiCreditsAlertPercent: 80 })],
-      { packs: [{ remaining: 400 }] },
     )
 
     await service.alertCrossedThresholds(TODAY)
@@ -91,8 +81,15 @@ describe('AiCreditAlertsService', () => {
     const message = jest.mocked(notifyOps).mock.calls[0][0]
     expect(message).toMatch(/superó sus créditos.*2\.100 de 2\.000/)
     expect(message).toContain('El bot sigue atendiendo igual')
-    expect(message).toContain('Le quedan 400 créditos de paquetes')
-    expect(message).toContain('Smash')
+    expect(message).toContain('Ofrecele pasar a Smash')
+  })
+
+  it('says so when no plan has room for what the club uses', async () => {
+    const { service } = setup([{ clubId: 'c1', calls: 3_200 }], [club({ plan: 'smash' })])
+
+    await service.alertCrossedThresholds(TODAY)
+
+    expect(jest.mocked(notifyOps).mock.calls[0][0]).toContain('Ningún plan le alcanza')
   })
 
   it('starts over in a new month', async () => {
