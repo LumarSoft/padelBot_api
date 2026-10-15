@@ -2977,7 +2977,7 @@ club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancell
 {
   "month": "2026-10",
   "metaMessagePriceUsd": 0.026,
-  "usdArs": { "rate": 1995.5, "quote": "tarjeta", "source": "dolarapi", "dateKey": "2026-10-14" },
+  "usdArs": { "rate": 1995.5, "quote": "tarjeta", "source": "dolarapi", "dateKey": "2026-10-14", "stale": false },
   "pricesIncludeIva": true,
   "mpFeePercent": 6.29,
   "totals": {

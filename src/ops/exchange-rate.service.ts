@@ -2,6 +2,7 @@ import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import { PrismaService } from '../prisma/prisma.service'
 import { todayKey } from '../availability/lib/datetime'
+import { monthKeyOf } from '../plans/lib/ai-credits'
 import { notifyOps } from '../common/ops-alert'
 import { schedulerEnabled } from '../common/scheduling'
 
@@ -34,6 +35,8 @@ export interface UsdArs {
   source: 'dolarapi' | 'config' | 'default'
   /** Day of the fetched quote; null when it isn't a fetched one. */
   dateKey: string | null
+  /** Not a fresh quote: a fallback, or the current month's last fetch is days old. */
+  stale: boolean
 }
 
 /**
@@ -95,12 +98,16 @@ export class ExchangeRateService implements OnApplicationBootstrap {
       orderBy: { dateKey: 'desc' },
       select: { arsCents: true, dateKey: true },
     })
-    if (stored) return { rate: stored.arsCents / 100, quote, source: 'dolarapi', dateKey: stored.dateKey }
+    if (stored) {
+      // A past month's last quote is old by nature; only the running month can fall behind.
+      const behind = month === monthKeyOf(todayKey()) && daysSince(stored.dateKey) >= STALE_DAYS
+      return { rate: stored.arsCents / 100, quote, source: 'dolarapi', dateKey: stored.dateKey, stale: behind }
+    }
     const configured = Number(process.env.USD_ARS_RATE)
     if (Number.isFinite(configured) && configured > 0) {
-      return { rate: configured, quote, source: 'config', dateKey: null }
+      return { rate: configured, quote, source: 'config', dateKey: null, stale: true }
     }
-    return { rate: DEFAULT_RATES[quote], quote, source: 'default', dateKey: null }
+    return { rate: DEFAULT_RATES[quote], quote, source: 'default', dateKey: null, stale: true }
   }
 
   /** Tells ops when the stored dollar is days old: the console would be pricing with an old one. */
@@ -110,9 +117,7 @@ export class ExchangeRateService implements OnApplicationBootstrap {
       orderBy: { dateKey: 'desc' },
       select: { arsCents: true, dateKey: true },
     })
-    const ageDays = latest
-      ? Math.floor((Date.now() - new Date(`${latest.dateKey}T12:00:00Z`).getTime()) / DAY_MS)
-      : null
+    const ageDays = latest ? daysSince(latest.dateKey) : null
     if (ageDays !== null && ageDays < STALE_DAYS) return
     await notifyOps(
       latest
@@ -121,4 +126,9 @@ export class ExchangeRateService implements OnApplicationBootstrap {
         : `⚠️ Todavía no pudimos traer el dólar ${quote} de dolarapi.com: la consola usa USD_ARS_RATE o el valor de respaldo.`,
     )
   }
+}
+
+/** Whole days since a club-local day ("2026-10-14"). */
+function daysSince(dateKey: string): number {
+  return Math.floor((Date.now() - new Date(`${dateKey}T12:00:00Z`).getTime()) / DAY_MS)
 }

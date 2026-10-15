@@ -54,6 +54,7 @@ describe('ExchangeRateService', () => {
       quote: 'tarjeta',
       source: 'dolarapi',
       dateKey: '2026-09-30',
+      stale: false,
     })
     expect(prisma.exchangeRate.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { quote: 'tarjeta', dateKey: { lte: '2026-09-31' } } }),
@@ -63,7 +64,11 @@ describe('ExchangeRateService', () => {
   it('falls back to the configured rate, then to the built-in one', async () => {
     const { service } = setup(null)
     process.env.USD_ARS_RATE = '2100'
-    await expect(service.rateFor('2026-10', 'tarjeta')).resolves.toMatchObject({ rate: 2100, source: 'config' })
+    await expect(service.rateFor('2026-10', 'tarjeta')).resolves.toMatchObject({
+      rate: 2100,
+      source: 'config',
+      stale: true,
+    })
     delete process.env.USD_ARS_RATE
     await expect(service.rateFor('2026-10', 'tarjeta')).resolves.toMatchObject({ rate: 1995.5, source: 'default' })
   })
