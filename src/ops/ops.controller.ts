@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -90,6 +91,14 @@ export class OpsController {
   @UseGuards(OpsAuthGuard)
   updateLead(@Param('id') id: string, @Body() dto: UpdateLeadDto): Promise<ClubSignupRequest> {
     return this.leads.update(id, dto)
+  }
+
+  /** Deletes a lead marked LOST, for good (the pipeline only keeps leads worth keeping). */
+  @Delete('leads/:id')
+  @UseGuards(OpsAuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteLead(@Param('id') id: string): Promise<void> {
+    return this.leads.remove(id)
   }
 
   /** Provision the club from the lead's own answers, and mark the lead CONVERTED. */

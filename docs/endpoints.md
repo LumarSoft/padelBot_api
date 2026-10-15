@@ -2712,6 +2712,19 @@ response-time metric.
 { "message": "Lead no encontrado", "statusCode": 404 }
 ```
 
+### DELETE /ops/leads/:id
+
+Deletes a lead for good, only once it's marked `LOST`: a lead we still have to call, or one that
+became a client, can't vanish by a slip. Its answers stop counting in the channel and pain
+summaries of `GET /ops/leads/summary`.
+
+**Auth required:** Yes (ops token)
+
+`204 No Content` · `404 Not Found` · `409 Conflict` — the lead isn't marked `LOST`
+```json
+{ "message": "Solo se pueden eliminar las solicitudes marcadas como perdidas", "statusCode": 409 }
+```
+
 ### POST /ops/leads/:id/provision
 
 Creates the tenant from the lead and marks it `CONVERTED`, linked to the club it became. The

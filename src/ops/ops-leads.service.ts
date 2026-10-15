@@ -79,6 +79,19 @@ export class OpsLeadsService {
   }
 
   /**
+   * Deletes a lead for good — only once it's marked LOST, so a lead we still have to call (or a
+   * client) can't vanish by a slip. Its answers stop counting in the channel and pain summaries.
+   */
+  async remove(id: string): Promise<void> {
+    const lead = await this.get(id)
+    if (lead.status !== 'LOST') {
+      throw new ConflictException('Solo se pueden eliminar las solicitudes marcadas como perdidas')
+    }
+    await this.prisma.clubSignupRequest.delete({ where: { id } })
+    this.logger.log(`Lead ${id} (${lead.clubName}) deleted`)
+  }
+
+  /**
    * The button that used to be a curl: creates the tenant from the lead's own answers and
    * marks the lead CONVERTED, linked to the club it became.
    *
