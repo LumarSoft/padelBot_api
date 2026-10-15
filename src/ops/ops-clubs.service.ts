@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
-import { Role, SubscriptionStatus } from 'generated/prisma/client'
+import { CreditPackStatus, Role, SubscriptionStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 import { subscriptionState, SubscriptionState } from '../clubs/lib/subscription'
@@ -9,6 +9,8 @@ import { UpdateSubscriptionDto } from './dto/update-subscription.dto'
 import { PlanUsage } from '../plans/plans.service'
 import { creditPercent, monthStartKey } from '../plans/lib/ai-credits'
 import { planDefinition, planName } from '../plans/lib/plans'
+import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
+import { ClubHealth, clubHealth, CLUB_HEALTH_ORDER } from './lib/club-health'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 /** Window the per-club activity numbers cover. */
@@ -22,6 +24,10 @@ export interface OpsClubRow {
   name: string
   slug: string
   createdAt: Date
+  /** The sales demo: shown apart, never counted among the clubs' states. */
+  isDemo: boolean
+  /** One word on how the club is doing, and every signal behind it (see lib/club-health.ts). */
+  health: ClubHealth
   subscription: SubscriptionState
 
   /** The three things the bot cannot run without. A club missing any of these is not live. */
@@ -60,7 +66,11 @@ export interface OpsClubRow {
     /** Active users, the owner included. */
     users: PlanUsage
     /** This calendar month's AI credits. Over 100% never cuts the bot: it's a sales call. */
-    aiCredits: PlanUsage & { percent: number | null }
+    aiCredits: PlanUsage & {
+      percent: number | null
+      /** Plan + pack credits spent this month + pack credits left (null = no allowance). */
+      available: number | null
+    }
     /** Predates the plans: keeps every module whatever its plan, until we clear it. */
     grandfatheredFeatures: boolean
   }
@@ -96,7 +106,7 @@ export class OpsClubsService {
     const sinceKey = shiftDateKey(todayKey(), -(ACTIVITY_DAYS - 1))
     const today = todayKey()
 
-    const [clubs, bookings, conversations, logins, llm, activeUsers, monthCredits] = await Promise.all([
+    const [clubs, bookings, conversations, logins, llm, activeUsers, monthCredits, packs] = await Promise.all([
       this.prisma.club.findMany({
         orderBy: { createdAt: 'desc' },
         select: {
@@ -144,7 +154,11 @@ export class OpsClubsService {
       this.prisma.whatsAppMessageDaily.groupBy({
         by: ['clubId'],
         where: { dateKey: { gte: monthStartKey(today), lte: today } },
-        _sum: { botService: true, utility: true },
+        _sum: { botService: true, utility: true, packCredits: true },
+      }),
+      this.prisma.creditPackPurchase.findMany({
+        where: { status: CreditPackStatus.APPROVED, expiresAt: { gt: new Date() } },
+        select: { clubId: true, credits: true, creditsUsed: true },
       }),
     ])
 
@@ -153,6 +167,12 @@ export class OpsClubsService {
     const llmByClub = new Map(llm.map(l => [l.clubId, l._sum.costMicroUsd ?? 0]))
     const usersByClub = new Map(activeUsers.map(u => [u.clubId, u._count]))
     const creditsByClub = new Map(monthCredits.map(c => [c.clubId, (c._sum.botService ?? 0) + (c._sum.utility ?? 0)]))
+    const fromPacksByClub = new Map(monthCredits.map(c => [c.clubId, c._sum.packCredits ?? 0]))
+    const packBalanceByClub = new Map<string, number>()
+    for (const pack of packs) {
+      const left = Math.max(0, pack.credits - pack.creditsUsed)
+      packBalanceByClub.set(pack.clubId, (packBalanceByClub.get(pack.clubId) ?? 0) + left)
+    }
 
     const activityByClub = new Map<string, { bot: number; panel: number; deposits: number }>()
     for (const b of bookings) {
@@ -166,7 +186,7 @@ export class OpsClubsService {
 
     const dormantBefore = new Date(Date.now() - DORMANT_DAYS * DAY_MS)
 
-    return clubs.map(club => {
+    const rows = clubs.map((club): OpsClubRow => {
       // Only the four subscription fields — `subscriptionState` spreads what it's given,
       // so handing it the whole club row would nest a copy of the club inside its own
       // `subscription` object.
@@ -182,46 +202,68 @@ export class OpsClubsService {
       const definition = planDefinition(club.plan)
       const credits = creditsByClub.get(club.id) ?? 0
       const allowance = definition?.aiCredits ?? null
+      const available =
+        allowance === null
+          ? null
+          : allowance + (fromPacksByClub.get(club.id) ?? 0) + (packBalanceByClub.get(club.id) ?? 0)
 
       const paymentsReady = paymentsConfigured(club)
       const ready = club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0
+      const readiness = {
+        courts: club._count.courts,
+        paymentsConfigured: paymentsReady,
+        mpConnected: Boolean(club.mpConnectedAt),
+        whatsappLines: club._count.whatsappLines,
+        ready,
+        setupCompletedAt: club.setupCompletedAt,
+      }
+      const clubActivity = {
+        bookingsBot: activity.bot,
+        bookingsPanel: activity.panel,
+        depositsCents: activity.deposits,
+        conversations: conversationsByClub.get(club.id) ?? 0,
+        lastPanelLoginAt,
+        // A club still in trial hasn't had time to go dormant — don't cry wolf on it.
+        dormant:
+          subscription.subscriptionStatus !== SubscriptionStatus.TRIAL &&
+          (lastPanelLoginAt === null || lastPanelLoginAt < dormantBefore),
+      }
 
       return {
         id: club.id,
         name: club.name,
         slug: club.slug,
         createdAt: club.createdAt,
+        isDemo: club.slug === SALES_DEMO_SLUG,
+        health: clubHealth({
+          createdAt: club.createdAt,
+          subscription,
+          readiness,
+          activity: clubActivity,
+          credits: { used: credits, available },
+        }),
         subscription,
-        readiness: {
-          courts: club._count.courts,
-          paymentsConfigured: paymentsReady,
-          mpConnected: Boolean(club.mpConnectedAt),
-          whatsappLines: club._count.whatsappLines,
-          ready,
-          setupCompletedAt: club.setupCompletedAt,
-        },
-        activity: {
-          bookingsBot: activity.bot,
-          bookingsPanel: activity.panel,
-          depositsCents: activity.deposits,
-          conversations: conversationsByClub.get(club.id) ?? 0,
-          lastPanelLoginAt,
-          // A club still in trial hasn't had time to go dormant — don't cry wolf on it.
-          dormant:
-            subscription.subscriptionStatus !== SubscriptionStatus.TRIAL &&
-            (lastPanelLoginAt === null || lastPanelLoginAt < dormantBefore),
-        },
+        readiness,
+        activity: clubActivity,
         llmCostMicroUsd: llmByClub.get(club.id) ?? 0,
         plan: {
           name: planName(club.plan),
           known: definition !== null,
           courts: { used: club._count.courts, limit: definition?.courts ?? null },
           users: { used: usersByClub.get(club.id) ?? 0, limit: definition?.users ?? null },
-          aiCredits: { used: credits, limit: allowance, percent: creditPercent(credits, allowance) },
+          aiCredits: { used: credits, limit: allowance, percent: creditPercent(credits, allowance), available },
           grandfatheredFeatures: club.grandfatheredFeatures,
         },
       }
     })
+
+    // Most urgent first; the demo last. Same state: the newest club first (the query's order).
+    const rank = (row: OpsClubRow) =>
+      row.isDemo ? CLUB_HEALTH_ORDER.length : CLUB_HEALTH_ORDER.indexOf(row.health.status)
+    return rows
+      .map((row, index) => ({ row, index }))
+      .sort((a, b) => rank(a.row) - rank(b.row) || a.index - b.index)
+      .map(({ row }) => row)
   }
 
   /**

@@ -2775,6 +2775,8 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
     "name": "Club Demo Pádel",
     "slug": "club-demo",
     "createdAt": "2026-06-21T20:30:28.969Z",
+    "isDemo": false,
+    "health": { "status": "trialEnding", "reasons": ["La prueba termina en 3 días"] },
     "subscription": {
       "subscriptionStatus": "TRIAL",
       "plan": "saque",
@@ -2806,12 +2808,19 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
       "known": true,
       "courts": { "used": 2, "limit": 2 },
       "users": { "used": 1, "limit": 2 },
-      "aiCredits": { "used": 830, "limit": 1000, "percent": 83 },
+      "aiCredits": { "used": 830, "limit": 1000, "percent": 83, "available": 1000 },
       "grandfatheredFeatures": true
     }
   }
 ]
 ```
+
+`health` is one word per club, the most urgent that applies (`lib/club-health.ts`), with every
+signal behind it in `reasons`: `inactive` (the bot no longer answers) · `atRisk` (lapsed, nobody
+opens the panel in 14 days, or a live club whose bot booked nothing in 30 days) · `overCredits`
+(past plan + pack credits this month) · `trialEnding` (5 days or less) · `setup` (can't take a
+booking: no courts, payments or WhatsApp) · `starting` (trial, already live) · `healthy`. Rows come
+sorted by that urgency, the sales demo (`isDemo`) last.
 
 `plan.aiCredits` is this calendar month (club-local): one credit per WhatsApp message the bot
 sends. Going over never cuts the bot; an hourly job posts to `OPS_ALERT_WEBHOOK_URL` when a club
