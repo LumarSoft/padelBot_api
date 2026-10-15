@@ -50,6 +50,7 @@ function setup(reading: unknown) {
     {} as never,
     {} as never,
     {} as never,
+    { botPaused: jest.fn().mockResolvedValue(false) } as never, // credits
   )
   return { service, bookings }
 }

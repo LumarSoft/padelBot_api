@@ -9,6 +9,7 @@ import { WhatsAppService } from '../whatsapp/whatsapp.service'
 import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
 import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
 import { formatTime } from '../availability/lib/datetime'
+import { CreditsService } from '../plans/credits.service'
 import { buildAttendancePayload, parseAttendancePayload } from './lib/payload'
 import { attendanceReplies, describeTurno, templateParam } from './lib/messages'
 
@@ -67,6 +68,7 @@ export class FixedConfirmationsService {
     private readonly notifications: NotificationsService,
     private readonly whatsapp: WhatsAppService,
     private readonly whatsappLines: WhatsAppLinesService,
+    private readonly credits: CreditsService,
   ) {}
 
   private get templateName() {
@@ -94,6 +96,8 @@ export class FixedConfirmationsService {
     })
     for (const club of clubs) {
       try {
+        // Paused bot (credits used up): no "¿venís?". No answer never cancels, so nothing breaks.
+        if (await this.credits.botPaused(club.id)) continue
         await this.askForClub(club.id, club.fixedConfirmationLeadHours)
       } catch (err) {
         this.logger.error(`Failed to ask fijos of club ${club.id}`, err)

@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service'
 import { WhatsAppService } from '../whatsapp/whatsapp.service'
 import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
 import { formatTime } from '../availability/lib/datetime'
+import { CreditsService } from '../plans/credits.service'
 
 /** How long before the slot start the reminder goes out (default 60 min). */
 const LEAD_MINUTES = Number(process.env.BOOKING_REMINDER_LEAD_MINUTES) || 60
@@ -27,6 +28,7 @@ export class BookingRemindersService {
     private readonly prisma: PrismaService,
     private readonly whatsapp: WhatsAppService,
     private readonly whatsappLines: WhatsAppLinesService,
+    private readonly credits: CreditsService,
   ) {}
 
   private get templateName() {
@@ -68,7 +70,11 @@ export class BookingRemindersService {
       },
     })
 
+    // A club whose bot is paused (credits used up) sends no reminders; asked once per sweep.
+    const paused = new Map<string, boolean>()
     for (const booking of bookings) {
+      if (!paused.has(booking.clubId)) paused.set(booking.clubId, await this.credits.botPaused(booking.clubId))
+      if (paused.get(booking.clubId)) continue
       await this.remindOne(booking)
     }
   }

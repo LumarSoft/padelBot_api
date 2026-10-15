@@ -6,7 +6,7 @@ const ACTIVE = { subscriptionStatus: 'ACTIVE', plan: 'saque', trialEndsAt: null,
 
 function setup(club: object | null = ACTIVE, used = 850) {
   const prisma = { club: { findUnique: jest.fn().mockResolvedValue(club) } }
-  const credits = { monthUsed: jest.fn().mockResolvedValue(used) }
+  const credits = { monthState: jest.fn().mockResolvedValue({ used, allowance: 1_000, paused: used >= 1_000 }) }
   return new BillingService(prisma as never, credits as never)
 }
 
@@ -16,7 +16,7 @@ describe('BillingService.overview', () => {
 
     expect(overview.plan).toEqual({ key: 'saque', name: 'Saque', known: true })
     expect(overview.subscription).toEqual({ status: 'ACTIVE', severity: 'ok', renewsAt: PERIOD_END })
-    expect(overview.credits).toMatchObject({ used: 850, included: 1_000, percent: 85 })
+    expect(overview.credits).toMatchObject({ used: 850, included: 1_000, percent: 85, paused: false })
   })
 
   it('dates a trial by its end and leaves an unknown plan without credits', async () => {
@@ -25,6 +25,12 @@ describe('BillingService.overview', () => {
 
     expect(overview.subscription.renewsAt).toEqual(trialEndsAt)
     expect(overview.credits).toMatchObject({ included: null, percent: null })
+  })
+
+  it('says when the bot is paused for credits', async () => {
+    const overview = await setup(ACTIVE, 1_000).overview('c1')
+
+    expect(overview.credits).toMatchObject({ used: 1_000, percent: 100, paused: true })
   })
 
   it('refuses a club that does not exist', async () => {

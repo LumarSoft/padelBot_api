@@ -7,7 +7,7 @@ import { shiftDateKey, todayKey } from '../availability/lib/datetime'
 import { generateTempPassword, hashPassword } from '../common/password'
 import { UpdateSubscriptionDto } from './dto/update-subscription.dto'
 import { PlanUsage } from '../plans/plans.service'
-import { creditPercent, monthStartKey } from '../plans/lib/ai-credits'
+import { creditPercent, creditsPaused, monthStartKey } from '../plans/lib/ai-credits'
 import { planDefinition, planName } from '../plans/lib/plans'
 import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
 import { ClubHealth, clubHealth, CLUB_HEALTH_ORDER } from './lib/club-health'
@@ -65,8 +65,8 @@ export interface OpsClubRow {
     courts: PlanUsage
     /** Active users, the owner included. */
     users: PlanUsage
-    /** This calendar month's AI credits. Over 100% never cuts the bot: it's a sales call. */
-    aiCredits: PlanUsage & { percent: number | null }
+    /** This calendar month's AI credits. At 100% the bot is paused (`paused`) until it changes plan. */
+    aiCredits: PlanUsage & { percent: number | null; paused: boolean }
     /** Predates the plans: keeps every module whatever its plan, until we clear it. */
     grandfatheredFeatures: boolean
   }
@@ -188,6 +188,7 @@ export class OpsClubsService {
       const definition = planDefinition(club.plan)
       const credits = creditsByClub.get(club.id) ?? 0
       const allowance = definition?.aiCredits ?? null
+      const paused = creditsPaused(credits, allowance, club.slug === SALES_DEMO_SLUG)
 
       const paymentsReady = paymentsConfigured(club)
       const ready = club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0
@@ -222,7 +223,7 @@ export class OpsClubsService {
           subscription,
           readiness,
           activity: clubActivity,
-          credits: { used: credits, limit: allowance },
+          credits: { used: credits, limit: allowance, paused },
         }),
         subscription,
         readiness,
@@ -233,7 +234,7 @@ export class OpsClubsService {
           known: definition !== null,
           courts: { used: club._count.courts, limit: definition?.courts ?? null },
           users: { used: usersByClub.get(club.id) ?? 0, limit: definition?.users ?? null },
-          aiCredits: { used: credits, limit: allowance, percent: creditPercent(credits, allowance) },
+          aiCredits: { used: credits, limit: allowance, percent: creditPercent(credits, allowance), paused },
           grandfatheredFeatures: club.grandfatheredFeatures,
         },
       }

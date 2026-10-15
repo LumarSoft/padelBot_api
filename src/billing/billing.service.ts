@@ -22,6 +22,8 @@ export interface BillingOverview {
     /** The plan's credits for the month; null for an unknown plan. */
     included: number | null
     percent: number | null
+    /** Used up: the bot is paused until a bigger plan or the next month. */
+    paused: boolean
   }
 }
 
@@ -35,9 +37,9 @@ export class BillingService {
 
   async overview(clubId: string): Promise<BillingOverview> {
     const today = todayKey()
-    const [club, used] = await Promise.all([
+    const [club, { used, paused }] = await Promise.all([
       this.prisma.club.findUnique({ where: { id: clubId }, select: subscriptionSelect }),
-      this.credits.monthUsed(clubId, today),
+      this.credits.monthState(clubId, today),
     ])
     if (!club) throw new NotFoundException('Club no encontrado')
 
@@ -55,7 +57,7 @@ export class BillingService {
               ? null
               : club.currentPeriodEnd,
       },
-      credits: { month: monthKeyOf(today), used, included, percent: creditPercent(used, included) },
+      credits: { month: monthKeyOf(today), used, included, percent: creditPercent(used, included), paused },
     }
   }
 }

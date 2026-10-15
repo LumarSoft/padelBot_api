@@ -33,6 +33,7 @@ import { subscriptionSelect, subscriptionState } from '../clubs/lib/subscription
 import { WaitlistService } from '../waitlist/waitlist.service'
 import { PlayersService } from '../players/players.service'
 import { NotificationsService } from '../notifications/notifications.service'
+import { CreditsService } from '../plans/credits.service'
 import { WhatsAppMediaService } from '../whatsapp/whatsapp-media.service'
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import {
@@ -84,6 +85,7 @@ import {
   thanksReply,
   transferPending,
   welcome,
+  creditsPausedNotice,
 } from './messages'
 
 /** Inbound messages are truncated to this length before processing (cost / abuse guard). */
@@ -129,6 +131,7 @@ export class BotService {
     private readonly waitlist: WaitlistService,
     private readonly players: PlayersService,
     private readonly notifications: NotificationsService,
+    private readonly credits: CreditsService,
   ) {}
 
   async handleMessage(waId: string, clubId: string, body: string): Promise<BotReply | null> {
@@ -148,9 +151,12 @@ export class BotService {
     const blockedReply = await this.subscriptionBlockedReply(clubId)
     if (blockedReply) return blockedReply
 
-    const session = await this.sessionService.getOrCreate(waId, clubId)
     // Cap length so a pathologically long message can't bloat the LLM prompt / cost.
     const msg = body.trim().slice(0, MAX_MESSAGE_LENGTH)
+    const paused = await this.creditsPausedReply(waId, clubId, msg)
+    if (paused) return paused.reply
+
+    const session = await this.sessionService.getOrCreate(waId, clubId)
 
     this.logger.log(`📥 IN  ${waId} [${session.state}]: ${logSnippet(msg)}`)
 
@@ -253,6 +259,10 @@ export class BotService {
     // Without a booking waiting for its deposit, an image is not a receipt: read it instead.
     const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
     if (!pending) {
+      // A receipt for a pending booking still goes through (that money is moving); anything
+      // else waits for the staff while the bot is paused.
+      const paused = await this.creditsPausedReply(waId, clubId, '[Imagen]')
+      if (paused) return paused.reply
       const answered = await this.replyToImage(waId, clubId, media)
       if (answered) return answered
     }
@@ -292,6 +302,9 @@ export class BotService {
           )
         : null
       if (transcript) return await this.handleMessage(waId, clubId, transcript)
+
+      const paused = await this.creditsPausedReply(waId, clubId, '[Audio]')
+      if (paused) return paused.reply
 
       const session = await this.sessionService.getOrCreate(waId, clubId)
       await this.sessionService.saveMessage(session.id, 'USER', '[Audio]')
@@ -532,6 +545,38 @@ export class BotService {
         `😕 Las reservas por WhatsApp de *${club.name}* están deshabilitadas por el momento. ` +
         `Comunicate directamente con el club para reservar. ¡Gracias!`,
     }
+  }
+
+  /**
+   * The bot is paused because the club used up its month's credits: the player's message is
+   * kept for the staff (Conversaciones), and the player is told once per conversation that the
+   * club answers by hand — never a silent dead line, never a word about credits. The staff gets
+   * a push with it. Null when the bot isn't paused; `reply: null` = stay quiet.
+   */
+  private async creditsPausedReply(
+    waId: string,
+    clubId: string,
+    playerText: string,
+  ): Promise<{ reply: BotReply | null } | null> {
+    if (!(await this.credits.botPaused(clubId))) return null
+
+    const session = await this.sessionService.getOrCreate(waId, clubId)
+    await this.sessionService.saveMessage(session.id, 'USER', playerText)
+    this.logger.log(`⏸️  ${waId}: bot pausado sin créditos, lo atiende el club`)
+    if (session.mode === 'HUMAN' || session.context.creditsPausedNotified) return { reply: null }
+
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } })
+    const reply = creditsPausedNotice(club?.name ?? 'el club')
+    await this.sessionService.update(session.id, session.state as BotState, {
+      ...session.context,
+      creditsPausedNotified: true,
+    })
+    await this.sessionService.saveMessage(session.id, 'BOT', reply)
+    await this.notifications.notifyClub(clubId, {
+      title: '⏸️ Un jugador escribió y el bot está pausado',
+      body: `Respondele desde Conversaciones (${waId}). Se terminaron los créditos de IA del mes.`,
+    })
+    return { reply: { text: reply } }
   }
 
   /**

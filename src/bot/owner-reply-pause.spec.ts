@@ -37,6 +37,7 @@ function setup(session: Partial<SessionSnapshot> = {}) {
     {} as never, // waitlist
     {} as never, // players
     {} as never, // notifications
+    { botPaused: jest.fn().mockResolvedValue(false) } as never, // credits
   )
   return { service, sessionService, snapshot }
 }

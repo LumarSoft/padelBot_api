@@ -26,7 +26,15 @@ function setup(usage: { clubId: string; calls: number }[], clubs: ClubRow[]) {
       update: jest.fn().mockResolvedValue({}),
     },
   }
-  return { prisma, service: new AiCreditAlertsService(prisma as unknown as PrismaService) }
+  const notifications = {
+    notifyClub: jest.fn().mockResolvedValue(undefined),
+    notifyOwners: jest.fn().mockResolvedValue(undefined),
+  }
+  return {
+    prisma,
+    notifications,
+    service: new AiCreditAlertsService(prisma as unknown as PrismaService, notifications as never),
+  }
 }
 
 const club = (over: Partial<ClubRow> = {}): ClubRow => ({
@@ -39,49 +47,78 @@ const club = (over: Partial<ClubRow> = {}): ClubRow => ({
 })
 
 /**
- * Going over the AI credits never touches the bot; ops hears about it instead, once at 80% and
- * once at 100% each month, so the alert means "call this club" and never becomes noise.
+ * Ops and the club hear it when 20%, 10% and 5% of the month's credits are left, and when they
+ * run out and the bot pauses — once per threshold and month, so an alert always means something.
  */
 describe('AiCreditAlertsService', () => {
   beforeEach(() => jest.mocked(notifyOps).mockClear())
 
-  it('alerts ops once a club passes 80% of its month and remembers it', async () => {
-    const { prisma, service } = setup([{ clubId: 'c1', calls: 850 }], [club()])
+  it('warns ops and the owners once 20% is left, and remembers it', async () => {
+    const { prisma, notifications, service } = setup([{ clubId: 'c1', calls: 850 }], [club()])
 
     await service.alertCrossedThresholds(TODAY)
 
     expect(notifyOps).toHaveBeenCalledTimes(1)
-    expect(jest.mocked(notifyOps).mock.calls[0][0]).toMatch(/Padel Norte.*85%.*850 de 1\.000.*octubre.*Bandeja/)
+    expect(jest.mocked(notifyOps).mock.calls[0][0]).toMatch(/Padel Norte.*15%.*850 de 1\.000.*octubre.*Bandeja/)
+    expect(notifications.notifyOwners).toHaveBeenCalledWith(
+      'c1',
+      expect.objectContaining({ title: 'Te queda el 15% de tus créditos de IA' }),
+    )
+    expect(notifications.notifyClub).not.toHaveBeenCalled()
     expect(prisma.club.update).toHaveBeenCalledWith({
       where: { id: 'c1' },
       data: { aiCreditsAlertMonth: '2026-10', aiCreditsAlertPercent: 80 },
     })
   })
 
+  it('warns again at 10% and at 5% left', async () => {
+    for (const [calls, sent, crossed] of [
+      [910, 80, 90],
+      [960, 90, 95],
+    ] as const) {
+      const { prisma, service } = setup(
+        [{ clubId: 'c1', calls }],
+        [club({ aiCreditsAlertMonth: '2026-10', aiCreditsAlertPercent: sent })],
+      )
+
+      await service.alertCrossedThresholds(TODAY)
+
+      expect(prisma.club.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { aiCreditsAlertMonth: '2026-10', aiCreditsAlertPercent: crossed } }),
+      )
+    }
+    expect(notifyOps).toHaveBeenCalledTimes(2)
+  })
+
   it('does not repeat a threshold already sent this month', async () => {
-    const { prisma, service } = setup(
-      [{ clubId: 'c1', calls: 950 }],
-      [club({ aiCreditsAlertMonth: '2026-10', aiCreditsAlertPercent: 80 })],
+    const { prisma, notifications, service } = setup(
+      [{ clubId: 'c1', calls: 930 }],
+      [club({ aiCreditsAlertMonth: '2026-10', aiCreditsAlertPercent: 90 })],
     )
 
     await service.alertCrossedThresholds(TODAY)
 
     expect(notifyOps).not.toHaveBeenCalled()
+    expect(notifications.notifyOwners).not.toHaveBeenCalled()
     expect(prisma.club.update).not.toHaveBeenCalled()
   })
 
-  it('sends the 100% alert after the 80% one, saying the bot keeps working', async () => {
-    const { service } = setup(
-      [{ clubId: 'c1', calls: 2_100 }],
-      [club({ plan: 'bandeja', aiCreditsAlertMonth: '2026-10', aiCreditsAlertPercent: 80 })],
+  it('announces the pause to ops and to everyone at the club when the credits run out', async () => {
+    const { notifications, service } = setup(
+      [{ clubId: 'c1', calls: 2_000 }],
+      [club({ plan: 'bandeja', aiCreditsAlertMonth: '2026-10', aiCreditsAlertPercent: 95 })],
     )
 
     await service.alertCrossedThresholds(TODAY)
 
     const message = jest.mocked(notifyOps).mock.calls[0][0]
-    expect(message).toMatch(/superó sus créditos.*2\.100 de 2\.000/)
-    expect(message).toContain('El bot sigue atendiendo igual')
+    expect(message).toMatch(/se quedó sin créditos.*2\.000 de 2\.000/)
+    expect(message).toContain('El bot está pausado hasta que cambie de plan (o hasta el 1° de noviembre)')
     expect(message).toContain('Ofrecele pasar a Smash')
+    expect(notifications.notifyClub).toHaveBeenCalledWith(
+      'c1',
+      expect.objectContaining({ title: '⏸️ El bot está pausado' }),
+    )
   })
 
   it('says so when no plan has room for what the club uses', async () => {

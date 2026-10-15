@@ -7,12 +7,16 @@
  * reading receipts is included and costs nothing — the AI is cheap, Meta's per-message price is
  * what costs us. Replies the staff types from the panel are never the club's credits.
  *
- * Going over the month's plan credits is only measured: the bot keeps working, the owner sees it
- * in the panel and ops gets an alert. Nothing here may cut the bot.
+ * A credit stands for one bot message plus the AI tokens an average message takes, so the plan's
+ * credits cover both costs. Ops and the club are warned when 20%, 10% and 5% are left; once the
+ * month's plan credits are used up the bot is PAUSED (`creditsPaused`) until the club moves to a
+ * bigger plan or the month turns. Paused, it stops answering players and sending reminders, fijo
+ * confirmations and waitlist offers; payment messages still go out (that money is already
+ * moving) and the staff keeps answering by hand from Conversaciones.
  */
 
-/** Usage that triggers an ops alert, once per club and month each. */
-export const AI_CREDIT_ALERT_PERCENTS = [80, 100] as const
+/** Usage that warns ops and the club, once per club and month each: 20%, 10%, 5% left, and none. */
+export const AI_CREDIT_ALERT_PERCENTS = [80, 90, 95, 100] as const
 export type AiCreditAlertPercent = (typeof AI_CREDIT_ALERT_PERCENTS)[number]
 
 /** "2026-10-14" → "2026-10": the calendar month the allowance resets on. */
@@ -59,13 +63,19 @@ export function monthName(monthKey: string): string {
   return MONTHS[Number(monthKey.slice(5, 7)) - 1] ?? monthKey
 }
 
-/** Level of the owner's "te quedan pocos créditos" notice: against the plan's credits. */
-export type CreditsNoticeLevel = 80 | 100
+/** Level of the panel's "te quedan pocos créditos" notice: the alert threshold crossed. */
+export type CreditsNoticeLevel = AiCreditAlertPercent
 
 export function creditsNoticeLevel(used: number, allowance: number | null): CreditsNoticeLevel | null {
-  const percent = creditPercent(used, allowance)
-  if (percent === null) return null
-  return percent >= 100 ? 100 : percent >= 80 ? 80 : null
+  return crossedAlertPercent(used, allowance)
+}
+
+/**
+ * Whether the bot is paused: the month's plan credits are used up. Never for an unknown plan
+ * (no allowance) nor for the sales demo, whose usage is simulated.
+ */
+export function creditsPaused(used: number, allowance: number | null, isDemo = false): boolean {
+  return !isDemo && allowance !== null && used >= allowance
 }
 
 /** What `User.creditsNoticeDismissed` stores for a closed notice: "2026-10:80". */

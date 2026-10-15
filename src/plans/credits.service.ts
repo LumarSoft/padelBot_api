@@ -2,10 +2,20 @@ import { Injectable, Logger } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { todayKey } from '../availability/lib/datetime'
 import { KeyedSerialQueue } from '../common/keyed-serial-queue'
-import { monthStartKey } from './lib/ai-credits'
+import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
+import { creditsPaused, monthStartKey } from './lib/ai-credits'
+import { planDefinition } from './lib/plans'
 
 /** What an outbound WhatsApp message is, for credits (bot) and for our Meta cost (all). */
 export type OutboundKind = 'botService' | 'staffService' | 'utility'
+
+/** The club's credits this month against its plan, and whether that has paused the bot. */
+export interface MonthCreditsState {
+  used: number
+  /** The plan's credits for the month; null for an unknown plan (never paused). */
+  allowance: number | null
+  paused: boolean
+}
 
 /** Cache of phoneNumberId → clubId: lines almost never move, and every message asks. */
 const LINE_CACHE_MS = 10 * 60 * 1000
@@ -40,6 +50,21 @@ export class CreditsService {
       _sum: { botService: true, utility: true },
     })
     return (_sum.botService ?? 0) + (_sum.utility ?? 0)
+  }
+
+  /** This month's credits against the plan. Read fresh: a plan change un-pauses the bot at once. */
+  async monthState(clubId: string, dateKey: string = todayKey()): Promise<MonthCreditsState> {
+    const [club, used] = await Promise.all([
+      this.prisma.club.findUnique({ where: { id: clubId }, select: { plan: true, slug: true } }),
+      this.monthUsed(clubId, dateKey),
+    ])
+    const allowance = club ? (planDefinition(club.plan)?.aiCredits ?? null) : null
+    return { used, allowance, paused: creditsPaused(used, allowance, club?.slug === SALES_DEMO_SLUG) }
+  }
+
+  /** Whether the bot must stay quiet: the month's plan credits are used up. */
+  async botPaused(clubId: string): Promise<boolean> {
+    return (await this.monthState(clubId)).paused
   }
 
   private async record(phoneNumberId: string, kind: OutboundKind): Promise<void> {

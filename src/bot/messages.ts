@@ -74,6 +74,17 @@ export const RECEIPT_ATTACHMENT_FAILED = `Uy, no pude guardar tu comprobante �
 /** RECEIPT mode: player says they paid via text — we need the actual photo. */
 export const RECEIPT_CLAIM_ASK_PHOTO = `¡Genial! 🙌 Para confirmar tu reserva necesito que me mandes una *foto del comprobante* de la transferencia por acá. Apenas la reciba, el club la verifica y te confirmo el turno. 🎾`
 /** Friendly catch-all when something fails internally, so the bot is never left "en visto". */
+/**
+ * The bot is paused (the club used up its month's credits): the club answers by hand. Says
+ * nothing about credits or plans — that's between the club and us.
+ */
+export function creditsPausedNotice(clubName: string): string {
+  return (
+    `¡Hola! 👋 En este momento las consultas de *${clubName}* las responde el equipo del club por acá. ` +
+    'Ya les avisamos: te contestan en un ratito. 🎾'
+  )
+}
+
 export const TECHNICAL_ERROR = `😅 Uy, tuvimos un inconveniente técnico de mi lado. Probá de nuevo en un ratito, por favor. Si sigue sin andar, escribile al club y te ayudan. 🎾`
 
 // ── Dynamic builders ────────────────────────────────────────────────────────

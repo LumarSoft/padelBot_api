@@ -62,6 +62,7 @@ function setup(row: Record<string, unknown> | null = fijoRow()) {
     notifications as never,
     {} as never,
     {} as never,
+    { botPaused: jest.fn().mockResolvedValue(false) } as never,
   )
   return { service, prisma, bookings, notifications }
 }
@@ -222,7 +223,15 @@ describe('"No puedo" → release → waitlist (real BookingsService and Waitlist
     }
     const events = new BookingEventsService()
     const whatsapp = { sendText: jest.fn().mockResolvedValue(true) }
-    const waitlist = new WaitlistService(prisma as never, whatsapp as never, events, {} as never)
+    const waitlist = new WaitlistService(
+      prisma as never,
+      whatsapp as never,
+      events,
+      {} as never,
+      {
+        botPaused: jest.fn().mockResolvedValue(false),
+      } as never,
+    )
     waitlist.onModuleInit()
 
     // Reflect.construct keeps this test independent of how many collaborators BookingsService
@@ -242,6 +251,7 @@ describe('"No puedo" → release → waitlist (real BookingsService and Waitlist
       { notifyClub: jest.fn().mockResolvedValue(undefined) } as never,
       {} as never,
       {} as never,
+      { botPaused: jest.fn().mockResolvedValue(false) } as never,
     )
 
     await service.handleButtonReply(CLUB, WA_ID, buildAttendancePayload('NO', 'b1'))
@@ -269,7 +279,7 @@ describe('"No puedo" → release → waitlist (real BookingsService and Waitlist
 })
 
 describe('FixedConfirmationsService.askUpcoming', () => {
-  function askSetup(delivered: boolean) {
+  function askSetup(delivered: boolean, paused = false) {
     const prisma = {
       club: { findMany: jest.fn().mockResolvedValue([{ id: CLUB, fixedConfirmationLeadHours: 24 }]) },
       booking: {
@@ -279,14 +289,16 @@ describe('FixedConfirmationsService.askUpcoming', () => {
     }
     const whatsapp = { sendTemplate: jest.fn().mockResolvedValue(delivered) }
     const lines = { findActiveForClub: jest.fn().mockResolvedValue({ phoneNumberId: 'line-1' }) }
+    const credits = { botPaused: jest.fn().mockResolvedValue(paused) }
     const service = new FixedConfirmationsService(
       prisma as never,
       {} as never,
       {} as never,
       whatsapp as never,
       lines as never,
+      credits as never,
     )
-    return { service, prisma, whatsapp }
+    return { service, prisma, whatsapp, credits }
   }
 
   it('sends the template with one payload per button naming the booking, then stamps it', async () => {
@@ -314,5 +326,13 @@ describe('FixedConfirmationsService.askUpcoming', () => {
     await service.askUpcoming()
 
     expect(prisma.booking.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('asks nothing while the bot is paused for credits', async () => {
+    const { service, whatsapp } = askSetup(true, true)
+
+    await service.askUpcoming()
+
+    expect(whatsapp.sendTemplate).not.toHaveBeenCalled()
   })
 })

@@ -105,6 +105,8 @@ export interface SessionContext {
   rescheduleCarriesDeposit?: boolean
   /** The player's habitual slot, stamped on the welcome so "repetir" re-books it. */
   habit?: { weekday: number; bandStart: string; courtId: string; courtName: string }
+  /** Told in this conversation that the club answers by hand (the bot is paused for credits). */
+  creditsPausedNotified?: boolean
 }
 
 export interface HandlerResult {

@@ -12,8 +12,8 @@ export type ClubHealthStatus =
   | 'setup'
   /** Paying (or meant to) but slipping away: lapsed, nobody opens the panel, the bot books nothing. */
   | 'atRisk'
-  /** Used more than its plan's credits this month: costing us money without paying for it. */
-  | 'overCredits'
+  /** Used up its plan's credits this month: the bot is paused until it changes plan. */
+  | 'botPaused'
   /** Free month ending in a few days: the moment to close the sale. */
   | 'trialEnding'
   /** In its free month and already taking bookings. */
@@ -24,8 +24,8 @@ export type ClubHealthStatus =
 /** Most urgent first: the order the console sorts by. */
 export const CLUB_HEALTH_ORDER: readonly ClubHealthStatus[] = [
   'inactive',
+  'botPaused',
   'atRisk',
-  'overCredits',
   'trialEnding',
   'setup',
   'starting',
@@ -47,7 +47,7 @@ export interface ClubHealthInput {
   readiness: { courts: number; paymentsConfigured: boolean; whatsappLines: number; ready: boolean }
   activity: { bookingsBot: number; dormant: boolean }
   /** This month's credits against the plan's (null = no allowance, an unknown plan). */
-  credits: { used: number; limit: number | null }
+  credits: { used: number; limit: number | null; paused: boolean }
 }
 
 export interface ClubHealth {
@@ -98,9 +98,9 @@ export function clubHealth(club: ClubHealthInput, now: Date = new Date()): ClubH
     reasons.push('El bot no tomó reservas en 30 días')
   }
 
-  if (credits.limit !== null && credits.used > credits.limit) {
-    statuses.add('overCredits')
-    reasons.push(`Pasado de créditos: ${credits.used} de ${credits.limit} este mes`)
+  if (credits.paused) {
+    statuses.add('botPaused')
+    reasons.push(`Sin créditos: el bot está pausado (${credits.used} de ${credits.limit} este mes)`)
   }
 
   if (isTrial && subscription.daysLeft !== null && subscription.daysLeft <= TRIAL_ENDING_DAYS) {

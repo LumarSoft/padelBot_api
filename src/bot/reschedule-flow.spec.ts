@@ -71,6 +71,7 @@ function setup(policy: Record<string, unknown> | null = { mode: 'SELF', reason: 
     {} as never,
     {} as never,
     notifications as never,
+    { botPaused: jest.fn().mockResolvedValue(false) } as never, // credits
   )
   return { service, bookings, notifications, llm }
 }

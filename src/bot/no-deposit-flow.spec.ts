@@ -67,6 +67,7 @@ function setup(club: Record<string, unknown> = NONE_CLUB) {
     {} as never,
     {} as never,
     notifications as never,
+    { botPaused: jest.fn().mockResolvedValue(false) } as never, // credits
   )
   return { service, bookings, notifications, llm }
 }

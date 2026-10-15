@@ -37,21 +37,25 @@ export interface ClubPlanOverview {
   users: PlanUsage
   /**
    * Credits of the current calendar month: one per WhatsApp message the bot sends, against the
-   * plan's `limit`. Going over never cuts the bot.
+   * plan's `limit`. Once they're used up the bot is paused (`paused`) until a bigger plan or the
+   * next month.
    */
   aiCredits: PlanUsage & {
     /** "2026-10": the month being counted (club-local). */
     month: string
     /** Whole percentage of the plan's credits used (can pass 100); null without an allowance. */
     percent: number | null
+    /** The bot isn't answering players: the month's plan credits are used up. */
+    paused: boolean
   }
   /** Each module: whether the club may use it, and the cheapest plan that includes it. */
   features: Record<PlanFeature, { enabled: boolean; plan: string }>
   /** The club predates the plans and keeps every module, whatever its plan says. */
   grandfatheredFeatures: boolean
   /**
-   * The owner's "te quedan pocos créditos" banner: 80% / 100% of the plan's credits, and
-   * whether THIS user closed it (it stays closed that month; it returns once at 100%).
+   * The "te quedan pocos créditos" banner: the threshold crossed (80 / 90 / 95 / 100% used) and
+   * whether THIS user closed it at that level. Each higher level shows again; while the bot is
+   * paused it can't be closed.
    */
   creditsNotice: { level: CreditsNoticeLevel | null; dismissed: boolean }
 }
@@ -69,17 +73,18 @@ export class PlansService {
 
   async overview(clubId: string, userId?: number): Promise<ClubPlanOverview> {
     const today = todayKey()
-    const [club, courts, users, used, viewer] = await Promise.all([
+    const [club, courts, users, credits, viewer] = await Promise.all([
       this.clubPlan(clubId),
       this.countCourts(clubId),
       this.countActiveUsers(clubId),
-      this.credits.monthUsed(clubId, today),
+      this.credits.monthState(clubId, today),
       userId
         ? this.prisma.user.findFirst({ where: { id: userId, clubId }, select: { creditsNoticeDismissed: true } })
         : null,
     ])
     const plan = planDefinition(club.plan)
     const allowance = plan?.aiCredits ?? null
+    const { used, paused } = credits
     const noticeLevel = creditsNoticeLevel(used, allowance)
     const features = Object.fromEntries(
       PLAN_FEATURES.map(feature => [
@@ -96,21 +101,24 @@ export class PlansService {
         limit: allowance,
         month: monthKeyOf(today),
         percent: creditPercent(used, allowance),
+        paused,
       },
       features,
       grandfatheredFeatures: club.grandfatheredFeatures,
       creditsNotice: {
         level: noticeLevel,
         dismissed:
-          noticeLevel !== null && viewer?.creditsNoticeDismissed === creditsNoticeKey(monthKeyOf(today), noticeLevel),
+          noticeLevel !== null &&
+          !paused &&
+          viewer?.creditsNoticeDismissed === creditsNoticeKey(monthKeyOf(today), noticeLevel),
       },
     }
   }
 
-  /** Closes the credits notice for this user, at the level it's showing now, until next month. */
+  /** Closes the credits notice for this user at the level it's showing now. Not while paused. */
   async dismissCreditsNotice(clubId: string, userId: number): Promise<void> {
     const { creditsNotice, aiCredits } = await this.overview(clubId)
-    if (creditsNotice.level === null) return
+    if (creditsNotice.level === null || aiCredits.paused) return
     await this.prisma.user.updateMany({
       where: { id: userId, clubId },
       data: { creditsNoticeDismissed: creditsNoticeKey(aiCredits.month, creditsNotice.level) },

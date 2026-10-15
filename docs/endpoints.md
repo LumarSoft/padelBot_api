@@ -1347,7 +1347,8 @@ Open to STAFF too.
     "used": 640,
     "limit": 1000,
     "month": "2026-10",
-    "percent": 64
+    "percent": 64,
+    "paused": false
   },
   "features": {
     "fixedConfirmation": { "enabled": false, "plan": "Bandeja" },
@@ -1361,8 +1362,10 @@ Open to STAFF too.
 }
 ```
 
-`creditsNotice` drives the owner's "te quedan pocos créditos" banner: `level` 80 / 100 of the
-plan's credits (null below 80%), and whether the calling user closed it at that level this month.
+`creditsNotice` drives the panel's "te quedan pocos créditos" banner: `level` is the threshold
+crossed — 80 / 90 / 95 (20%, 10%, 5% left) or 100 (none left) — null below 80%, and whether the
+calling user closed it at that level. Each higher level shows again; while the bot is paused it is
+never `dismissed`.
 
 `features` says whether the club may use (turn on) each module and the cheapest plan that
 includes it. Clubs that existed before the plans were enforced have `grandfatheredFeatures`
@@ -1372,14 +1375,18 @@ the club already has running keeps working.
 `aiCredits` counts this calendar month (club-local): one credit per WhatsApp message the bot
 sends (replies, buttons, payment notices, reminders, fijo confirmations). Understanding audios
 and reading receipts costs nothing; replies the staff types from the panel never count. `limit`
-is the plan's (Saque 1.000, Bandeja 2.000, Smash 3.000). Going over never cuts the bot (ops is
-alerted at 80% and 100%).
+is the plan's (Saque 1.000, Bandeja 2.000, Smash 3.000). A credit stands for one bot message plus
+the AI an average message takes. Once they're used up, `paused` is true: the bot stops answering
+players (each conversation is told once that the club answers by hand, and the staff gets a push),
+and sends no reminders, fijo confirmations or waitlist offers; payment messages still go out. It
+comes back as soon as the club is on a bigger plan, or on the 1st of the month. Ops and the club
+are warned at 80%, 90%, 95% and 100% (the club by push: owners, and everyone at 100%).
 
 ### POST /clubs/me/plan/credits-notice/dismiss
 
-Closes the credits banner for the calling user at the level it's showing now: it stays closed for
-the rest of the month and comes back once if the credits run out (level 100). Facturación always
-shows the state.
+Closes the credits banner for the calling user at the level it's showing now: it shows again at
+the next level (90, 95, 100). Does nothing while the bot is paused. Facturación always shows the
+state.
 
 **Auth required:** Yes
 
@@ -1633,7 +1640,7 @@ The owner's "Facturación" page in one call: plan, renewal date (`currentPeriodE
 {
   "plan": { "key": "bandeja", "name": "Bandeja", "known": true },
   "subscription": { "status": "ACTIVE", "severity": "ok", "renewsAt": "2026-11-10T21:00:00.000Z" },
-  "credits": { "month": "2026-10", "used": 2150, "included": 2000, "percent": 107 }
+  "credits": { "month": "2026-10", "used": 2000, "included": 2000, "percent": 100, "paused": true }
 }
 ```
 
@@ -2723,7 +2730,7 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
       "known": true,
       "courts": { "used": 2, "limit": 2 },
       "users": { "used": 1, "limit": 2 },
-      "aiCredits": { "used": 830, "limit": 1000, "percent": 83 },
+      "aiCredits": { "used": 830, "limit": 1000, "percent": 83, "paused": false },
       "grandfatheredFeatures": true
     }
   }
@@ -2731,16 +2738,17 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
 ```
 
 `health` is one word per club, the most urgent that applies (`lib/club-health.ts`), with every
-signal behind it in `reasons`: `inactive` (the bot no longer answers) · `atRisk` (lapsed, nobody
-opens the panel in 14 days, or a live club whose bot booked nothing in 30 days) · `overCredits`
-(past its plan's credits this month) · `trialEnding` (5 days or less) · `setup` (can't take a
+signal behind it in `reasons`: `inactive` (the bot no longer answers) · `botPaused` (used up its
+plan's credits this month: the bot is paused) · `atRisk` (lapsed, nobody opens the panel in 14
+days, or a live club whose bot booked nothing in 30 days) · `trialEnding` (5 days or less) · `setup` (can't take a
 booking: no courts, payments or WhatsApp) · `starting` (trial, already live) · `healthy`. Rows come
 sorted by that urgency, the sales demo (`isDemo`) last.
 
 `plan.aiCredits` is this calendar month (club-local): one credit per WhatsApp message the bot
-sends. Going over never cuts the bot; an hourly job posts to `OPS_ALERT_WEBHOOK_URL` when a club
-crosses 80% and 100% of its plan's credits (once each per month, the sales demo excluded), naming
-the plan to offer. A send Meta refuses for payment (Graph code 131042) also alerts
+sends; at 100% the bot is paused (`paused`) until the club moves to a bigger plan or the month
+turns. A job every 5 minutes posts to `OPS_ALERT_WEBHOOK_URL` when a club crosses 80%, 90%, 95% and
+100% of its plan's credits (once each per month, the sales demo excluded), naming the plan to
+offer, and pushes the club too. A send Meta refuses for payment (Graph code 131042) also alerts
 ops, once an hour per number, because the bot is mute on that number until it's fixed.
 
 ### PATCH /ops/clubs/:id/subscription
@@ -2976,7 +2984,8 @@ wrong** — the screen is a to-do list, not a wall of green ticks.
 `200 OK` — `poller` is the reconciliation poller's in-memory state (meaningful on the instance
 running the scheduler, see `RUN_SCHEDULER`). Issue kinds: `POLLER_DOWN`, `CLUB_MP_FAILING`,
 `STUCK_PENDING`, `RECEIPT_AWAITING_REVIEW`, `MP_TOKEN_EXPIRING`, `ADVISOR_WAITING`,
-`CLUB_NOT_LIVE`. Critical ones sort first.
+`CLUB_NOT_LIVE`, `BOT_PAUSED_NO_CREDITS` (critical: the club used up its month's credits and its
+bot is paused; names the plan to offer). Critical ones sort first.
 ```json
 {
   "poller": {
