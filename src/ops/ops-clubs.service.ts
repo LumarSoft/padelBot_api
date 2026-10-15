@@ -140,10 +140,11 @@ export class OpsClubsService {
         _sum: { costMicroUsd: true },
       }),
       this.prisma.user.groupBy({ by: ['clubId'], where: { isActive: true }, _count: true }),
-      this.prisma.llmUsageDaily.groupBy({
+      // Credits are the messages the bot sends (WhatsApp replies and templates), not AI steps.
+      this.prisma.whatsAppMessageDaily.groupBy({
         by: ['clubId'],
         where: { dateKey: { gte: monthStartKey(today), lte: today } },
-        _sum: { calls: true },
+        _sum: { botService: true, utility: true },
       }),
     ])
 
@@ -151,7 +152,7 @@ export class OpsClubsService {
     const loginByClub = new Map(logins.map(l => [l.clubId, l._max.lastLoginAt]))
     const llmByClub = new Map(llm.map(l => [l.clubId, l._sum.costMicroUsd ?? 0]))
     const usersByClub = new Map(activeUsers.map(u => [u.clubId, u._count]))
-    const creditsByClub = new Map(monthCredits.map(c => [c.clubId, c._sum.calls ?? 0]))
+    const creditsByClub = new Map(monthCredits.map(c => [c.clubId, (c._sum.botService ?? 0) + (c._sum.utility ?? 0)]))
 
     const activityByClub = new Map<string, { bot: number; panel: number; deposits: number }>()
     for (const b of bookings) {
