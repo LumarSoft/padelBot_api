@@ -50,4 +50,18 @@ describe('WhatsAppService outbound metering', () => {
     expect(credits.recordSent).not.toHaveBeenCalled()
   })
 
+  it('alerts ops once when Meta refuses for payment (131042)', async () => {
+    const { service } = setup({
+      ok: false,
+      status: 400,
+      body: '{"error":{"code":131042,"message":"Business eligibility payment issue"}}',
+    })
+
+    await service.sendText('phone-1', '5493415550000', 'Hola')
+    await service.sendText('phone-1', '5493415550000', 'Hola de nuevo')
+    await flush()
+
+    expect(notifyOps).toHaveBeenCalledTimes(1)
+    expect(jest.mocked(notifyOps).mock.calls[0][0]).toMatch(/Padel Norte.*problema de pago.*131042/)
+  })
 })

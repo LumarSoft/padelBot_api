@@ -7,13 +7,24 @@ import { isUniqueConstraintError } from '../prisma/prisma-errors'
 import { Interactive } from '../bot/types'
 import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
 import { CreditsService, OutboundKind } from '../plans/credits.service'
+import { notifyOps } from '../common/ops-alert'
 
 /** Who wrote a free-form message: the bot (a credit of the club) or the staff from the panel. */
 export type OutboundSender = 'bot' | 'staff'
 
+/**
+ * Graph error codes for "Meta won't send because of payment" (the WABA's payment method failed
+ * or ran out). The bot goes mute on that number until it's fixed, so ops must hear right away.
+ */
+const META_PAYMENT_ERROR_CODES = new Set([131042])
+/** One ops alert per number per hour: every reply fails the same way until it's fixed. */
+const PAYMENT_ALERT_EVERY_MS = 60 * 60 * 1000
+
 @Injectable()
 export class WhatsAppService {
   private readonly logger = new Logger(WhatsAppService.name)
+  /** phoneNumberId → last payment-rejection alert. */
+  private readonly paymentAlerts = new Map<string, number>()
 
   constructor(
     private readonly prisma: PrismaService,
@@ -138,6 +149,7 @@ export class WhatsAppService {
         return true
       }
       const text = await response.text()
+      if (META_PAYMENT_ERROR_CODES.has(graphErrorCode(text))) void this.alertPaymentRejection(phoneNumberId, text)
       // Code 190 / 401 = the Meta access token expired or was revoked. The bot still
       // ran (reply saved in the platform) but WhatsApp delivery failed — surface a
       // clear, actionable line instead of a raw Graph dump.
@@ -154,6 +166,29 @@ export class WhatsAppService {
     } catch (err) {
       this.logger.error('Failed to reach Graph API', err)
       return false
+    }
+  }
+
+  /**
+   * Meta refused to send because of payment: the bot is mute on this number until the payment
+   * method is fixed in Meta. Ops hears it at once (then hourly while it lasts); never throws.
+   */
+  private async alertPaymentRejection(phoneNumberId: string, graphError: string): Promise<void> {
+    const last = this.paymentAlerts.get(phoneNumberId) ?? 0
+    if (Date.now() - last < PAYMENT_ALERT_EVERY_MS) return
+    this.paymentAlerts.set(phoneNumberId, Date.now())
+    try {
+      const line = await this.prisma.whatsAppLine.findUnique({
+        where: { phoneNumberId },
+        select: { displayPhone: true, club: { select: { name: true } } },
+      })
+      const who = line ? `*${line.club.name}* (${line.displayPhone})` : `el número ${phoneNumberId}`
+      await notifyOps(
+        `🚨 Meta rechazó un mensaje de ${who} por un problema de pago (código 131042). ` +
+          `El bot no puede responder por ese número hasta regularizar el pago en Meta.\n${graphError.slice(0, 300)}`,
+      )
+    } catch (err) {
+      this.logger.error('Could not alert ops about a Meta payment rejection', err)
     }
   }
 
@@ -210,6 +245,15 @@ export class WhatsAppService {
 function outboundKind(message: Record<string, unknown>, sender: OutboundSender): OutboundKind {
   if (message.type === 'template') return 'utility'
   return sender === 'staff' ? 'staffService' : 'botService'
+}
+
+/** The Graph `error.code` of a failed send (0 when the body isn't the usual JSON error). */
+export function graphErrorCode(body: string): number {
+  try {
+    return Number((JSON.parse(body) as { error?: { code?: number } }).error?.code) || 0
+  } catch {
+    return 0
+  }
 }
 
 /** A one-line, length-capped summary of an outbound message object, for clean send logs. */
