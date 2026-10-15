@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common'
-import OpenAI, { toFile } from 'openai'
+import OpenAI, { APIError, toFile } from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
 import { PlansService } from '../plans/plans.service'
@@ -23,11 +23,29 @@ import {
 } from '../bot/messages'
 import { buildSystemPrompt, formatCurrentDate } from './system.prompt'
 import { parseFaq } from '../clubs/clubs.service'
+import { notifyOps } from '../common/ops-alert'
 import { TOOLS } from './tools'
 
 /** Per-user LLM call budget — protects against spam driving up OpenAI cost. */
 const LLM_WINDOW_MS = 60_000
 const LLM_MAX_CALLS_PER_WINDOW = Number(process.env.LLM_MAX_CALLS_PER_MIN) || 12
+
+/**
+ * OpenAI failures that belong to our account, not to one request: the prepaid credit ran out
+ * (429 insufficient_quota) or the key is invalid/revoked (401). Every AI step then fails the same
+ * way and the bot only degrades quietly, so ops must hear right away.
+ */
+type OpenAiAccountFailure = 'quota' | 'auth'
+const OPENAI_ACCOUNT_ALERTS: Record<OpenAiAccountFailure, string> = {
+  quota:
+    '🚨 OpenAI rechazó la IA del bot por falta de saldo: cargá crédito en platform.openai.com (Billing) ' +
+    'o activá la recarga automática.',
+  auth:
+    '🚨 OpenAI rechazó la clave de la IA del bot (inválida o revocada): generá una nueva en ' +
+    'platform.openai.com (API keys), ponela en OPENAI_API_KEY del server y reiniciá la API.',
+}
+/** One ops alert per kind per hour: every AI step fails the same way until it's fixed. */
+const OPENAI_ACCOUNT_ALERT_EVERY_MS = 60 * 60 * 1000
 
 @Injectable()
 export class LlmService {
@@ -35,6 +53,8 @@ export class LlmService {
   private readonly openai: OpenAI
   /** waId → recent LLM-call timestamps (sliding window), for per-user rate limiting. */
   private readonly llmCalls = new Map<string, number[]>()
+  /** Kind of OpenAI account failure → last ops alert. */
+  private readonly accountAlerts = new Map<OpenAiAccountFailure, number>()
   /** Running OpenAI consumption since the process started (logged after every call). */
   private totalCalls = 0
   private totalTokens = 0
@@ -68,6 +88,7 @@ export class LlmService {
       return await this.callOpenAI(state, message, ctx, clubId, waId)
     } catch (err) {
       this.logger.error('LLM fallback error', err)
+      void this.alertAccountFailure(err)
       return this.inPlace(NOT_UNDERSTOOD, state, ctx)
     }
   }
@@ -89,6 +110,7 @@ export class LlmService {
       return text || null
     } catch (err) {
       this.logger.error(`Audio transcription failed for ${waId}`, err)
+      void this.alertAccountFailure(err)
       return null
     }
   }
@@ -133,6 +155,7 @@ export class LlmService {
       return text || null
     } catch (err) {
       this.logger.error(`Image description failed for ${waId}`, err)
+      void this.alertAccountFailure(err)
       return null
     }
   }
@@ -181,6 +204,7 @@ export class LlmService {
       return parsed
     } catch (err) {
       this.logger.error(`Receipt reading failed for ${waId}`, err)
+      void this.alertAccountFailure(err)
       return null
     }
   }
@@ -217,6 +241,28 @@ export class LlmService {
       }
     }
     return false
+  }
+
+  /**
+   * OpenAI refused because of our account (no credit, bad key): the player only sees "no
+   * entendí" and audios/receipts stop being read until someone fixes it. Ops hears at once
+   * (then hourly per kind while it lasts); never throws.
+   */
+  private async alertAccountFailure(err: unknown): Promise<void> {
+    const failure = openAiAccountFailure(err)
+    if (!failure) return
+    const last = this.accountAlerts.get(failure) ?? 0
+    if (Date.now() - last < OPENAI_ACCOUNT_ALERT_EVERY_MS) return
+    this.accountAlerts.set(failure, Date.now())
+    try {
+      const { status, code } = err as APIError
+      await notifyOps(
+        `${OPENAI_ACCOUNT_ALERTS[failure]} Mientras tanto el bot no entiende mensajes fuera del menú, ` +
+          `audios ni imágenes, comprobantes incluidos (OpenAI ${status}${code ? ` ${code}` : ''}).`,
+      )
+    } catch (alertErr) {
+      this.logger.error('Could not alert ops about an OpenAI account failure', alertErr)
+    }
   }
 
   // ── Core LLM call ──────────────────────────────────────────────────────────
@@ -576,6 +622,17 @@ function transcriptionUsage(usage: OpenAI.Audio.Transcription['usage']): StepUsa
   }
   const seconds = usage?.type === 'duration' ? usage.seconds : 0
   return { inputTokens: 0, outputTokens: 0, costUsd: (seconds / 60) * TRANSCRIBE_PRICES.perMinute }
+}
+
+/**
+ * Which account-level failure an OpenAI error is, if any. A plain 429 (rate_limit_exceeded) or a
+ * 5xx passes on its own and isn't ours to fix, so it stays a log line.
+ */
+function openAiAccountFailure(err: unknown): OpenAiAccountFailure | null {
+  if (!(err instanceof APIError)) return null
+  if (err.status === 429 && err.code === 'insufficient_quota') return 'quota'
+  if (err.status === 401) return 'auth'
+  return null
 }
 
 /** One-line, length-capped version of a message for clean console logs. */

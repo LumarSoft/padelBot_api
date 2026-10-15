@@ -64,7 +64,7 @@ This is **GTP**, a multi-tenant SaaS for padel clubs in Rosario, Argentina (see 
 - `whatsapp` — Meta WhatsApp Business webhook (verify + receive), with dedup of Meta retries via `ProcessedWebhookMessage`.
 - `whatsapp-lines` — maps a Meta `phoneNumberId` to a club so the bot resolves the tenant of an incoming message.
 - `bot` — the conversational state machine + `ConversationSession` persistence; AI/HUMAN takeover mode.
-- `llm` — LLM with tool-calling (`llm/tools.ts`, `llm/system.prompt.ts`) that interprets messages and executes booking actions.
+- `llm` — LLM with tool-calling (`llm/tools.ts`, `llm/system.prompt.ts`) that interprets messages and executes booking actions. Every OpenAI failure degrades quietly for the player ("no entendí", audio or receipt not read) and never throws. OpenAI is prepaid, so the account-level ones alert ops via `notifyOps`, once per kind per hour (in-memory, like Meta's 131042): 429 `insufficient_quota` (no credit: top up in platform.openai.com Billing or turn on auto-recharge) and 401 (invalid or revoked `OPENAI_API_KEY`). A plain rate limit or a 5xx stays a log line.
 - `conversations` — persistent per-message log (`ConversationMessage`), admin manual replies, AI/HUMAN mode switch.
 - `payments` — transfer reconciliation against MercadoPago, including the **centavos trick**: when two pending bookings collide in the same whole-peso bucket, each gets a distinct `transferAmountCents` so one incoming transfer maps to exactly one pending booking.
 - `mercadopago` — MercadoPago API client + OAuth token exchange/refresh.
