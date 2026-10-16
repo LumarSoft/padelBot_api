@@ -51,7 +51,20 @@ export interface SlotFreedEvent {
   priceCents: number
 }
 
-export type AppEvent = BookingEvent | ConversationEvent | PaymentReceiptEvent | PaymentConfirmedEvent | SlotFreedEvent
+/** A torneo or peña changed (pairs, fixture, results, its blocked turnos) — the panel refetches it. */
+export interface CompetitionChangedEvent {
+  type: 'competition.changed'
+  clubId: string
+  competitionId: string
+}
+
+export type AppEvent =
+  | BookingEvent
+  | ConversationEvent
+  | PaymentReceiptEvent
+  | PaymentConfirmedEvent
+  | SlotFreedEvent
+  | CompetitionChangedEvent
 
 @Injectable()
 export class BookingEventsService {
@@ -75,6 +88,10 @@ export class BookingEventsService {
   }
 
   emitSlotFreed(event: SlotFreedEvent): void {
+    this.publish(event)
+  }
+
+  emitCompetitionChanged(event: CompetitionChangedEvent): void {
     this.publish(event)
   }
 

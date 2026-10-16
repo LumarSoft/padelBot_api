@@ -579,11 +579,14 @@ Lists slots, ordered by `startsAt`. Optional filters via query string.
     "priceCents": 1200000,
     "status": "AVAILABLE",
     "court": { "id": "clx...", "name": "Cancha 1" },
+    "competition": null,
     "createdAt": "...",
     "updatedAt": "..."
   }
 ]
 ```
+
+`competition` is `{ "id", "name", "kind": "TOURNAMENT" | "PENA" }` on a `BLOCKED` slot held for a torneo or peña (see Competitions), `null` otherwise. Setting such a slot to a status other than `BLOCKED` with `PATCH /slots/:id` detaches it from the event.
 
 ### GET /slots/:id
 
@@ -672,7 +675,7 @@ Blocks many slots at once (e.g. a tournament): every selected court, for every d
 
 ### POST /slots/bulk-unblock
 
-The inverse of `bulk-block`: frees every `BLOCKED` slot of the selected courts inside the date range (optionally only on the chosen time bands). Only `BLOCKED` slots are touched, so a booking inside the range can never be freed by accident. Slots are matched by their real wall-clock start, so bands that were blocked before the court's schedule changed are still reachable.
+The inverse of `bulk-block`: frees every `BLOCKED` slot of the selected courts inside the date range (optionally only on the chosen time bands). Only `BLOCKED` slots are touched, so a booking inside the range can never be freed by accident, and never one held for a torneo or peña (free those by editing or cancelling the event). Slots are matched by their real wall-clock start, so bands that were blocked before the court's schedule changed are still reachable.
 
 **Auth required:** Yes
 
@@ -1240,6 +1243,436 @@ Occurrences whose booking was CANCELLED are treated as deliberately skipped ("el
 `400 Bad Request` — recurring booking is inactive
 
 `404 Not Found`
+
+## Competitions (Torneos y Peñas)
+
+A **torneo** or a **peña** (`kind`: `TOURNAMENT` | `PENA`). Both hold courts during one or more time windows (`sessions`), take pair registrations and play matches. A peña is a single round-robin category ("General") with no bracket; a torneo has categories whose format is `ROUND_ROBIN`, `GROUPS_KNOCKOUT` (zonas + cuadro) or `KNOCKOUT`. Open to STAFF.
+
+**Court blocking.** Every band of the courts' grid that overlaps a session becomes a `BLOCKED` slot tagged with the event (`Slot.competitionId`): missing slots are created, `AVAILABLE` ones are claimed, a band already blocked for something else is left alone. If any turno in the way is **booked**, the whole create/update is refused with `409` naming them (no half-blocked event). Editing courts or sessions re-syncs the block; cancelling or deleting the event frees its turnos. `POST /slots/bulk-unblock` never frees an event's turnos.
+
+**Every write returns the full event detail** (same shape as `GET /competitions/:id`) and emits the SSE event `competition.changed` (`{ type, clubId, competitionId }`).
+
+**Money:** `entryFeeCents` is the registration fee **per player**, in cents.
+
+### GET /competitions
+
+Lists the club's events, newest first.
+
+**Auth required:** Yes
+
+**Query params:** `kind` (`TOURNAMENT` | `PENA`), `status` (`OPEN` | `IN_PROGRESS` | `FINISHED` | `CANCELLED`), both optional.
+
+**Responses**
+
+`200 OK`
+```json
+[
+  {
+    "id": "clx...",
+    "kind": "PENA",
+    "name": "Peña de los jueves",
+    "description": null,
+    "status": "OPEN",
+    "matchFormat": "ONE_SET",
+    "entryFeeCents": 500000,
+    "createdAt": "2026-10-16T00:00:00.000Z",
+    "updatedAt": "2026-10-16T00:00:00.000Z",
+    "sessions": [{ "id": "clx...", "dateKey": "2026-10-23", "startTime": "20:00", "endTime": "23:00" }],
+    "courts": [{ "id": "clx...", "name": "Cancha 1" }],
+    "_count": { "pairs": 6, "categories": 1 }
+  }
+]
+```
+
+### GET /competitions/:id
+
+The full event: sessions, courts, categories (with zonas and computed tables), pairs with their players and payment, matches, and the fee totals.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+```json
+{
+  "id": "clx...",
+  "kind": "TOURNAMENT",
+  "name": "Torneo Primavera",
+  "status": "IN_PROGRESS",
+  "matchFormat": "ONE_SET",
+  "entryFeeCents": 1000000,
+  "sessions": [{ "id": "clx...", "dateKey": "2026-10-24", "startTime": "09:00", "endTime": "23:00" }],
+  "courts": [{ "id": "clx...", "name": "Cancha 1" }],
+  "categories": [
+    {
+      "id": "cat1",
+      "name": "4ta",
+      "format": "GROUPS_KNOCKOUT",
+      "groupSize": 3,
+      "advancePerGroup": 2,
+      "maxPairs": 16,
+      "fixtureGeneratedAt": "2026-10-20T15:00:00.000Z",
+      "bracketGeneratedAt": null,
+      "standings": null,
+      "groups": [
+        {
+          "id": "g1",
+          "name": "Zona A",
+          "position": 0,
+          "standings": [
+            { "pairId": "p1", "played": 2, "won": 2, "lost": 0, "setsWon": 2, "setsLost": 0, "gamesWon": 12, "gamesLost": 5 }
+          ]
+        }
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "id": "p1",
+      "categoryId": "cat1",
+      "groupId": "g1",
+      "seed": 1,
+      "createdAt": "2026-10-16T00:00:00.000Z",
+      "players": [
+        { "id": "cp1", "position": 1, "name": "Juan Pérez", "phone": "5493411234567", "playerId": "clx...", "paidAt": "2026-10-16T00:00:00.000Z", "paymentMethod": "CASH" },
+        { "id": "cp2", "position": 2, "name": "Lucas Gómez", "phone": null, "playerId": null, "paidAt": null, "paymentMethod": null }
+      ]
+    }
+  ],
+  "matches": [
+    {
+      "id": "m1",
+      "categoryId": "cat1",
+      "stage": "GROUP",
+      "groupId": "g1",
+      "round": 1,
+      "position": 0,
+      "pairAId": "p1",
+      "pairBId": "p2",
+      "placeholderA": null,
+      "placeholderB": null,
+      "courtId": null,
+      "startsAt": null,
+      "sets": [[6, 4]],
+      "winnerPairId": "p1",
+      "nextMatchId": null,
+      "nextSlot": null
+    }
+  ],
+  "fees": { "expectedCents": 2000000, "collectedCents": 1000000 }
+}
+```
+
+`standings` is set on `ROUND_ROBIN` categories once their fixture exists; zonas carry their own. Tables order by wins, set difference, game difference, the match between the two pairs, then seed. In a knockout match `sets: null` with a `winnerPairId` is a bye.
+
+`404 Not Found` — `{ "message": "Evento no encontrado" }`
+
+### POST /competitions
+
+Creates a torneo or a peña and blocks its courts.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field         | Type     | Required | Constraints |
+| ------------- | -------- | -------- | ----------- |
+| kind          | string   | Yes      | `TOURNAMENT` \| `PENA` |
+| name          | string   | Yes      | 2–120 chars |
+| description   | string   | No       | max 2000 chars |
+| matchFormat   | string   | No       | `ONE_SET` (default; americano / peña) \| `BEST_OF_THREE` (completo) |
+| entryFeeCents | integer  | No       | ≥ 0, per player (default 0) |
+| courtIds      | string[] | Yes      | 1–30, must belong to the club |
+| sessions      | object[] | Yes      | 1–14 `{ dateKey: "YYYY-MM-DD", startTime: "HH:MM", endTime: "HH:MM" }`; an end at or before the start ends past midnight; sessions can't overlap |
+| categories    | object[] | Torneo   | 1–12 `{ name (1–60), format, groupSize? (2–8, default 3), advancePerGroup? (1–4, default 2), maxPairs? (2–128) }`. Ignored for a peña |
+
+```json
+{
+  "kind": "PENA",
+  "name": "Peña de los jueves",
+  "entryFeeCents": 500000,
+  "courtIds": ["clx1", "clx2"],
+  "sessions": [{ "dateKey": "2026-10-23", "startTime": "20:00", "endTime": "23:00" }]
+}
+```
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "El torneo necesita al menos una categoría" }`, `"Dos franjas del evento se superponen"`, `"Una o más canchas no pertenecen a este complejo"`, `"No pueden pasar más parejas que las que tiene cada zona"`
+
+`409 Conflict`
+```json
+{ "message": "Hay turnos reservados en ese horario: Cancha 2 · jueves 23/10 21:00. Movelos o cancelalos y volvé a intentar." }
+```
+
+### PATCH /competitions/:id
+
+Edits the event. `courtIds` and `sessions` replace the current ones and re-sync the blocked turnos.
+
+**Auth required:** Yes
+
+**Request body** (all optional)
+
+| Field         | Type     | Constraints |
+| ------------- | -------- | ----------- |
+| name          | string   | 2–120 chars |
+| description   | string   | max 2000 chars |
+| matchFormat   | string   | `ONE_SET` \| `BEST_OF_THREE`; refused once a result is loaded |
+| entryFeeCents | integer  | ≥ 0 |
+| courtIds      | string[] | 1–30 |
+| sessions      | object[] | 1–14, same shape as on create |
+| status        | string   | `OPEN` \| `IN_PROGRESS` \| `FINISHED` (cancel with `POST /competitions/:id/cancel`) |
+
+**Responses**
+
+`200 OK` — the event detail
+
+`404 Not Found` — `{ "message": "Evento no encontrado" }`
+
+`409 Conflict` — booked turnos in the way (as on create), `"El evento está cancelado"`, `"Ya hay resultados cargados: no se puede cambiar el formato"`
+
+### POST /competitions/:id/cancel
+
+Cancels the event and frees its turnos. Registrations and results are kept.
+
+**Auth required:** Yes
+
+**Responses**
+
+`201 Created` — the event detail with `"status": "CANCELLED"`
+
+`409 Conflict` — `{ "message": "El evento está cancelado" }`
+
+### DELETE /competitions/:id
+
+Deletes the event with everything in it and frees its turnos.
+
+**Auth required:** Yes
+
+**Responses**
+
+`204 No Content`
+
+`404 Not Found` — `{ "message": "Evento no encontrado" }`
+
+### POST /competitions/:id/categories
+
+Adds a category to a torneo.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field           | Type    | Required | Constraints |
+| --------------- | ------- | -------- | ----------- |
+| name            | string  | Yes      | 1–60 chars |
+| format          | string  | Yes      | `ROUND_ROBIN` \| `GROUPS_KNOCKOUT` \| `KNOCKOUT` |
+| groupSize       | integer | No       | 2–8 (default 3) |
+| advancePerGroup | integer | No       | 1–4 (default 2), ≤ groupSize |
+| maxPairs        | integer | No       | 2–128 |
+
+```json
+{ "name": "Mixto", "format": "GROUPS_KNOCKOUT", "groupSize": 3, "advancePerGroup": 2, "maxPairs": 12 }
+```
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "Una peña tiene una sola categoría" }`
+
+### PATCH /competitions/:id/categories/:categoryId
+
+Edits a category before its fixture. Same fields as above, all optional; `maxPairs: null` removes the cap.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`400 Bad Request` — `{ "message": "Ya hay 10 parejas anotadas en esta categoría" }`
+
+`409 Conflict` — `{ "message": "El fixture de esta categoría ya está armado: borralo para cambiarla" }`
+
+### DELETE /competitions/:id/categories/:categoryId
+
+Removes an empty category of a torneo.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "La categoría tiene parejas anotadas: borralas o pasalas a otra primero" }`
+
+### POST /competitions/:id/pairs
+
+Registers a pair. A player with a phone is linked to (or added to) the club's players.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field      | Type     | Required | Constraints |
+| ---------- | -------- | -------- | ----------- |
+| categoryId | string   | Torneo   | omit in a peña (its only category) |
+| players    | object[] | Yes      | exactly 2 `{ name (2–100), phone? (max 20) }` |
+| seed       | integer  | No       | 1–999, 1 = best |
+
+```json
+{
+  "categoryId": "cat1",
+  "players": [{ "name": "Juan Pérez", "phone": "3411234567" }, { "name": "Lucas Gómez" }],
+  "seed": 1
+}
+```
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "Elegí la categoría de la pareja" }`
+
+`409 Conflict` — `{ "message": "4ta ya tiene el cupo completo (16 parejas)" }`, `"El fixture de 4ta ya está armado: borralo para sumar parejas"`, `"El evento está finalizado: reabrilo para hacer cambios"`
+
+### PATCH /competitions/:id/pairs/:pairId
+
+Edits a pair: its players (both, by position), its seed (`null` clears it) or its category (only before either category's fixture).
+
+**Auth required:** Yes
+
+**Request body:** `categoryId?`, `players?` (exactly 2, as on create), `seed?`
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "El fixture de su categoría ya está armado: no se puede mover la pareja" }`
+
+### DELETE /competitions/:id/pairs/:pairId
+
+Removes a pair before its category's fixture.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "El fixture de su categoría ya está armado: borralo para sacar la pareja" }`
+
+### PATCH /competitions/:id/players/:playerId/payment
+
+Marks one player's registration fee as paid (with how) or back to pending. `playerId` is the pair player's id (`pairs[].players[].id`).
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field  | Type    | Required | Constraints |
+| ------ | ------- | -------- | ----------- |
+| paid   | boolean | Yes      | |
+| method | string  | No       | `CASH` (default) \| `QR` \| `TRANSFER` |
+
+```json
+{ "paid": true, "method": "TRANSFER" }
+```
+
+**Responses**
+
+`200 OK` — the event detail
+
+`404 Not Found` — `{ "message": "Jugador no encontrado" }`
+
+### POST /competitions/:id/categories/:categoryId/fixture
+
+Draws the category's fixture from its pairs (seed first, then registration order):
+
+- `ROUND_ROBIN`: everyone vs everyone, packed in waves (`round`) over the event's courts, each match with its `courtId`.
+- `GROUPS_KNOCKOUT`: zonas of about `groupSize` (seeds dealt in a snake), each with its round robin.
+- `KNOCKOUT`: the bracket straight away (byes go to the top seeds and advance on their own).
+
+Moves the event from `OPEN` to `IN_PROGRESS`.
+
+**Auth required:** Yes
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "Hacen falta al menos 2 parejas para armar el fixture" }`, `"Con una sola zona tienen que pasar al menos 2 parejas al cuadro"`
+
+`409 Conflict` — `{ "message": "El fixture de esta categoría ya está armado" }`
+
+### DELETE /competitions/:id/categories/:categoryId/fixture
+
+Undoes the fixture (zonas, matches and bracket) while no result is loaded. The event goes back to `OPEN` when no category has a fixture left.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "Ya hay resultados cargados: borralos primero" }`
+
+### POST /competitions/:id/categories/:categoryId/bracket
+
+`GROUPS_KNOCKOUT` only: once every zona match has a result, seeds the bracket with the best `advancePerGroup` of each zona (1° of every zona, then 2°…, zona-mates kept apart in round one). Knockout matches show `placeholderA/B` ("1° Zona A") and link to the next one (`nextMatchId`, `nextSlot`).
+
+**Auth required:** Yes
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "Esta categoría no tiene zonas" }`
+
+`409 Conflict` — `{ "message": "Faltan 3 resultados de las zonas" }`, `"El cuadro de esta categoría ya está armado"`
+
+### DELETE /competitions/:id/categories/:categoryId/bracket
+
+Undoes the bracket of a zonas category (the zonas stay) while it has no results.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "Ya hay resultados cargados: borralos primero" }`
+
+### PATCH /competitions/:id/matches/:matchId
+
+Loads or clears a result, and/or sets the court and time. In a knockout match the winner moves on to the next match.
+
+**Auth required:** Yes
+
+**Request body** (all optional)
+
+| Field    | Type          | Constraints |
+| -------- | ------------- | ----------- |
+| sets     | number[][] \| null | games per set from pair A's side. `ONE_SET`: exactly one set; `BEST_OF_THREE`: 2 or 3 sets, the third may be a super tie-break (10-8). No tied sets. `null` clears the result |
+| courtId  | string \| null | a club court |
+| startsAt | string \| null | ISO 8601 |
+
+```json
+{ "sets": [[6, 4], [3, 6], [10, 8]] }
+```
+
+**Responses**
+
+`200 OK` — the event detail
+
+`400 Bad Request` — `{ "message": "Con 1 set cada uno falta cargar el tercero" }`, `"Este partido se juega a un set"`, `"Un set no puede terminar empatado"`, `"Todavía no se sabe quién juega este partido"`
+
+`404 Not Found` — `{ "message": "Partido no encontrado" }`
+
+`409 Conflict` — `{ "message": "El partido siguiente ya tiene resultado: borralo primero" }`, `"El cuadro ya está armado: borralo para cambiar resultados de las zonas"`
 
 ## WhatsApp lines
 
