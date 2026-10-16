@@ -79,6 +79,17 @@ export class ConversationSessionService {
   }
 
   /**
+   * Hands a chat to the club and flags it in the panel ("Pide asesor"): the bot goes quiet until
+   * someone switches it back from Conversaciones.
+   */
+  async requestAdvisor(sessionId: string): Promise<void> {
+    await this.prisma.conversationSession.update({
+      where: { id: sessionId },
+      data: { mode: 'HUMAN', humanUntil: null, needsAdvisor: true },
+    })
+  }
+
+  /**
    * Wipes the chat for the `/reset` command: deletes every stored message and returns the
    * session to a clean IDLE state (no name/context). Emits a conversation event so the panel
    * thread refreshes to empty.

@@ -68,6 +68,8 @@ fecha u horario en contexto de reserva. Extraé del mensaje y del historial todo
 El jugador NO necesita elegir cancha: el sistema le muestra los horarios libres y le asigna una
 cancha sola (solo pregunta cuál si el mismo horario está libre en varias). Pasá courtName solo si
 el jugador pide una cancha puntual; si menciona una hora, pasá siempre timePreference.
+show_competitions → el jugador pregunta por torneos, peñas o americanos, o quiere anotarse a uno.
+Nunca inventes torneos, fechas ni precios: los que hay solo los sabés llamando a esta función.
 Texto (sin función) → saludos, agradecimientos y preguntas generales sin fecha específica.
 
 ⚠️ Ver o CANCELAR turnos ya reservados lo maneja el sistema, no vos. Si el jugador quiere ver

@@ -171,6 +171,7 @@ model Club {
   competitionPairs     CompetitionPair[]
   competitionPlayers   CompetitionPlayer[]
   competitionMatches   CompetitionMatch[]
+  competitionSignupRequests CompetitionSignupRequest[]
 }
 
 enum Role {
@@ -1146,6 +1147,7 @@ model Competition {
   pairs           CompetitionPair[]
   players         CompetitionPlayer[]
   matches         CompetitionMatch[]
+  signupRequests  CompetitionSignupRequest[]
   slots           Slot[]
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
@@ -1334,4 +1336,34 @@ model CompetitionMatch {
   @@index([clubId])
   @@index([competitionId])
   @@index([categoryId])
+}
+
+enum SignupRequestStatus {
+  /// Waiting for someone at the club to answer the player.
+  PENDING
+  /// The club talked to the player (registered them or not).
+  HANDLED
+  /// Not worth following up (a test, a duplicate, a mistake).
+  DISMISSED
+}
+
+/// A player asked through the WhatsApp bot to sign up for a torneo or peña. The bot only takes the
+/// request and hands the chat to the club; the staff registers the pair from the panel.
+model CompetitionSignupRequest {
+  id            String              @id @default(cuid())
+  clubId        String
+  club          Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition         @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  /// The player's WhatsApp number (wa_id) — opens their chat in Conversaciones.
+  waId          String              @db.VarChar(32)
+  /// The name the bot knows them by, if any.
+  playerName    String?             @db.VarChar(100)
+  status        SignupRequestStatus @default(PENDING)
+  handledAt     DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([clubId, status])
+  @@index([competitionId])
 }

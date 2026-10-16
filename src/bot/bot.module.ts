@@ -7,6 +7,7 @@ import { LlmModule } from '../llm/llm.module'
 import { EventsModule } from '../events/events.module'
 import { WhatsAppMediaModule } from '../whatsapp/whatsapp-media.module'
 import { NotificationsModule } from '../notifications/notifications.module'
+import { CompetitionsModule } from '../competitions/competitions.module'
 import { BotService } from './bot.service'
 import { ConversationSessionService } from './conversation-session.service'
 
@@ -20,6 +21,7 @@ import { ConversationSessionService } from './conversation-session.service'
     NotificationsModule,
     forwardRef(() => WaitlistModule),
     PlayersModule,
+    CompetitionsModule,
   ],
   providers: [BotService, ConversationSessionService],
   exports: [BotService],

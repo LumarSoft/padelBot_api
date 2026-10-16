@@ -1674,6 +1674,58 @@ Loads or clears a result, and/or sets the court and time. In a knockout match th
 
 `409 Conflict` — `{ "message": "El partido siguiente ya tiene resultado: borralo primero" }`, `"El cuadro ya está armado: borralo para cambiar resultados de las zonas"`
 
+## Competition sign-up requests (inscripciones por WhatsApp)
+
+When a player asks the bot for torneos or peñas (menu option 3, the words "torneo"/"peña"/"americano"/"inscribirme", or the LLM's `show_competitions` tool), the bot lists the events with status `OPEN` and a session today or later (soonest first, at most 10). Picking one records a `CompetitionSignupRequest`, pushes the club ("🏆 Quieren anotarse a …", `data: { competitionId }`), emits SSE `competition.signup` (`{ type, clubId, competitionId, competitionName, playerName }`) and hands the chat to a person: `mode = HUMAN`, `needsAdvisor = true`. The bot never registers the pair — the desk does it from the panel or the app. A second request from the same number for the same event while the first is `PENDING` is not duplicated nor pushed again. Open to STAFF.
+
+### GET /competition-signup-requests
+
+The club's sign-up requests, newest first (at most 200).
+
+**Auth required:** Yes
+
+**Query params:** `status` (`PENDING` | `HANDLED` | `DISMISSED`), `competitionId`, both optional.
+
+**Responses**
+
+`200 OK`
+```json
+[
+  {
+    "id": "clx...",
+    "competitionId": "clx...",
+    "waId": "5493411234567",
+    "playerName": "Juan",
+    "status": "PENDING",
+    "handledAt": null,
+    "createdAt": "2026-10-16T02:10:00.000Z",
+    "competition": { "id": "clx...", "name": "Torneo Primavera", "kind": "TOURNAMENT", "status": "OPEN" }
+  }
+]
+```
+
+### PATCH /competition-signup-requests/:id
+
+Marks a request as handled, dismissed, or back to pending. Emits `competition.changed` so other screens refresh.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field  | Type   | Required | Constraints |
+| ------ | ------ | -------- | ----------- |
+| status | string | Yes      | `PENDING` \| `HANDLED` \| `DISMISSED` |
+
+```json
+{ "status": "HANDLED" }
+```
+
+**Responses**
+
+`200 OK` — the updated request (same shape as in the list)
+
+`404 Not Found` — `{ "message": "Solicitud no encontrada" }`
+
 ## WhatsApp lines
 
 Maps a Meta `phone_number_id` to the club so the bot knows which tenant an incoming message belongs to. All routes are scoped to the caller's club.

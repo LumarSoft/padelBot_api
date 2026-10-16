@@ -15,10 +15,27 @@ export enum BotState {
   RESCHEDULE_SLOT = 'RESCHEDULE_SLOT',
   /** Confirming the move, with the price difference spelled out. */
   RESCHEDULE_CONFIRM = 'RESCHEDULE_CONFIRM',
+  /** Picking which open torneo or peña to sign up for. */
+  COMPETITION_PICK = 'COMPETITION_PICK',
 }
 
 /** Tapping one of the player's bookings feeds back "turno:<bookingId>" through the FSM. */
 export const MY_BOOKING_PREFIX = 'turno:'
+
+/** Tapping a torneo or peña in the list feeds back "torneo:<competitionId>" through the FSM. */
+export const COMPETITION_PREFIX = 'torneo:'
+
+/** An open torneo or peña, as offered to the player. */
+export interface CompetitionOption {
+  id: string
+  kind: 'TOURNAMENT' | 'PENA'
+  name: string
+  /** "sábado 24/10 · 09:00", plus "(+2 días)" when it spans several. */
+  when: string
+  /** Per player, in cents. 0 = free. */
+  feeCents: number
+  categories: string[]
+}
 
 /** One of the player's upcoming bookings, as offered in the "Mis turnos" list. */
 export interface MyBookingOption {
@@ -107,6 +124,8 @@ export interface SessionContext {
   habit?: { weekday: number; bandStart: string; courtId: string; courtName: string }
   /** Told in this conversation that the club answers by hand (the bot is paused for credits). */
   creditsPausedNotified?: boolean
+  /** The open torneos and peñas, as last listed — drives the sign-up picker. */
+  competitionOptions?: CompetitionOption[]
 }
 
 export interface HandlerResult {

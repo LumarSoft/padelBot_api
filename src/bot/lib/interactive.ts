@@ -1,6 +1,14 @@
 import { dayLabelFromKey, dayMonthFromKey, shiftDateKey, todayKey } from '../../availability/lib/datetime'
 import { PART_OF_DAY_LABELS, PART_OF_DAY_PREFIX, partsWithBands } from './part-of-day'
-import { BotState, Interactive, InteractiveButton, InteractiveRow, MY_BOOKING_PREFIX, SessionContext } from '../types'
+import {
+  BotState,
+  COMPETITION_PREFIX,
+  Interactive,
+  InteractiveButton,
+  InteractiveRow,
+  MY_BOOKING_PREFIX,
+  SessionContext,
+} from '../types'
 
 // Builds the WhatsApp botonera that fits the step the player is on, derived purely from the
 // resulting FSM state + context. Each option's `id` is the exact text the FSM already
@@ -22,6 +30,7 @@ const MENU_BUTTONS: Interactive = {
   buttons: [
     { id: '1', title: '🎾 Reservar' },
     { id: '2', title: '🗓️ Mis turnos' },
+    { id: '3', title: '🏆 Torneos' },
   ],
 }
 
@@ -61,6 +70,24 @@ function myBookingsInteractive(ctx: SessionContext): Interactive | undefined {
     })),
     'Ver mis turnos',
   )
+}
+
+/** The open torneos and peñas — id = "torneo:<competitionId>", resolved by the FSM. */
+function competitionsInteractive(ctx: SessionContext): Interactive | undefined {
+  const options = ctx.competitionOptions ?? []
+  if (options.length === 0) return undefined
+  // Always a list (never buttons): the row's description carries the date, which is what
+  // tells a player which one they want.
+  return {
+    list: {
+      button: 'Ver torneos',
+      rows: options.map(c => ({
+        id: `${COMPETITION_PREFIX}${c.id}`,
+        title: truncate(c.name, ROW_TITLE_MAX),
+        description: truncate(`${c.kind === 'PENA' ? 'Peña' : 'Torneo'} · ${c.when}`, ROW_DESC_MAX),
+      })),
+    },
+  }
 }
 
 /**
@@ -179,6 +206,8 @@ export function buildInteractive(state: BotState, ctx: SessionContext): Interact
       return slotsInteractive(ctx)
     case BotState.RESCHEDULE_CONFIRM:
       return CONFIRM_RESCHEDULE_BUTTONS
+    case BotState.COMPETITION_PICK:
+      return competitionsInteractive(ctx)
     default:
       // BOOK_NAME, BOOK_DNI → free-text answers, no botonera.
       return undefined

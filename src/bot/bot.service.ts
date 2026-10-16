@@ -21,6 +21,14 @@ import { matchByTime, matchCourt, matchSlot } from './lib/match'
 import { parseDateExpression } from './lib/date-parse'
 import { stepPrompt } from './lib/step-prompt'
 import {
+  competitionClosed,
+  competitionsResult,
+  matchCompetition,
+  signupAlreadyRequested,
+  signupRequested,
+  toCompetitionOptions,
+} from './lib/competitions'
+import {
   assignCheapestForBand,
   availabilityResult,
   bandsToSlotOptions,
@@ -34,6 +42,7 @@ import { WaitlistService } from '../waitlist/waitlist.service'
 import { PlayersService } from '../players/players.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { CreditsService } from '../plans/credits.service'
+import { CompetitionSignupsService } from '../competitions/competition-signups.service'
 import { WhatsAppMediaService } from '../whatsapp/whatsapp-media.service'
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import {
@@ -116,6 +125,12 @@ const MY_BOOKINGS_INTENT =
 const HUMAN_HANDOFF_INTENT =
   /\bhablar con (una |un )?(persona|humano|alguien|encargad[oa]|due[nñ]o|operador|asesor|agente)\b|\b(con |una )?persona (real|de verdad)\b|\batenci[oó]n humana\b|\bun humano\b|\bquiero (hablar|comunicarme) con (alguien|una persona|un humano)\b/i
 
+/**
+ * "¿Hay algún torneo?", "quiero anotarme a la peña" — answered from the club's open events, no
+ * LLM. Only "peña" with ñ: "pena" is mostly "qué pena".
+ */
+const COMPETITIONS_INTENT = /\btorneos?\b|\bpeñas?\b|\bamericanos?\b|\binscrib(o|ir(me|nos)?)\b/i
+
 @Injectable()
 export class BotService {
   private readonly logger = new Logger(BotService.name)
@@ -132,6 +147,7 @@ export class BotService {
     private readonly players: PlayersService,
     private readonly notifications: NotificationsService,
     private readonly credits: CreditsService,
+    private readonly competitionSignups: CompetitionSignupsService,
   ) {}
 
   async handleMessage(waId: string, clubId: string, body: string): Promise<BotReply | null> {
@@ -637,6 +653,8 @@ export class BotService {
         return this.onRescheduleSlot(msg, ctx, clubId, waId)
       case BotState.RESCHEDULE_CONFIRM:
         return this.onRescheduleConfirm(msg, ctx, clubId, waId)
+      case BotState.COMPETITION_PICK:
+        return this.onCompetitionPick(msg, ctx, clubId, waId)
       default:
         return Promise.resolve({ reply: welcome(ctx.playerName), state: BotState.MENU, ctx })
     }
@@ -700,8 +718,55 @@ export class BotService {
   private async onMenu(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     if (msg === '1') return { reply: ASK_DATE, state: BotState.BOOK_DATE, ctx }
     if (msg === '2' || MY_BOOKINGS_INTENT.test(msg)) return this.showMyBookings(clubId, waId, ctx)
+    if (msg === '3' || COMPETITIONS_INTENT.test(msg)) return this.showCompetitions(clubId, ctx)
     // Natural language → LLM interprets intent
     return this.fallback(BotState.MENU, msg, ctx, clubId, waId)
+  }
+
+  /** "Torneos y peñas": the events open for registration, tappable. */
+  private async showCompetitions(clubId: string, ctx: SessionContext): Promise<HandlerResult> {
+    const open = await this.competitionSignups.openForPlayers(clubId)
+    return competitionsResult(toCompetitionOptions(open), ctx)
+  }
+
+  /**
+   * The player picked an event. The bot doesn't register anyone: it records the request, tells
+   * the club and hands the chat to a person ("Pide asesor"), who sorts out the pair and the fee.
+   */
+  private async onCompetitionPick(
+    msg: string,
+    ctx: SessionContext,
+    clubId: string,
+    waId: string,
+  ): Promise<HandlerResult> {
+    const options = ctx.competitionOptions ?? []
+    const option = matchCompetition(msg, options)
+    if (!option) {
+      if (msg === '1' || msg === '2' || isGreeting(msg)) return this.onMenu(msg, ctx, clubId, waId)
+      return this.fallback(BotState.COMPETITION_PICK, msg, ctx, clubId, waId)
+    }
+
+    const request = await this.competitionSignups.request(clubId, {
+      competitionId: option.id,
+      waId,
+      playerName: ctx.playerName,
+    })
+    if (!request) {
+      const refreshed = await this.showCompetitions(clubId, ctx)
+      return { ...refreshed, prefix: competitionClosed(option.name) }
+    }
+
+    const session = await this.prisma.conversationSession.findUnique({
+      where: { waId_clubId: { waId, clubId } },
+      select: { id: true },
+    })
+    if (session) await this.sessionService.requestAdvisor(session.id)
+    this.logger.log(`🏆 ${waId}: pidió anotarse a "${option.name}" — derivado al club`)
+
+    const reply = request.alreadyPending
+      ? signupAlreadyRequested(request.competitionName)
+      : signupRequested(request.competitionName)
+    return { reply, state: BotState.MENU, ctx: { ...keepName(ctx), competitionOptions: undefined } }
   }
 
   /**

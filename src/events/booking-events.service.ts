@@ -58,6 +58,15 @@ export interface CompetitionChangedEvent {
   competitionId: string
 }
 
+/** A player asked the bot to sign up for a torneo or peña — the panel lights its inbox. */
+export interface CompetitionSignupEvent {
+  type: 'competition.signup'
+  clubId: string
+  competitionId: string
+  competitionName: string
+  playerName: string | null
+}
+
 export type AppEvent =
   | BookingEvent
   | ConversationEvent
@@ -65,6 +74,7 @@ export type AppEvent =
   | PaymentConfirmedEvent
   | SlotFreedEvent
   | CompetitionChangedEvent
+  | CompetitionSignupEvent
 
 @Injectable()
 export class BookingEventsService {
@@ -92,6 +102,10 @@ export class BookingEventsService {
   }
 
   emitCompetitionChanged(event: CompetitionChangedEvent): void {
+    this.publish(event)
+  }
+
+  emitCompetitionSignup(event: CompetitionSignupEvent): void {
     this.publish(event)
   }
 

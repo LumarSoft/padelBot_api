@@ -25,7 +25,8 @@ function fmtExact(cents: number): string {
 export const MENU =
   '¿Qué querés hacer?\n\n' +
   '1️⃣ Reservar un turno\n' +
-  '2️⃣ Ver mis turnos (o cambiar uno de horario)\n\n' +
+  '2️⃣ Ver mis turnos (o cambiar uno de horario)\n' +
+  '3️⃣ Torneos y peñas\n\n' +
   'Respondé con el número, o escribime con tus palabras (ej: *"un turno el sábado a la tarde"*).'
 
 /**
@@ -453,6 +454,8 @@ function conciseBody(state: BotState, ctx: SessionContext, text: string): string
     case BotState.BOOK_SLOT:
     case BotState.RESCHEDULE_SLOT:
       return slotsPrompt(ctx)
+    case BotState.COMPETITION_PICK:
+      return '🏆 Elegí a cuál te querés anotar 👇'
     default:
       // BOOK_CONFIRM body is a summary, not an option list — keep it.
       return text

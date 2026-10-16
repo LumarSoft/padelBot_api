@@ -11,6 +11,7 @@ import {
   rescheduleConfirm,
   slotsList,
 } from '../messages'
+import { competitionsList } from './competitions'
 
 /**
  * Rebuilds the prompt of the step the player is standing on, from the session context alone.
@@ -71,6 +72,9 @@ export function stepPrompt(state: BotState, ctx: SessionContext): string | null 
             (ctx.selectedSlotPrice ?? 0) - (ctx.rescheduleFromPriceCents ?? 0),
           )
         : null
+
+    case BotState.COMPETITION_PICK:
+      return ctx.competitionOptions?.length ? competitionsList(ctx.competitionOptions) : null
 
     default:
       return null
