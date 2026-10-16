@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Headers, HttpCode, Post } from '@nestjs/common'
+import { Body, Controller, ForbiddenException, Headers, HttpCode, Post, Query } from '@nestjs/common'
 import { SkipThrottle } from '@nestjs/throttler'
 import { timingSafeEqual } from 'crypto'
 import { PaymentsService } from './payments.service'
@@ -21,9 +21,10 @@ export class PaymentsController {
   async handleMercadoPago(
     @Headers('x-signature') xSignature: string,
     @Headers('x-request-id') xRequestId: string,
+    @Query('data.id') queryDataId: string | undefined,
     @Body() body: unknown,
   ): Promise<void> {
-    await this.paymentsService.handleWebhook(xSignature ?? '', xRequestId ?? '', body)
+    await this.paymentsService.handleWebhook(xSignature ?? '', xRequestId ?? '', body, queryDataId)
   }
 
   /**

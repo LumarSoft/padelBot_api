@@ -95,13 +95,14 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
   ) {}
 
-  async handleWebhook(xSignature: string, xRequestId: string, body: unknown): Promise<void> {
+  async handleWebhook(xSignature: string, xRequestId: string, body: unknown, queryDataId?: string): Promise<void> {
     const payload = body as { type?: string; data?: { id?: string } }
     if (payload.type !== 'payment' || !payload.data?.id) return
 
     const paymentId = String(payload.data.id)
 
-    if (!this.mp.verifyWebhookSignature(paymentId, xRequestId, xSignature)) {
+    // MercadoPago signs the data.id of the URL; the body carries the same id.
+    if (!this.mp.verifyWebhookSignature(queryDataId || paymentId, xRequestId, xSignature)) {
       throw new UnauthorizedException('Invalid webhook signature')
     }
 

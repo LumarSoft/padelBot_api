@@ -2288,6 +2288,8 @@ Deposits are paid by bank transfer to the club's MercadoPago alias/CVU. An incom
 
 MercadoPago IPN webhook. The `x-signature` HMAC is verified, the payment is fetched from the MP API, and the booking is reconciled: by `external_reference` for legacy checkout payments, or by exact amount for incoming transfers.
 
+The signature is HMAC-SHA256 with `WEBHOOK_SECRET` over MercadoPago's manifest `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` — trailing `;` included, `data.id` (from the URL's `data.id`, else the body's) lowercased, and any part MercadoPago didn't send left out.
+
 **Auth required:** No (verified via `x-signature` header)
 
 `200 OK` — always (processing is best-effort and idempotent)
