@@ -23,6 +23,7 @@
     "bot:reset": "ts-node scripts/reset-bot-session.ts",
     "subscription": "ts-node scripts/set-subscription.ts",
     "ops:admin": "ts-node scripts/create-platform-admin.ts",
+    "improvement:post": "ts-node scripts/post-improvement.ts",
     "players:backfill": "ts-node scripts/backfill-players.ts",
     "review:prepare": "ts-node scripts/prepare-app-review-demo.ts",
     "prepare": "husky",

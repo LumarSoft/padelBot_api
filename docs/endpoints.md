@@ -2842,6 +2842,102 @@ doesn't know the entries: it stores the id as given.
 { "statusCode": 400, "message": ["newsId must be a lowercase slug of up to 64 characters"], "error": "Bad Request" }
 ```
 
+## Mejoras (`/improvements`)
+
+"Mejoras" in the panel and the staff app: the improvements Lumarsoft posts (global, the same for
+every club — only published ones) and the club's own suggestions to us. Open to OWNER and STAFF.
+A club only ever sees its own suggestions. Posting improvements and answering suggestions is done
+from the ops console (`/ops/improvements`, `/ops/improvement-suggestions`) or with
+`npm run improvement:post`.
+
+Improvement `status`: `PLANNED` | `IN_PROGRESS` | `RELEASED`.
+Suggestion `status`: `NEW` | `UNDER_REVIEW` | `PLANNED` | `DONE` | `DECLINED`.
+
+### GET /improvements
+
+Published improvements, newest first.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx…",
+    "title": "Torneos y peñas",
+    "body": "Anotá parejas, cobrá la inscripción y el panel arma zonas…",
+    "status": "RELEASED",
+    "publishedAt": "2026-10-15T12:00:00.000Z"
+  }
+]
+```
+
+`401 Unauthorized` — missing or invalid token.
+
+### GET /improvements/suggestions
+
+The caller's club's suggestions (from any of its users), newest first, with our answer.
+`improvement` is the published improvement that answers it, if any.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx…",
+    "title": "Exportar reservas a Excel",
+    "body": "Poder bajar las reservas del mes para el contador",
+    "status": "PLANNED",
+    "opsReply": "¡Buena idea! Lo sumamos para noviembre.",
+    "repliedAt": "2026-10-15T15:00:00.000Z",
+    "createdAt": "2026-10-15T12:00:00.000Z",
+    "authorName": "Ana",
+    "improvement": { "id": "clx…", "title": "Exportar a Excel", "status": "PLANNED" }
+  }
+]
+```
+
+`401 Unauthorized` — missing or invalid token.
+
+### POST /improvements/suggestions
+
+Sends a suggestion to Lumarsoft. Stored as `NEW` and pinged to our ops channel
+(`OPS_ALERT_WEBHOOK_URL`). Rate-limited to 10 per hour.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field   | Type   | Required | Constraints      |
+| ------- | ------ | -------- | ---------------- |
+| `title` | string | Yes      | 3–120 characters |
+| `body`  | string | Yes      | 10–2000 chars    |
+
+```json
+{ "title": "Exportar reservas a Excel", "body": "Poder bajar las reservas del mes para el contador" }
+```
+
+**Responses**
+
+`201 Created` — the suggestion, same shape as in `GET /improvements/suggestions`.
+
+`400 Bad Request` — validation failed.
+
+```json
+{ "statusCode": 400, "message": ["title must be longer than or equal to 3 characters"], "error": "Bad Request" }
+```
+
+`429 Too Many Requests` — more than 10 in an hour.
+
+---
+
 ## Payments (Webhooks)
 
 Deposits are paid by bank transfer to the club's MercadoPago alias/CVU. An incoming transfer is matched to a pending booking by its **exact unique amount** (`transferAmountCents`), then the booking is confirmed and the player notified. These endpoints are unauthenticated by JWT — they are secured by a signature / shared secret instead.
@@ -3723,3 +3819,143 @@ to-do list for the next round of help content. Last 90 days, most searched first
 ```json
 { "statusCode": 401, "message": "Unauthorized" }
 ```
+
+### GET /ops/improvements
+
+Every improvement we posted, drafts (`publishedAt: null`) first, then newest published.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx…",
+    "title": "Exportar a Excel",
+    "body": "…",
+    "status": "PLANNED",
+    "publishedAt": null,
+    "createdAt": "2026-10-15T12:00:00.000Z",
+    "updatedAt": "2026-10-15T12:00:00.000Z",
+    "suggestionCount": 3
+  }
+]
+```
+
+`401 Unauthorized` — missing or invalid ops token.
+
+### POST /ops/improvements
+
+Posts an improvement for every club. Without `published: true` it's saved as a draft.
+
+**Auth required:** Yes (ops token)
+
+**Request body**
+
+| Field       | Type    | Required | Constraints                                   |
+| ----------- | ------- | -------- | --------------------------------------------- |
+| `title`     | string  | Yes      | 3–120 characters                              |
+| `body`      | string  | Yes      | 1–5000 characters                             |
+| `status`    | string  | No       | `PLANNED` \| `IN_PROGRESS` \| `RELEASED` (default) |
+| `published` | boolean | No       | `true` publishes it now                       |
+
+```json
+{ "title": "Exportar a Excel", "body": "…", "status": "RELEASED", "published": true }
+```
+
+**Responses**
+
+`201 Created` — the improvement, same shape as in `GET /ops/improvements`.
+
+`400 Bad Request` — validation failed.
+
+### PATCH /ops/improvements/:id
+
+Edits an improvement. `published: true` publishes a draft (a published one keeps its first
+date); `published: false` takes it back to draft.
+
+**Auth required:** Yes (ops token)
+
+**Request body** — any of `title`, `body`, `status`, `published` (same constraints as POST).
+
+**Responses**
+
+`200 OK` — the improvement.
+
+`404 Not Found`
+
+```json
+{ "statusCode": 404, "message": "Mejora no encontrada", "error": "Not Found" }
+```
+
+### DELETE /ops/improvements/:id
+
+Deletes an improvement. Linked suggestions keep their status and reply; only the link goes.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`204 No Content`
+
+`404 Not Found` — `"Mejora no encontrada"`.
+
+### GET /ops/improvement-suggestions
+
+The clubs' suggestions, across clubs: `NEW` first, then `UNDER_REVIEW`, `PLANNED`, `DONE`,
+`DECLINED`; newest first within each. Last 200.
+
+**Auth required:** Yes (ops token)
+
+**Query** — `status` (optional): one of the suggestion statuses.
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx…",
+    "title": "Exportar reservas a Excel",
+    "body": "…",
+    "status": "NEW",
+    "opsReply": null,
+    "repliedAt": null,
+    "createdAt": "2026-10-15T12:00:00.000Z",
+    "clubId": "clx…",
+    "clubName": "Club Demo Pádel",
+    "authorName": "Ana",
+    "authorEmail": "ana@club.com",
+    "improvement": null
+  }
+]
+```
+
+### PATCH /ops/improvement-suggestions/:id
+
+Answers a suggestion. Replying to a `NEW` one without a `status` moves it to `UNDER_REVIEW`.
+`null` clears `opsReply` / `improvementId`.
+
+**Auth required:** Yes (ops token)
+
+**Request body**
+
+| Field           | Type           | Required | Constraints                        |
+| --------------- | -------------- | -------- | ---------------------------------- |
+| `status`        | string         | No       | a suggestion status                |
+| `opsReply`      | string \| null | No       | 1–2000 characters; shown to the club |
+| `improvementId` | string \| null | No       | an existing improvement            |
+
+```json
+{ "status": "PLANNED", "opsReply": "¡Buena idea! Lo sumamos para noviembre.", "improvementId": "clx…" }
+```
+
+**Responses**
+
+`200 OK` — the suggestion, same shape as in the list.
+
+`404 Not Found` — `"Propuesta no encontrada"` or `"Mejora no encontrada"`.

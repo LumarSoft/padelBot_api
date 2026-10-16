@@ -15,6 +15,7 @@ import { ExchangeRateService } from './exchange-rate.service'
 import { OpsMonthStatesService } from './ops-month-states.service'
 import { OpsClubDetailService } from './ops-club-detail.service'
 import { OpsWeeklySummaryService } from './ops-weekly-summary.service'
+import { OpsImprovementsService } from './ops-improvements.service'
 import { OpsJwtStrategy } from './strategies/ops-jwt.strategy'
 import { opsJwtSecret } from './lib/ops-secret'
 
@@ -56,6 +57,7 @@ import { opsJwtSecret } from './lib/ops-secret'
     OpsMonthStatesService,
     OpsClubDetailService,
     OpsWeeklySummaryService,
+    OpsImprovementsService,
     OpsJwtStrategy,
   ],
 })

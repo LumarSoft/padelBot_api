@@ -26,6 +26,7 @@ import { OpsHelpService, HelpSearchMissRow } from './ops-help.service'
 import { OpsProfitabilityService, ProfitabilityReport } from './ops-profitability.service'
 import { OpsClubDetail, OpsClubDetailService } from './ops-club-detail.service'
 import { OpsWeeklySummaryService } from './ops-weekly-summary.service'
+import { OpsImprovementRow, OpsImprovementsService, OpsImprovementSuggestionRow } from './ops-improvements.service'
 import { SubscriptionState } from '../clubs/lib/subscription'
 import { OpsLoginDto } from './dto/ops-login.dto'
 import { UpdateLeadDto } from './dto/update-lead.dto'
@@ -35,6 +36,10 @@ import { ListLeadsQueryDto } from './dto/list-leads-query.dto'
 import { ProfitabilityQueryDto } from './dto/profitability-query.dto'
 import { UpdateClubNotesDto } from './dto/update-club-notes.dto'
 import { SignupFunnelQueryDto } from './dto/signup-funnel-query.dto'
+import { CreateImprovementDto } from './dto/create-improvement.dto'
+import { UpdateImprovementDto } from './dto/update-improvement.dto'
+import { UpdateImprovementSuggestionDto } from './dto/update-improvement-suggestion.dto'
+import { ListImprovementSuggestionsQueryDto } from './dto/list-improvement-suggestions-query.dto'
 
 /**
  * The Lumarsoft ops console (`/ops` in the panel). EVERY route here reads across tenants,
@@ -54,6 +59,7 @@ export class OpsController {
     private readonly profitability: OpsProfitabilityService,
     private readonly clubDetail: OpsClubDetailService,
     private readonly weeklySummary: OpsWeeklySummaryService,
+    private readonly improvements: OpsImprovementsService,
   ) {}
 
   // ── Auth ──────────────────────────────────────────────────────────────────
@@ -211,5 +217,49 @@ export class OpsController {
   @UseGuards(OpsAuthGuard)
   helpSearchMisses(): Promise<HelpSearchMissRow[]> {
     return this.help.searchMisses()
+  }
+
+  // ── Mejoras (improvements we post + the clubs' suggestions) ──────────────
+
+  @Get('improvements')
+  @UseGuards(OpsAuthGuard)
+  listImprovements(): Promise<OpsImprovementRow[]> {
+    return this.improvements.listImprovements()
+  }
+
+  @Post('improvements')
+  @UseGuards(OpsAuthGuard)
+  createImprovement(@Body() dto: CreateImprovementDto): Promise<OpsImprovementRow> {
+    return this.improvements.createImprovement(dto)
+  }
+
+  @Patch('improvements/:id')
+  @UseGuards(OpsAuthGuard)
+  updateImprovement(@Param('id') id: string, @Body() dto: UpdateImprovementDto): Promise<OpsImprovementRow> {
+    return this.improvements.updateImprovement(id, dto)
+  }
+
+  @Delete('improvements/:id')
+  @UseGuards(OpsAuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteImprovement(@Param('id') id: string): Promise<void> {
+    return this.improvements.deleteImprovement(id)
+  }
+
+  @Get('improvement-suggestions')
+  @UseGuards(OpsAuthGuard)
+  listImprovementSuggestions(
+    @Query() query: ListImprovementSuggestionsQueryDto,
+  ): Promise<OpsImprovementSuggestionRow[]> {
+    return this.improvements.listSuggestions(query.status)
+  }
+
+  @Patch('improvement-suggestions/:id')
+  @UseGuards(OpsAuthGuard)
+  updateImprovementSuggestion(
+    @Param('id') id: string,
+    @Body() dto: UpdateImprovementSuggestionDto,
+  ): Promise<OpsImprovementSuggestionRow> {
+    return this.improvements.updateSuggestion(id, dto)
   }
 }

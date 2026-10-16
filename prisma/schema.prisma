@@ -163,6 +163,7 @@ model Club {
   llmUsageDaily        LlmUsageDaily[]
   whatsAppMessageDaily WhatsAppMessageDaily[]
   helpSearchMisses     HelpSearchMiss[]
+  improvementSuggestions ImprovementSuggestion[]
   competitions         Competition[]
   competitionSessions  CompetitionSession[]
   competitionCourts    CompetitionCourt[]
@@ -330,6 +331,7 @@ model User {
   stockMovements   StockMovement[]
   counterSales     CounterSale[]
   competitions     Competition[]
+  improvementSuggestions ImprovementSuggestion[]
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
@@ -378,6 +380,73 @@ model HelpSearchMiss {
 
   @@unique([clubId, query])
   @@index([updatedAt])
+}
+
+/// Where an improvement we post stands. Clubs see all three: a roadmap, not only a changelog.
+enum ImprovementStatus {
+  PLANNED
+  IN_PROGRESS
+  RELEASED
+}
+
+/// An improvement Lumarsoft posts for every club ("Mejoras" in the panel and the staff app).
+/// Deliberately global — no clubId, like PlatformAdmin: it's our product's changelog, the same
+/// for every tenant. Written only by the ops console (`/ops/improvements`) or
+/// `npm run improvement:post`; clubs only read the published ones. Separate from the panel's
+/// "Novedades" (`front/src/features/help/content/news.ts`), which are tied to on-screen guides.
+model Improvement {
+  id          String            @id @default(cuid())
+  title       String            @db.VarChar(120)
+  body        String            @db.Text
+  status      ImprovementStatus @default(RELEASED)
+  /// Null = draft, invisible to clubs. Set when published; it's the date clubs see.
+  publishedAt DateTime?
+  /// Club suggestions this improvement answers (linked from the ops console).
+  suggestions ImprovementSuggestion[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([publishedAt])
+}
+
+/// What we did with a club's suggestion. The club sees it next to their suggestion.
+enum ImprovementSuggestionStatus {
+  /// Just arrived, nobody at Lumarsoft has read it.
+  NEW
+  /// Read; we're thinking about it.
+  UNDER_REVIEW
+  /// We'll build it (often linked to a PLANNED Improvement).
+  PLANNED
+  /// Built (often linked to the RELEASED Improvement).
+  DONE
+  /// We won't build it; `opsReply` says why.
+  DECLINED
+}
+
+/// An improvement a club's owner or staff proposed to Lumarsoft. Tenant-scoped like every club
+/// row: a club only ever sees its own. Read and answered across clubs by the ops console.
+model ImprovementSuggestion {
+  id            String                      @id @default(cuid())
+  clubId        String
+  club          Club                        @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Who proposed it. Null once that user is gone; the suggestion stays with the club.
+  userId        Int?
+  user          User?                       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  title         String                      @db.VarChar(120)
+  body          String                      @db.Text
+  status        ImprovementSuggestionStatus @default(NEW)
+  /// Our answer, shown to the club. Null = not answered yet.
+  opsReply      String?                     @db.Text
+  repliedAt     DateTime?
+  /// The posted improvement that answers it, if any.
+  improvementId String?
+  improvement   Improvement?                @relation(fields: [improvementId], references: [id], onDelete: SetNull)
+  createdAt     DateTime                    @default(now())
+  updatedAt     DateTime                    @updatedAt
+
+  @@index([clubId, createdAt])
+  @@index([status, createdAt])
+  @@index([improvementId])
 }
 
 /// A staff-app device registered for push notifications ("Nueva reserva pendiente de seña",

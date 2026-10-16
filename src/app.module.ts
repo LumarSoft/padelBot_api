@@ -37,6 +37,7 @@ import { OpsModule } from './ops/ops.module'
 import { DemoModule } from './demo/demo.module'
 import { FixedConfirmationsModule } from './fixed-confirmations/fixed-confirmations.module'
 import { CompetitionsModule } from './competitions/competitions.module'
+import { ImprovementsModule } from './improvements/improvements.module'
 
 @Module({
   imports: [
@@ -78,6 +79,7 @@ import { CompetitionsModule } from './competitions/competitions.module'
     DemoModule,
     FixedConfirmationsModule,
     CompetitionsModule,
+    ImprovementsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
