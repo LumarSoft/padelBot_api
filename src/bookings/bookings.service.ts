@@ -169,7 +169,7 @@ export interface PendingBookingResult {
   confirmedWithoutDeposit: boolean
 }
 
-type CancelledPendingInfo = { playerPhone: string | null; clubId: string }
+type CancelledPendingInfo = { bookingId: string; playerPhone: string | null; clubId: string }
 
 /** Identity of who actually transferred, captured from MercadoPago. */
 export interface PayerInfo {
@@ -1822,7 +1822,7 @@ export class BookingsService {
       endsAt: booking.slot.endsAt,
       priceCents: booking.slot.priceCents,
     })
-    return { playerPhone: booking.playerPhone, clubId: booking.clubId }
+    return { bookingId: booking.id, playerPhone: booking.playerPhone, clubId: booking.clubId }
   }
 
   /**
@@ -1906,7 +1906,7 @@ export class BookingsService {
           endsAt: booking.slot.endsAt,
           priceCents: booking.slot.priceCents,
         })
-        results.push({ playerPhone: booking.playerPhone, clubId: booking.clubId })
+        results.push({ bookingId: booking.id, playerPhone: booking.playerPhone, clubId: booking.clubId })
       } catch (err) {
         this.logger.error(`Failed to cancel expired booking ${booking.id}`, err)
       }

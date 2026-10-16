@@ -59,12 +59,13 @@ function setup(policy: Record<string, unknown> | null = { mode: 'SELF', reason: 
   }
   const notifications = { notifyClub: jest.fn().mockResolvedValue(undefined) }
   const llm = { handleFallback: jest.fn().mockResolvedValue({ reply: 'llm', state: BotState.MENU, ctx: {} }) }
+  const sessionService = { findId: jest.fn().mockResolvedValue('session-1') }
 
   const service = new BotService(
     {} as never,
     bookings as never,
     {} as never,
-    {} as never,
+    sessionService as never,
     llm as never,
     {} as never,
     {} as never,
@@ -123,7 +124,11 @@ describe('the club decides what the player may do', () => {
     // …but the staff was told, so the player is never left hanging.
     expect(notifications.notifyClub).toHaveBeenCalledWith(
       CLUB,
-      expect.objectContaining({ title: expect.stringContaining('cambiar un turno') }),
+      expect.objectContaining({
+        title: expect.stringContaining('cambiar un turno'),
+        // Tapping it opens this player's chat, where the staff answers.
+        data: { conversationId: 'session-1' },
+      }),
     )
     expect(result.reply).toContain('Ya les pasé tu pedido')
     expect(result.state).toBe(BotState.MENU)
@@ -169,7 +174,10 @@ describe('the escape hatch', () => {
 
     expect(notifications.notifyClub).toHaveBeenCalledWith(
       CLUB,
-      expect.objectContaining({ body: expect.stringContaining('no le sirve ningún otro día') }),
+      expect.objectContaining({
+        body: expect.stringContaining('no le sirve ningún otro día'),
+        data: { conversationId: 'session-1' },
+      }),
     )
     expect(result.reply).toContain('Le paso tu caso al club')
     expect(result.state).toBe(BotState.MENU)

@@ -68,7 +68,7 @@ describe('the bot paused for credits', () => {
     )
     expect(notifications.notifyClub).toHaveBeenCalledWith(
       CLUB,
-      expect.objectContaining({ body: expect.stringContaining(WA_ID) }),
+      expect.objectContaining({ body: expect.stringContaining(WA_ID), data: { conversationId: 'session-1' } }),
     )
   })
 

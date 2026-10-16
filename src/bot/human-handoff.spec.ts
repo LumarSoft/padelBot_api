@@ -59,6 +59,15 @@ describe('explicit human hand-off', () => {
     )
   })
 
+  it('opens that chat when the staff taps the push', async () => {
+    const { service, notifications } = setup()
+    await handoff(service)
+    expect(notifications.notifyClub).toHaveBeenCalledWith(
+      CLUB,
+      expect.objectContaining({ data: { conversationId: 'session-1' } }),
+    )
+  })
+
   it('reassures the player instead of leaving them in visto', async () => {
     const { service, sessionService } = setup()
     const reply = await handoff(service)

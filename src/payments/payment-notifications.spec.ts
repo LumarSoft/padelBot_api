@@ -66,10 +66,11 @@ describe('payment-confirmed message', () => {
 
     await service.handleTransferNotification(12550, 'mp-1')
 
-    // The staff can still pick up the phone — but only if they're told.
+    // The staff can still pick up the phone — but only if they're told. Tapping it opens the
+    // booking (who, when, the number to call), not the WhatsApp chat that just failed.
     expect(notifications.notifyClub).toHaveBeenCalledWith(
       'club-1',
-      expect.objectContaining({ title: expect.stringContaining('no llegó') }),
+      expect.objectContaining({ title: expect.stringContaining('no llegó'), data: { bookingId: 'b1' } }),
     )
   })
 
@@ -89,5 +90,40 @@ describe('payment-confirmed message', () => {
     await service.handleTransferNotification(12550, 'mp-1')
 
     expect(whatsapp.sendTextWithRetry).not.toHaveBeenCalled()
+  })
+})
+
+describe('other pushes to the staff', () => {
+  it('opens the rejected booking when the player never got the "pago rechazado" message', async () => {
+    const { service, notifications } = setup(false)
+    const bookings = (service as unknown as { bookingsService: Record<string, jest.Mock> }).bookingsService
+    bookings.rejectPayment = jest
+      .fn()
+      .mockResolvedValue({ bookingId: 'b7', playerPhone: '5493411234567', clubId: 'club-1' })
+
+    await service.rejectPaymentManually('club-1', 'b7')
+
+    expect(notifications.notifyClub).toHaveBeenCalledWith(
+      'club-1',
+      expect.objectContaining({ title: expect.stringContaining('no llegó'), data: { bookingId: 'b7' } }),
+    )
+  })
+
+  it('opens the Pagos screen when MercadoPago keeps failing for the club', async () => {
+    const { service, notifications } = setup()
+    const recordFailure = (
+      service as unknown as {
+        recordClubPollFailure: (clubId: string, reason: string) => Promise<void>
+      }
+    ).recordClubPollFailure.bind(service)
+
+    // Default threshold: 3 consecutive failures.
+    for (let i = 0; i < 3; i++) await recordFailure('club-1', 'token expired')
+
+    expect(notifications.notifyClub).toHaveBeenCalledTimes(1)
+    expect(notifications.notifyClub).toHaveBeenCalledWith(
+      'club-1',
+      expect.objectContaining({ title: expect.stringContaining('MercadoPago'), data: { screen: 'pagos' } }),
+    )
   })
 })

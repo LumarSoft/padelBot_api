@@ -56,11 +56,12 @@ function setup(club: Record<string, unknown> = NONE_CLUB) {
   }
   const notifications = { notifyClub: jest.fn().mockResolvedValue(undefined) }
   const llm = { handleFallback: jest.fn().mockResolvedValue({ reply: 'llm', state: BotState.MENU, ctx: {} }) }
+  const sessionService = { findId: jest.fn().mockResolvedValue('session-1') }
   const service = new BotService(
     prisma as never,
     bookings as never,
     {} as never,
-    {} as never,
+    sessionService as never,
     llm as never,
     {} as never,
     {} as never,
@@ -159,6 +160,8 @@ describe('a player with too many no-shows, without a seña to ask', () => {
       expect.objectContaining({
         title: expect.stringContaining('Reserva para revisar'),
         body: expect.stringMatching(/Martínez \(3 ausencias\).*17\/10.*18:00 - 19:30.*Cancha 1.*5493411234567/),
+        // No booking exists yet: the push opens the chat where the request is.
+        data: { conversationId: 'session-1' },
       }),
     )
     expect(result.reply).toContain('alguien del club')

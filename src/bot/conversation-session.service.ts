@@ -55,6 +55,19 @@ export class ConversationSessionService {
     return { ...created, context: safeParseContext(created.context) }
   }
 
+  /**
+   * The id of the player's chat at this club — what `GET /conversations/:id/messages` takes —
+   * without touching it (unlike {@link getOrCreate}, which resets an expired one). Null if the
+   * player never wrote.
+   */
+  async findId(waId: string, clubId: string): Promise<string | null> {
+    const session = await this.prisma.conversationSession.findUnique({
+      where: { waId_clubId: { waId, clubId } },
+      select: { id: true },
+    })
+    return session?.id ?? null
+  }
+
   async update(id: string, state: BotState, ctx: SessionContext): Promise<void> {
     await this.prisma.conversationSession.update({
       where: { id },

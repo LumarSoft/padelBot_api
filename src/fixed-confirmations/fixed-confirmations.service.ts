@@ -306,5 +306,6 @@ function unansweredPush(unanswered: UnansweredFijo[]) {
   return {
     title: `📞 ${unanswered.length} fijos no respondieron si vienen`,
     body: `${names}. Llamalos desde la Agenda → "Fijos sin respuesta".`,
+    data: { screen: 'agenda' },
   }
 }
