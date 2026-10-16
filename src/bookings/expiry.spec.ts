@@ -83,7 +83,7 @@ describe('BookingsService.findAndCancelExpiredPending', () => {
     // The freed court is broadcast so the waitlist can be offered it.
     expect(events.emitSlotFreed).toHaveBeenCalledWith(expect.objectContaining({ type: 'slot.freed' }))
     // Reported back so the player gets the "tu reserva venció" message.
-    expect(cancelled).toEqual([{ playerPhone: '5493411234567', clubId: 'club-1' }])
+    expect(cancelled).toEqual([{ bookingId: 'b1', playerPhone: '5493411234567', clubId: 'club-1' }])
   })
 
   it('NEVER un-confirms a booking the poller confirmed in the gap', async () => {
@@ -151,7 +151,11 @@ describe('BookingsService.cancelPending', () => {
     const { service, prisma, tx } = setup()
     prisma.booking.findUnique.mockResolvedValue(bookingRow())
 
-    expect(await service.cancelPending('b1')).toEqual({ playerPhone: '5493411234567', clubId: 'club-1' })
+    expect(await service.cancelPending('b1')).toEqual({
+      bookingId: 'b1',
+      playerPhone: '5493411234567',
+      clubId: 'club-1',
+    })
     expect(tx.slot.update).toHaveBeenCalled()
   })
 

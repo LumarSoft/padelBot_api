@@ -336,3 +336,43 @@ describe('FixedConfirmationsService.askUpcoming', () => {
     expect(whatsapp.sendTemplate).not.toHaveBeenCalled()
   })
 })
+
+describe('FixedConfirmationsService.alertUnanswered', () => {
+  function alertSetup(rows: Record<string, unknown>[]) {
+    const prisma = {
+      booking: {
+        findMany: jest.fn().mockResolvedValue(rows),
+        updateMany: jest.fn().mockResolvedValue({ count: rows.length }),
+      },
+    }
+    const notifications = { notifyClub: jest.fn().mockResolvedValue(undefined) }
+    const service = new FixedConfirmationsService(
+      prisma as never,
+      {} as never,
+      notifications as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    )
+    return { service, notifications }
+  }
+
+  it('opens the booking when only one fijo did not answer', async () => {
+    const { service, notifications } = alertSetup([fijoRow()])
+
+    await service.alertUnanswered()
+
+    expect(notifications.notifyClub).toHaveBeenCalledWith(CLUB, expect.objectContaining({ data: { bookingId: 'b1' } }))
+  })
+
+  it('opens the Agenda when several did, where the staff calls them one by one', async () => {
+    const { service, notifications } = alertSetup([fijoRow(), fijoRow({ id: 'b2', playerName: 'Ana Gómez' })])
+
+    await service.alertUnanswered()
+
+    expect(notifications.notifyClub).toHaveBeenCalledWith(
+      CLUB,
+      expect.objectContaining({ title: expect.stringContaining('2 fijos'), data: { screen: 'agenda' } }),
+    )
+  })
+})

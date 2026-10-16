@@ -126,7 +126,7 @@ export class PaymentsService {
     } else if (payment.externalReference && (payment.status === 'rejected' || payment.status === 'cancelled')) {
       const cancelled = await this.bookingsService.cancelPending(payment.externalReference)
       if (cancelled) {
-        await this.sendPaymentFailedMessage(cancelled.playerPhone, cancelled.clubId)
+        await this.sendPaymentFailedMessage(payment.externalReference, cancelled.playerPhone, cancelled.clubId)
       }
     }
     // 'pending' / 'in_process' → wait for next webhook notification
@@ -410,7 +410,7 @@ export class PaymentsService {
   /** Admin manually rejects a pending transfer (money never arrived); slot is released. */
   async rejectPaymentManually(clubId: string, bookingId: string): Promise<{ cancelled: boolean }> {
     const info = await this.bookingsService.rejectPayment(clubId, bookingId)
-    if (info) await this.sendPaymentFailedMessage(info.playerPhone, info.clubId)
+    if (info) await this.sendPaymentFailedMessage(bookingId, info.playerPhone, info.clubId)
     return { cancelled: info !== null }
   }
 
@@ -499,6 +499,7 @@ export class PaymentsService {
     await this.notifications.notifyClub(clubId, {
       title: '⚠️ Problema con MercadoPago',
       body: 'Las confirmaciones automáticas de señas están fallando. Revisá la conexión con MercadoPago en Configuración y confirmá los pagos pendientes a mano mientras tanto.',
+      data: { screen: 'pagos' },
     })
     const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } })
     await this.alertOps(
@@ -533,7 +534,7 @@ export class PaymentsService {
     try {
       const cancelled = await this.bookingsService.findAndCancelExpiredPending()
       for (const b of cancelled) {
-        await this.sendPaymentExpiredMessage(b.playerPhone, b.clubId)
+        await this.sendPaymentExpiredMessage(b.bookingId, b.playerPhone, b.clubId)
       }
     } catch (err) {
       this.logger.error('Expired-pending cleanup failed', err)
@@ -569,7 +570,7 @@ export class PaymentsService {
 
       const delivered = await this.whatsapp.sendTextWithRetry(line, booking.playerPhone, msg)
       if (!delivered) {
-        await this.alertUndelivered(booking.clubId, booking.playerPhone, 'la CONFIRMACIÓN de la seña')
+        await this.alertUndelivered(bookingId, booking.clubId, booking.playerPhone, 'la CONFIRMACIÓN de la seña')
       }
     } catch (err) {
       this.logger.error('Failed to send payment-confirmed WA message', err)
@@ -580,12 +581,14 @@ export class PaymentsService {
    * A critical message that never reached the player is a silent failure: the money is in,
    * the booking is CONFIRMED, and the only person who doesn't know is the one who paid.
    * Push the club's staff so they can call the player, and tell ops — a burst of these is
-   * how a WhatsApp outage or a revoked Meta token looks from the outside.
+   * how a WhatsApp outage or a revoked Meta token looks from the outside. The push opens the
+   * booking (who, when, phone to call) — the chat is the channel that just failed.
    */
-  private async alertUndelivered(clubId: string, playerPhone: string, what: string): Promise<void> {
+  private async alertUndelivered(bookingId: string, clubId: string, playerPhone: string, what: string): Promise<void> {
     await this.notifications.notifyClub(clubId, {
       title: '⚠️ Un mensaje no llegó al jugador',
       body: `WhatsApp no le entregó ${what} al ${playerPhone}. Conviene que lo llamen para confirmarlo a mano.`,
+      data: { bookingId },
     })
     const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } })
     await this.alertOps(
@@ -593,7 +596,7 @@ export class PaymentsService {
     )
   }
 
-  private async sendPaymentFailedMessage(playerPhone: string | null, clubId: string): Promise<void> {
+  private async sendPaymentFailedMessage(bookingId: string, playerPhone: string | null, clubId: string): Promise<void> {
     if (!playerPhone) return
     try {
       const line = await this.findActiveLine(clubId)
@@ -603,13 +606,19 @@ export class PaymentsService {
         playerPhone,
         `😕 Tu pago no pudo procesarse y la reserva fue cancelada. Podés intentar reservar nuevamente cuando quieras. 🎾`,
       )
-      if (!delivered) await this.alertUndelivered(clubId, playerPhone, 'el aviso de que su pago fue RECHAZADO')
+      if (!delivered) {
+        await this.alertUndelivered(bookingId, clubId, playerPhone, 'el aviso de que su pago fue RECHAZADO')
+      }
     } catch (err) {
       this.logger.error('Failed to send payment-failed WA message', err)
     }
   }
 
-  private async sendPaymentExpiredMessage(playerPhone: string | null, clubId: string): Promise<void> {
+  private async sendPaymentExpiredMessage(
+    bookingId: string,
+    playerPhone: string | null,
+    clubId: string,
+  ): Promise<void> {
     if (!playerPhone) return
     try {
       const line = await this.findActiveLine(clubId)
@@ -620,7 +629,7 @@ export class PaymentsService {
         `⏳ El tiempo para abonar tu reserva venció y el turno quedó libre. Si querés reservarlo de nuevo, escribime y lo gestionamos. 🎾`,
       )
       // Not knowing the slot was released is how a player shows up to a court someone else booked.
-      if (!delivered) await this.alertUndelivered(clubId, playerPhone, 'el aviso de que su reserva VENCIÓ')
+      if (!delivered) await this.alertUndelivered(bookingId, clubId, playerPhone, 'el aviso de que su reserva VENCIÓ')
     } catch (err) {
       this.logger.error('Failed to send payment-expired WA message', err)
     }

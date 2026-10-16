@@ -229,6 +229,7 @@ export class StatsReportsService {
             body:
               `${summary.bookings} turnos (${summary.occupancyPct}% de ocupación)${deposits}. ` +
               `El bot te vendió ${summary.botBookings} turnos.`,
+            data: { screen: 'resumen' },
           })
         } catch (err) {
           this.logger.error(`Weekly summary failed for club ${club.id}`, err)

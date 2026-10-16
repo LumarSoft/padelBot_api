@@ -32,7 +32,7 @@ import { PART_OF_DAY_NAMES, bandsInPart, parsePartOfDay } from './lib/part-of-da
 import { subscriptionSelect, subscriptionState } from '../clubs/lib/subscription'
 import { WaitlistService } from '../waitlist/waitlist.service'
 import { PlayersService } from '../players/players.service'
-import { NotificationsService } from '../notifications/notifications.service'
+import { NotificationsService, PushPayload } from '../notifications/notifications.service'
 import { CreditsService } from '../plans/credits.service'
 import { WhatsAppMediaService } from '../whatsapp/whatsapp-media.service'
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
@@ -575,6 +575,7 @@ export class BotService {
     await this.notifications.notifyClub(clubId, {
       title: '⏸️ Un jugador escribió y el bot está pausado',
       body: `Respondele desde Conversaciones (${waId}). Se terminaron los créditos de IA del mes.`,
+      data: { conversationId: session.id },
     })
     return { reply: { text: reply } }
   }
@@ -936,6 +937,7 @@ export class BotService {
     await this.notifications.notifyClub(clubId, {
       title: '🙋 Un jugador pide hablar con una persona',
       body: `Respondele desde Conversaciones (${waId}).`,
+      data: { conversationId: sessionId },
     })
     const reply = 'Dale 🙌 Aviso al equipo del club para que te atiendan por acá. En un ratito te responden. 🎾'
     await this.sessionService.saveMessage(sessionId, 'BOT', reply)
@@ -966,7 +968,18 @@ export class BotService {
     await this.notifications.notifyClub(clubId, {
       title: '🔄 Un jugador pide cambiar un turno',
       body: `${label} — ${why}. Respondele desde Conversaciones (${waId}).`,
+      data: await this.chatPushData(waId, clubId),
     })
+  }
+
+  /**
+   * Deep link to the player's chat for a push that asks the staff to answer there. The handlers
+   * don't carry the session id, so it's looked up; no data (a push that just opens the app)
+   * in the impossible case that the player has no chat yet.
+   */
+  private async chatPushData(waId: string, clubId: string): Promise<PushPayload['data']> {
+    const conversationId = await this.sessionService.findId(waId, clubId)
+    return conversationId ? { conversationId } : undefined
   }
 
   private async onBookDate(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
@@ -1242,6 +1255,8 @@ export class BotService {
           body:
             `${ctx.playerName} (${err.noShowCount} ausencias) pidió ${dayMonthFromKey(ctx.selectedDate!)} · ` +
             `${ctx.selectedSlotLabel} · ${ctx.selectedCourtName}. Respondele desde Conversaciones (${waId}).`,
+          // No booking was created — the request lives only in the chat.
+          data: await this.chatPushData(waId, clubId),
         })
         return { reply: noShowReviewRequested(ctx), state: BotState.MENU, ctx: keepName(ctx) }
       }
