@@ -1,5 +1,5 @@
 import { ClubSignupRequest } from 'generated/prisma/client'
-import { formatSignupAlert } from './signup-alert'
+import { campaignLabel, formatSignupAlert } from './signup-alert'
 
 const lead = (over: Partial<ClubSignupRequest> = {}) =>
   ({
@@ -21,5 +21,15 @@ describe('formatSignupAlert', () => {
   it('leaves the line out when they picked none (or an unknown key)', () => {
     expect(formatSignupAlert(lead())).not.toContain('Eligió el plan')
     expect(formatSignupAlert(lead({ plan: 'pro' }))).not.toContain('Eligió el plan')
+  })
+})
+
+describe('the campaign a lead came from', () => {
+  it('names the UTM campaign, with its source and medium', () => {
+    expect(campaignLabel({ utmSource: 'instagram', utmMedium: 'cpc', utmCampaign: 'verano' })).toBe(
+      'verano (instagram / cpc)',
+    )
+    expect(campaignLabel({ utmSource: 'instagram', utmMedium: null, utmCampaign: null })).toBe('instagram')
+    expect(campaignLabel({ utmSource: null, utmMedium: null, utmCampaign: null })).toBeNull()
   })
 })

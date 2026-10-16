@@ -12,6 +12,9 @@ import { OpsHealthService } from './ops-health.service'
 import { OpsHelpService } from './ops-help.service'
 import { OpsProfitabilityService } from './ops-profitability.service'
 import { ExchangeRateService } from './exchange-rate.service'
+import { OpsMonthStatesService } from './ops-month-states.service'
+import { OpsClubDetailService } from './ops-club-detail.service'
+import { OpsWeeklySummaryService } from './ops-weekly-summary.service'
 import { OpsJwtStrategy } from './strategies/ops-jwt.strategy'
 import { opsJwtSecret } from './lib/ops-secret'
 
@@ -50,6 +53,9 @@ import { opsJwtSecret } from './lib/ops-secret'
     OpsHelpService,
     OpsProfitabilityService,
     ExchangeRateService,
+    OpsMonthStatesService,
+    OpsClubDetailService,
+    OpsWeeklySummaryService,
     OpsJwtStrategy,
   ],
 })

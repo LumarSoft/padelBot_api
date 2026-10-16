@@ -6,6 +6,11 @@ import { UpdateLeadDto } from './dto/update-lead.dto'
 import { ProvisionLeadDto } from './dto/provision-lead.dto'
 import { LeadStatus } from './lib/lead-status'
 import { isPlanKey } from '../plans/lib/plans'
+import { shiftDateKey, todayKey, wallTimeToUtc } from '../availability/lib/datetime'
+import { campaignLabel } from '../onboarding/lib/signup-alert'
+
+/** Leads still in play: the ones a call-back date applies to. */
+const OPEN_STATUSES: LeadStatus[] = ['NEW', 'CONTACTED']
 
 /** Counts per pipeline stage, so the console can show the funnel without a second call. */
 export interface LeadPipeline {
@@ -25,6 +30,20 @@ export interface LeadsSummary {
   byChannel: ChannelConversion[]
   /** What prospects say hurts most. Tells us which pitch (and which feature) sells. */
   byPain: { value: string; count: number }[]
+  /** Open leads whose call-back date is today or already past: the "para hoy" list. */
+  dueToday: number
+  /** Conversion by UTM campaign (or source), for the leads that arrived through one. */
+  byCampaign: ChannelConversion[]
+  /** Why we lose them. */
+  byLostReason: { value: string; count: number }[]
+}
+
+/** Where prospects drop out of the `/register` signup: visits per screen, in flow order. */
+export interface SignupFunnel {
+  days: number
+  steps: { step: string; index: number; visits: number }[]
+  /** Leads that came in over the same days (the signups actually sent). */
+  leads: number
 }
 
 export interface ChannelConversion {
@@ -43,8 +62,17 @@ export class OpsLeadsService {
     private readonly onboarding: OnboardingService,
   ) {}
 
-  /** The pipeline itself. Newest first — a lead going cold is a lead we didn't call today. */
-  async list(status?: LeadStatus): Promise<ClubSignupRequest[]> {
+  /**
+   * The pipeline itself. Newest first — a lead going cold is a lead we didn't call today.
+   * `due: 'today'` is the call list instead: open leads due today or overdue, oldest date first.
+   */
+  async list(status?: LeadStatus, due?: 'today'): Promise<ClubSignupRequest[]> {
+    if (due === 'today') {
+      return this.prisma.clubSignupRequest.findMany({
+        where: { status: { in: OPEN_STATUSES }, followUpAt: { lt: endOfToday() } },
+        orderBy: { followUpAt: 'asc' },
+      })
+    }
     return this.prisma.clubSignupRequest.findMany({
       where: status ? { status } : undefined,
       orderBy: { createdAt: 'desc' },
@@ -62,7 +90,8 @@ export class OpsLeadsService {
    *
    * `contactedAt` is stamped the first time it leaves NEW and never overwritten: it is the
    * start of our response-time metric, and re-touching a lead later shouldn't rewrite when
-   * we first got to it.
+   * we first got to it. A lost lead has nobody to call back, and a lead taken back from LOST
+   * forgets why it was lost.
    */
   async update(id: string, dto: UpdateLeadDto): Promise<ClubSignupRequest> {
     const lead = await this.get(id)
@@ -74,6 +103,10 @@ export class OpsLeadsService {
         ...(dto.status ? { status: dto.status } : {}),
         ...(dto.internalNotes !== undefined ? { internalNotes: dto.internalNotes } : {}),
         ...(leavingNew ? { contactedAt: new Date() } : {}),
+        ...(dto.followUpAt !== undefined ? { followUpAt: dto.followUpAt ? new Date(dto.followUpAt) : null } : {}),
+        ...(dto.lostReason !== undefined ? { lostReason: dto.lostReason } : {}),
+        ...(dto.status === 'LOST' ? { followUpAt: null } : {}),
+        ...(dto.status && dto.status !== 'LOST' ? { lostReason: null } : {}),
       },
     })
   }
@@ -121,6 +154,7 @@ export class OpsLeadsService {
         status: 'CONVERTED',
         convertedClubId: clubId,
         contactedAt: lead.contactedAt ?? new Date(),
+        followUpAt: null,
       },
     })
   }
@@ -130,7 +164,7 @@ export class OpsLeadsService {
    * answer, which channel converts, and which pain the market keeps naming.
    */
   async summary(): Promise<LeadsSummary> {
-    const [grouped, leads] = await Promise.all([
+    const [grouped, leads, dueToday] = await Promise.all([
       this.prisma.clubSignupRequest.groupBy({ by: ['status'], _count: true }),
       this.prisma.clubSignupRequest.findMany({
         select: {
@@ -139,7 +173,14 @@ export class OpsLeadsService {
           biggestPain: true,
           createdAt: true,
           contactedAt: true,
+          lostReason: true,
+          utmSource: true,
+          utmMedium: true,
+          utmCampaign: true,
         },
+      }),
+      this.prisma.clubSignupRequest.count({
+        where: { status: { in: OPEN_STATUSES }, followUpAt: { lt: endOfToday() } },
       }),
     ])
 
@@ -163,7 +204,21 @@ export class OpsLeadsService {
 
     const byChannel = new Map<string, ChannelConversion>()
     const byPain = new Map<string, number>()
+    const byCampaign = new Map<string, ChannelConversion>()
+    const byLostReason = new Map<string, number>()
     for (const lead of leads) {
+      const campaign = campaignLabel(lead)
+      if (campaign) {
+        const entry = byCampaign.get(campaign) ?? { value: campaign, leads: 0, converted: 0 }
+        entry.leads++
+        if (lead.status === 'CONVERTED') entry.converted++
+        byCampaign.set(campaign, entry)
+      }
+      if (lead.status === 'LOST') {
+        const reason = lead.lostReason ?? 'UNKNOWN'
+        byLostReason.set(reason, (byLostReason.get(reason) ?? 0) + 1)
+      }
+
       const channel = lead.howFound ?? 'UNKNOWN'
       const entry = byChannel.get(channel) ?? { value: channel, leads: 0, converted: 0 }
       entry.leads++
@@ -179,8 +234,36 @@ export class OpsLeadsService {
       medianResponseHours,
       byChannel: [...byChannel.values()].sort((a, b) => b.leads - a.leads),
       byPain: [...byPain.entries()].map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count),
+      dueToday,
+      byCampaign: [...byCampaign.values()].sort((a, b) => b.leads - a.leads),
+      byLostReason: [...byLostReason.entries()]
+        .map(([value, count]) => ({ value, count }))
+        .sort((a, b) => b.count - a.count),
     }
   }
+
+  /** Visits per `/register` screen over the last `days` (club-local), and the leads sent. */
+  async funnel(days = 30): Promise<SignupFunnel> {
+    const from = shiftDateKey(todayKey(), -(days - 1))
+    const [rows, leads] = await Promise.all([
+      this.prisma.signupFunnelDaily.groupBy({
+        by: ['step'],
+        where: { dateKey: { gte: from } },
+        _sum: { visits: true },
+        _max: { stepIndex: true },
+      }),
+      this.prisma.clubSignupRequest.count({ where: { createdAt: { gte: wallTimeToUtc(from, '00:00') } } }),
+    ])
+    const steps = rows
+      .map(row => ({ step: row.step, index: row._max.stepIndex ?? 0, visits: row._sum.visits ?? 0 }))
+      .sort((a, b) => a.index - b.index)
+    return { days, steps, leads }
+  }
+}
+
+/** The instant today ends, club-local: a call-back date before it is due. */
+function endOfToday(): Date {
+  return wallTimeToUtc(shiftDateKey(todayKey(), 1), '00:00')
 }
 
 function round1(n: number): number {

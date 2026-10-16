@@ -8,3 +8,8 @@
 export const LEAD_STATUSES = ['NEW', 'CONTACTED', 'CONVERTED', 'LOST'] as const
 
 export type LeadStatus = (typeof LEAD_STATUSES)[number]
+
+/** Why a lead was lost, picked when marking it LOST: the pattern tells us what to fix. */
+export const LOST_REASONS = ['PRICE', 'COMPETITOR', 'NOT_NOW', 'NO_ANSWER', 'NOT_A_FIT', 'OTHER'] as const
+
+export type LostReason = (typeof LOST_REASONS)[number]

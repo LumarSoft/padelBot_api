@@ -20,6 +20,7 @@ import { OnboardingService, SetupStatus } from './onboarding.service'
 import { RegisterClubDto } from './dto/register-club.dto'
 import { RequestClubDto } from './dto/request-club.dto'
 import { SaveSetupProgressDto } from './dto/save-setup-progress.dto'
+import { SignupFunnelStepDto } from './dto/signup-funnel-step.dto'
 import { SetupProgress } from './lib/setup-steps'
 
 @Controller('onboarding')
@@ -38,6 +39,17 @@ export class OnboardingController {
   @HttpCode(HttpStatus.CREATED)
   request(@Body() dto: RequestClubDto): Promise<{ received: boolean }> {
     return this.onboardingService.requestSignup(dto)
+  }
+
+  /**
+   * Public: the signup counts each screen a visitor reaches, once per page load, so ops can
+   * see where prospects drop out. Anonymous — no cookie, no id. Rate-limited per IP.
+   */
+  @Throttle({ default: { ttl: 60_000, limit: 40 } })
+  @Post('funnel')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  funnel(@Body() dto: SignupFunnelStepDto): Promise<void> {
+    return this.onboardingService.recordFunnelStep(dto.step, dto.index)
   }
 
   /**

@@ -11,6 +11,7 @@ import { creditPercent, creditsPaused, monthStartKey } from '../plans/lib/ai-cre
 import { planDefinition, planName } from '../plans/lib/plans'
 import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
 import { ClubHealth, clubHealth, CLUB_HEALTH_ORDER } from './lib/club-health'
+import { OpsMonthStatesService } from './ops-month-states.service'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 /** Window the per-club activity numbers cover. */
@@ -88,7 +89,10 @@ export interface ClubUserRow {
 export class OpsClubsService {
   private readonly logger = new Logger(OpsClubsService.name)
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly monthStates: OpsMonthStatesService,
+  ) {}
 
   /**
    * Every tenant, with the state we'd otherwise have to open a DB console to see.
@@ -293,6 +297,8 @@ export class OpsClubsService {
     })
 
     this.logger.log(`Subscription of ${club.name} (${clubId}) set to ${dto.status}`)
+    // This month's row follows the change, so the business view never waits for the night.
+    await this.monthStates.recordClub(clubId)
     return subscriptionState(updated)
   }
 

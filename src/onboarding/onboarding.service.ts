@@ -9,6 +9,7 @@ import { RequestClubDto } from './dto/request-club.dto'
 import { SaveSetupProgressDto } from './dto/save-setup-progress.dto'
 import { notifyOps } from '../common/ops-alert'
 import { formatSignupAlert } from './lib/signup-alert'
+import { todayKey } from '../availability/lib/datetime'
 import { REQUIRED_STEP_IDS, SETUP_STEP_IDS, SetupProgress, SetupStepId, parseSetupProgress } from './lib/setup-steps'
 import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 
@@ -92,10 +93,23 @@ export class OnboardingService {
         contactWindow: dto.contactWindow ?? null,
         contactWindowNote: dto.contactWindowNote?.trim() || null,
         plan: dto.plan ?? null,
+        utmSource: dto.utmSource?.trim() || null,
+        utmMedium: dto.utmMedium?.trim() || null,
+        utmCampaign: dto.utmCampaign?.trim() || null,
       },
     })
     await notifyOps(formatSignupAlert(lead))
     return { received: true }
+  }
+
+  /** One more visit to a `/register` screen today (see SignupFunnelDaily). */
+  async recordFunnelStep(step: string, index: number): Promise<void> {
+    const dateKey = todayKey()
+    await this.prisma.signupFunnelDaily.upsert({
+      where: { dateKey_step: { dateKey, step } },
+      create: { dateKey, step, stepIndex: index, visits: 1 },
+      update: { stepIndex: index, visits: { increment: 1 } },
+    })
   }
 
   /**

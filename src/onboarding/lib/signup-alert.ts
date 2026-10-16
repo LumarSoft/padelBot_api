@@ -59,8 +59,18 @@ export function formatSignupAlert(lead: ClubSignupRequest): string {
 
   const found = answerLabel(lead.howFound)
   if (found) lines.push(`_Nos conoció por ${found}._`)
+  const campaign = campaignLabel(lead)
+  if (campaign) lines.push(`_Llegó por la campaña ${campaign}._`)
 
   if (lead.message) lines.push(`\n💬 "${lead.message}"`)
 
   return lines.join('\n')
+}
+
+/** "verano (instagram / cpc)": the UTM campaign, else its source, with the rest in brackets. */
+export function campaignLabel(lead: Pick<ClubSignupRequest, 'utmSource' | 'utmMedium' | 'utmCampaign'>): string | null {
+  const name = lead.utmCampaign ?? lead.utmSource
+  if (!name) return null
+  const detail = [lead.utmCampaign ? lead.utmSource : null, lead.utmMedium].filter(Boolean).join(' / ')
+  return detail ? `${name} (${detail})` : name
 }

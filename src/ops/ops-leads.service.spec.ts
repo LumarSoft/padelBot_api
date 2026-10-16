@@ -63,3 +63,70 @@ describe('OpsLeadsService.remove', () => {
     }
   })
 })
+
+/** The follow-up: a call-back date, why a lead was lost, and the list of calls due today. */
+describe('OpsLeadsService follow-up', () => {
+  it('stores the call-back date and clears it', async () => {
+    const { service, prisma } = setup(null)
+    await service.update('l1', { followUpAt: '2026-10-20T12:00:00.000Z' })
+    expect(prisma.clubSignupRequest.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ followUpAt: new Date('2026-10-20T12:00:00.000Z') }) }),
+    )
+
+    await service.update('l1', { followUpAt: null })
+    expect(prisma.clubSignupRequest.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ followUpAt: null }) }),
+    )
+  })
+
+  it('records why a lead was lost and drops its call-back date', async () => {
+    const { service, prisma } = setup(null)
+    await service.update('l1', { status: 'LOST', lostReason: 'PRICE' })
+    expect(prisma.clubSignupRequest.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'LOST', lostReason: 'PRICE', followUpAt: null }),
+      }),
+    )
+  })
+
+  it('forgets the reason when a lost lead comes back', async () => {
+    const { service, prisma } = setup(null, { status: 'LOST' })
+    await service.update('l1', { status: 'CONTACTED' })
+    expect(prisma.clubSignupRequest.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'CONTACTED', lostReason: null }) }),
+    )
+  })
+
+  it('lists the open leads due today, oldest date first', async () => {
+    const findMany = jest.fn().mockResolvedValue([])
+    const service = new OpsLeadsService({ clubSignupRequest: { findMany } } as never, {} as never)
+
+    await service.list(undefined, 'today')
+
+    const query = findMany.mock.calls[0][0]
+    expect(query.where.status).toEqual({ in: ['NEW', 'CONTACTED'] })
+    expect(query.where.followUpAt.lt).toBeInstanceOf(Date)
+    expect(query.orderBy).toEqual({ followUpAt: 'asc' })
+  })
+})
+
+describe('OpsLeadsService.funnel', () => {
+  it('orders the signup screens by their place in the flow', async () => {
+    const prisma = {
+      signupFunnelDaily: {
+        groupBy: jest.fn().mockResolvedValue([
+          { step: 'owner', _sum: { visits: 30 }, _max: { stepIndex: 1 } },
+          { step: 'club', _sum: { visits: 40 }, _max: { stepIndex: 0 } },
+          { step: 'sent', _sum: { visits: 4 }, _max: { stepIndex: 17 } },
+        ]),
+      },
+      clubSignupRequest: { count: jest.fn().mockResolvedValue(4) },
+    }
+    const service = new OpsLeadsService(prisma as never, {} as never)
+
+    const funnel = await service.funnel(30)
+
+    expect(funnel.steps.map(s => s.step)).toEqual(['club', 'owner', 'sent'])
+    expect(funnel).toMatchObject({ days: 30, leads: 4 })
+  })
+})

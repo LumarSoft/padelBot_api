@@ -31,11 +31,14 @@ model Club {
   /// kiosk stock, waitlist, split payment, scheduled price rises) whatever its plan, so nobody
   /// loses a feature silently. Ops clears it from the console once a plan is agreed with the club.
   grandfatheredFeatures Boolean @default(false)
-  /// Last AI-credit alert sent to ops (AiCreditAlertsService): the month ("2026-10") and the
-  /// threshold crossed (80 / 100), so each threshold pings once per club and month. Going over
-  /// the plan's credits never cuts the bot — it only tells us to talk to the club.
+  /// Last AI-credit alert sent (AiCreditAlertsService): the month ("2026-10") and the threshold
+  /// crossed (80 / 90 / 95 / 100), so each threshold warns once per club and month. At 100% the
+  /// bot is paused until the club moves to a bigger plan or the month turns.
   aiCreditsAlertMonth   String?
   aiCreditsAlertPercent Int?
+  /// Our own notes on the club (the ops console's "ficha"): what we agreed, who to talk to,
+  /// what happened. Never shown to the club.
+  opsNotes              String? @db.Text
   /// When the free trial ends (null = no fixed end, e.g. clubs created before billing).
   trialEndsAt        DateTime?
   /// End of the last paid period for ACTIVE/PAST_DUE clubs. The bot keeps working for
@@ -779,10 +782,64 @@ model ClubSignupRequest {
   /// The club we provisioned for this lead (set when status → CONVERTED). Not a
   /// relation: a lead is pre-sales data and must survive the club being deleted.
   convertedClubId String?
+  /// When to call them back ("volver a llamar"). The leads screen lists the ones due today;
+  /// cleared once the lead is a client or lost.
+  followUpAt    DateTime?
+  /// Why we lost it, set with status LOST: "PRICE" | "COMPETITOR" | "NOT_NOW" | "NO_ANSWER" |
+  /// "NOT_A_FIT" | "OTHER" (`ops/lib/lead-status.ts`).
+  lostReason    String?
+  /// The campaign that brought them: the UTM parameters of the link they arrived by.
+  utmSource     String?
+  utmMedium     String?
+  utmCampaign   String?
   createdAt DateTime @default(now())
 
   @@index([status])
   @@index([createdAt])
+  @@index([followUpAt])
+}
+
+/// Visits to each screen of the `/register` signup, per club-local day: where prospects drop
+/// out. Anonymous on purpose — no cookie, no id, just one count per screen per page load.
+model SignupFunnelDaily {
+  id        String   @id @default(cuid())
+  /// Club-local day ("YYYY-MM-DD").
+  dateKey   String
+  /// The screen: a question id of the panel's `features/signup/lib/questions.ts`, "summary"
+  /// (the review) or "sent".
+  step      String
+  /// Its position in the flow, to order the funnel.
+  stepIndex Int
+  visits    Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dateKey, step])
+  @@index([dateKey])
+}
+
+/// Each club's subscription as it stood in a month (the last state seen that month), for the
+/// business view: monthly recurring revenue, clubs that started paying and churn. Billing is
+/// manual and the club row only knows today, so `OpsMonthStatesService` records it every day
+/// and on every change from the console. Not a relation: a churned club must keep counting
+/// after it's deleted.
+model ClubMonthState {
+  id                 String             @id @default(cuid())
+  clubId             String
+  /// Club-local month ("YYYY-MM").
+  month              String
+  clubName           String
+  plan               String
+  subscriptionStatus SubscriptionStatus
+  /// What it pays a month in that state: the plan's price while ACTIVE, else 0.
+  mrrCents           Int
+  /// The sales demo: recorded, never counted.
+  isDemo             Boolean            @default(false)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@unique([clubId, month])
+  @@index([month])
 }
 
 /// A Lumarsoft operator (us). Deliberately NOT a `User`: `User` is tenant-scoped and

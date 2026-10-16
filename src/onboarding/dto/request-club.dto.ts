@@ -125,4 +125,20 @@ export class RequestClubDto {
   @IsOptional()
   @IsIn(PLAN_KEYS)
   plan?: PlanKey
+
+  /** The campaign they arrived by: the UTM parameters of the landing's (or the signup's) URL. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  utmSource?: string
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  utmMedium?: string
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  utmCampaign?: string
 }

@@ -181,6 +181,9 @@ a prospect has none by definition.
 | howFound            | string | No       | `INSTAGRAM` \| `REFERRAL` \| `GOOGLE` \| `OTHER_CLUB` \| `OTHER` |
 | contactWindow       | string | No       | `MORNING` \| `AFTERNOON` \| `EVENING` \| `ANY`           |
 | plan                | string | No       | `saque` \| `bandeja` \| `smash` — the pricing card they came from (`/register?plan=…`); shown first in the ops alert |
+| utmSource           | string | No       | ≤100 chars — the campaign they arrived by (`utm_source` of the landing's or `/register`'s URL) |
+| utmMedium           | string | No       | ≤100 chars (`utm_medium`)                                |
+| utmCampaign         | string | No       | ≤100 chars (`utm_campaign`); the ops alert names it      |
 
 The allowed values live in `src/onboarding/lib/signup-answers.ts`, together with the Spanish
 labels the ops alert renders.
@@ -205,6 +208,27 @@ labels the ops alert renders.
 ```
 
 `201 Created` — `{ "received": true }`
+
+### POST /onboarding/funnel
+
+The `/register` signup counts each screen a visitor reaches, once per page load, so ops can see
+where prospects drop out (`SignupFunnelDaily`, per club-local day). Anonymous: no cookie, no id.
+Rate-limited 40/min per IP.
+
+**Auth required:** No (`proxyPublicToApi`, like the signup).
+
+**Request body**
+
+| Field | Type   | Required | Constraints                                                        |
+| ----- | ------ | -------- | ------------------------------------------------------------------ |
+| step  | string | Yes      | a question id of `features/signup/lib/questions.ts`, `summary` or `sent` (letters, digits, `_`, `-`; ≤40) |
+| index | int    | Yes      | 0–60, its position in the flow                                     |
+
+```json
+{ "step": "courtCount", "index": 2 }
+```
+
+`204 No Content`
 
 ### POST /onboarding/register
 
@@ -2536,10 +2560,11 @@ The signup pipeline — every answer from the `/register` form, plus our sales f
 | Field  | Type   | Required | Constraints                            |
 | ------ | ------ | -------- | -------------------------------------- |
 | status | string | No       | `NEW` \| `CONTACTED` \| `CONVERTED` \| `LOST` — omit for the whole pipeline |
+| due    | string | No       | `today`: the call list instead — open leads (`NEW`/`CONTACTED`) whose `followUpAt` is today or past, oldest date first |
 
 **Responses**
 
-`200 OK` — newest first.
+`200 OK` — newest first (or by `followUpAt` with `due=today`).
 ```json
 [
   {
@@ -2568,6 +2593,11 @@ The signup pipeline — every answer from the `/register` form, plus our sales f
     "internalNotes": null,
     "contactedAt": null,
     "convertedClubId": null,
+    "followUpAt": "2026-07-13T12:00:00.000Z",
+    "lostReason": null,
+    "utmSource": "instagram",
+    "utmMedium": "cpc",
+    "utmCampaign": "verano",
     "createdAt": "2026-07-11T18:00:00.000Z"
   }
 ]
@@ -2589,7 +2619,36 @@ is `null` until we've contacted at least one.
   "last30Days": 4,
   "medianResponseHours": 3.5,
   "byChannel": [{ "value": "REFERRAL", "leads": 3, "converted": 1 }],
-  "byPain": [{ "value": "DEPOSITS", "count": 3 }]
+  "byPain": [{ "value": "DEPOSITS", "count": 3 }],
+  "dueToday": 2,
+  "byCampaign": [{ "value": "verano (instagram / cpc)", "leads": 2, "converted": 1 }],
+  "byLostReason": [{ "value": "PRICE", "count": 1 }]
+}
+```
+
+`dueToday` counts the open leads to call back today or overdue; `byCampaign` groups the leads
+that arrived with UTM parameters (campaign, else source); `byLostReason` the LOST ones by
+`lostReason` (`UNKNOWN` when none was given).
+
+### GET /ops/signup-funnel
+
+Where prospects drop out of `/register`: visits per screen over the last `days` (club-local), in
+flow order, and the leads sent over the same days.
+
+**Auth required:** Yes (ops token)
+
+**Query** — `days` (optional, 1–365, default 30)
+
+`200 OK`
+```json
+{
+  "days": 30,
+  "steps": [
+    { "step": "club", "index": 0, "visits": 40 },
+    { "step": "owner", "index": 1, "visits": 31 },
+    { "step": "sent", "index": 17, "visits": 4 }
+  ],
+  "leads": 4
 }
 ```
 
@@ -2622,9 +2681,14 @@ response-time metric.
 | ------------- | ------ | -------- | ----------------------------------------------- |
 | status        | string | No       | `NEW` \| `CONTACTED` \| `CONVERTED` \| `LOST`   |
 | internalNotes | string | No       | max 4000 chars. Never shown to the prospect.    |
+| followUpAt    | string \| null | No | ISO date-time to call them back; `null` clears it |
+| lostReason    | string \| null | No | with `LOST`: `PRICE` \| `COMPETITOR` \| `NOT_NOW` \| `NO_ANSWER` \| `NOT_A_FIT` \| `OTHER` |
+
+Marking a lead `LOST` clears its `followUpAt`; moving it out of `LOST` clears its `lostReason`.
+Provisioning it (`CONVERTED`) clears the call-back date too.
 
 ```json
-{ "status": "CONTACTED", "internalNotes": "Llamar el lunes, compara con Playtomic." }
+{ "status": "LOST", "lostReason": "PRICE" }
 ```
 
 **Responses**
@@ -2793,6 +2857,56 @@ Manual billing from the UI — the same thing `npm run subscription` does from t
 { "message": "Club no encontrado", "statusCode": 404 }
 ```
 
+### GET /ops/clubs/:id
+
+The club's ficha: the same row as `GET /ops/clubs` (`club`), our notes on it (`opsNotes`), the
+signup it was provisioned from (`lead`, with its channel and campaign), and the last 6 months
+(oldest first): credits used against the plan, bookings by the bot and from the panel, and what
+it left us (revenue net of IVA as inscripto, Meta + OpenAI cost, margin), like `GET /ops/profitability`.
+
+**Auth required:** Yes (ops token)
+
+`200 OK`
+```json
+{
+  "club": { "id": "clx…", "name": "Padel Norte", "health": { "status": "healthy", "reasons": [] } },
+  "opsNotes": "Paga por transferencia el 5. Hablar con Lucía.",
+  "lead": {
+    "id": "clx…",
+    "createdAt": "2026-09-02T14:00:00.000Z",
+    "contactedAt": "2026-09-02T16:30:00.000Z",
+    "howFound": "INSTAGRAM",
+    "campaign": "verano (instagram / cpc)",
+    "ownerName": "Lucía",
+    "phone": "5493415550000",
+    "email": "lucia@padelnorte.com"
+  },
+  "months": [
+    {
+      "month": "2026-10",
+      "credits": { "used": 640, "included": 1000 },
+      "bookings": { "bot": 120, "panel": 30 },
+      "revenueCents": 4999900,
+      "costCents": 926000,
+      "marginCents": 4073900,
+      "marginPercent": 81
+    }
+  ]
+}
+```
+
+`404 Not Found` — `{ "message": "Club no encontrado", "statusCode": 404 }`
+
+### PATCH /ops/clubs/:id/notes
+
+Our notes on the club (never shown to it). Empty or `null` clears them.
+
+**Auth required:** Yes (ops token)
+
+**Request body** — `{ "opsNotes": "Paga por transferencia el 5." }` (≤8000 chars, or `null`)
+
+`200 OK` — `{ "opsNotes": "Paga por transferencia el 5." }` · `404 Not Found`
+
 ### GET /ops/clubs/:id/users
 
 The panel users of one club, so support can pick whose password to reset.
@@ -2843,7 +2957,8 @@ club out-of-band; it is never stored or emailed in plaintext.
 
 ### GET /ops/metrics/business
 
-MRR, activation, GMV and bot-vs-panel across every club. Last 30 days.
+MRR, activation, GMV and bot-vs-panel across every club, the sales demo left out. Last 30 days,
+and the last 12 months.
 
 **Auth required:** Yes (ops token)
 
@@ -2861,9 +2976,40 @@ provisioned.
   "activation": { "provisioned": 1, "activated": 1, "medianDaysToFirstBooking": 0 },
   "gmvCents": 10000000,
   "bookings": { "bot": 22, "panel": 9 },
-  "series": [{ "date": "2026-07-11", "bot": 3, "panel": 1 }]
+  "series": [{ "date": "2026-07-11", "bot": 3, "panel": 1 }],
+  "months": [
+    {
+      "month": "2026-10",
+      "newClubs": 2,
+      "tracked": true,
+      "mrrCents": 13999800,
+      "paying": 2,
+      "newPaying": 1,
+      "churned": 0,
+      "churnedClubs": []
+    }
+  ]
 }
 ```
+
+`months` (oldest first) comes from `ClubMonthState`: each club's subscription as it stood in a
+month, recorded every day at 23:50, on boot and after every change from the console. `mrrCents`
+and `paying` are the month's close (today, for the current one); `newPaying` / `churned` compare
+with the month before (`null` when that month wasn't recorded); `churnedClubs` names who stopped
+paying. Months before the recording started have `tracked: false` and only `newClubs`
+(from `Club.createdAt`).
+
+### GET /ops/weekly-summary
+
+The text of the summary posted to `OPS_ALERT_WEBHOOK_URL` every Monday at 9:00 (club-local) about
+the previous seven days: new leads by channel, contacted, overdue and to call back today, signup
+started vs sent, clubs paying and on trial with the recurring revenue against last month, new
+clubs, clubs with the bot paused, at risk or with the trial ending, and bot vs panel bookings.
+The sales demo is left out. This endpoint previews what the next one would say.
+
+**Auth required:** Yes (ops token)
+
+`200 OK` — `{ "text": "📊 *Resumen semanal de GTP* — 5 al 11 de octubre\n…" }`
 
 ### GET /ops/metrics/bot
 
