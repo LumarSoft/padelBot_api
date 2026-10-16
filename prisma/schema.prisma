@@ -163,6 +163,15 @@ model Club {
   llmUsageDaily        LlmUsageDaily[]
   whatsAppMessageDaily WhatsAppMessageDaily[]
   helpSearchMisses     HelpSearchMiss[]
+  competitions         Competition[]
+  competitionSessions  CompetitionSession[]
+  competitionCourts    CompetitionCourt[]
+  competitionCategories CompetitionCategory[]
+  competitionGroups    CompetitionGroup[]
+  competitionPairs     CompetitionPair[]
+  competitionPlayers   CompetitionPlayer[]
+  competitionMatches   CompetitionMatch[]
+  competitionSignupRequests CompetitionSignupRequest[]
 }
 
 enum Role {
@@ -218,6 +227,8 @@ model Court {
   slots     Slot[]
   recurringBookings RecurringBooking[]
   priceRules CourtPriceRule[]
+  competitionCourts CompetitionCourt[]
+  competitionMatches CompetitionMatch[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -268,6 +279,11 @@ model Slot {
   endsAt     DateTime
   priceCents Int
   status     SlotStatus @default(AVAILABLE)
+  /// The torneo or peña this BLOCKED slot is held for. Null = a plain block (rain, maintenance…)
+  /// or no block at all. Bulk unblock never frees an event's slots; deleting or cancelling the
+  /// event frees them.
+  competitionId String?
+  competition   Competition? @relation(fields: [competitionId], references: [id], onDelete: SetNull)
   bookings   Booking[]
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
@@ -277,6 +293,7 @@ model Slot {
   @@unique([courtId, startsAt])
   @@index([clubId])
   @@index([clubId, startsAt])
+  @@index([competitionId])
 }
 
 model User {
@@ -312,6 +329,7 @@ model User {
   deviceTokens     DeviceToken[]
   stockMovements   StockMovement[]
   counterSales     CounterSale[]
+  competitions     Competition[]
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
@@ -407,6 +425,7 @@ model Player {
   isBlocked   Boolean  @default(false)
   notes       String?  @db.Text
   bookings    Booking[]
+  competitionEntries CompetitionPlayer[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -562,6 +581,9 @@ model Product {
   priceCents   Int
   category     ProductCategory @default(OTRO)
   isActive     Boolean         @default(true)
+  /// What the counter's barcode scanner reads (the EAN on the bottle, or a code of the club's
+  /// own). Unique per club so a scan resolves to one product; null = no code, picked by hand.
+  barcode      String?         @db.VarChar(64)
   /// Units on hand. Null = the club doesn't track stock for this product (never forced on
   /// anyone). May go negative: a sale is never blocked, the next count corrects it.
   stockQuantity      Int?
@@ -576,6 +598,7 @@ model Product {
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
+  @@unique([clubId, barcode])
   @@index([clubId])
 }
 
@@ -1066,4 +1089,281 @@ model RecurringBooking {
   @@index([clubId])
   @@index([courtId])
   @@index([clubId, courtId, dayOfWeek])
+}
+
+enum CompetitionKind {
+  TOURNAMENT
+  PENA
+}
+
+enum CompetitionStatus {
+  /// Taking registrations; no fixture yet.
+  OPEN
+  /// At least one category has its fixture generated.
+  IN_PROGRESS
+  FINISHED
+  CANCELLED
+}
+
+/// How a match is played: americano / peña = one set, completo = best of three.
+enum MatchFormat {
+  ONE_SET
+  BEST_OF_THREE
+}
+
+enum CategoryFormat {
+  /// Everyone plays everyone (a peña, or a small category).
+  ROUND_ROBIN
+  /// Zonas first, then the best of each zona go to a knockout bracket.
+  GROUPS_KNOCKOUT
+  /// Straight knockout bracket.
+  KNOCKOUT
+}
+
+enum MatchStage {
+  GROUP
+  KNOCKOUT
+}
+
+/// A torneo or a peña. Both hold courts during one or more time windows (sessions), take pair
+/// registrations and play matches; a peña is a single round-robin category with no bracket.
+model Competition {
+  id              String            @id @default(cuid())
+  clubId          String
+  club            Club              @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  kind            CompetitionKind
+  name            String            @db.VarChar(120)
+  description     String?           @db.Text
+  status          CompetitionStatus @default(OPEN)
+  matchFormat     MatchFormat       @default(ONE_SET)
+  /// Registration fee per PLAYER, in cents. 0 = free.
+  entryFeeCents   Int               @default(0)
+  createdByUserId Int
+  createdByUser   User              @relation(fields: [createdByUserId], references: [id])
+  sessions        CompetitionSession[]
+  courts          CompetitionCourt[]
+  categories      CompetitionCategory[]
+  groups          CompetitionGroup[]
+  pairs           CompetitionPair[]
+  players         CompetitionPlayer[]
+  matches         CompetitionMatch[]
+  signupRequests  CompetitionSignupRequest[]
+  slots           Slot[]
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([clubId])
+  @@index([clubId, kind, status])
+}
+
+/// One time window when the event holds its courts, in club-local wall-clock time. An `endTime`
+/// equal to or earlier than `startTime` ends past midnight, like `Court.closeTime`.
+model CompetitionSession {
+  id            String      @id @default(cuid())
+  clubId        String
+  club          Club        @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  /// "YYYY-MM-DD", club-local.
+  dateKey       String      @db.VarChar(10)
+  /// "HH:MM"
+  startTime     String      @db.VarChar(5)
+  /// "HH:MM"
+  endTime       String      @db.VarChar(5)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([clubId])
+  @@index([competitionId])
+}
+
+/// A court the event uses during every one of its sessions.
+model CompetitionCourt {
+  clubId        String
+  club          Club        @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  courtId       String
+  court         Court       @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+
+  @@id([competitionId, courtId])
+  @@index([clubId])
+  @@index([courtId])
+}
+
+/// A category of a torneo ("4ta", "Mixto"…). A peña has exactly one, "General".
+model CompetitionCategory {
+  id              String         @id @default(cuid())
+  clubId          String
+  club            Club           @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId   String
+  competition     Competition    @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  name            String         @db.VarChar(60)
+  format          CategoryFormat
+  /// Target pairs per zona (GROUPS_KNOCKOUT). Zonas get this size or a bit more.
+  groupSize       Int            @default(3)
+  /// Pairs of each zona that go on to the bracket (GROUPS_KNOCKOUT).
+  advancePerGroup Int            @default(2)
+  /// Registration cap; null = no cap.
+  maxPairs        Int?
+  /// When the fixture (zonas, round robin or bracket) was generated. Null = still registering.
+  fixtureGeneratedAt DateTime?
+  /// When the knockout bracket was generated (GROUPS_KNOCKOUT only, after the zonas).
+  bracketGeneratedAt DateTime?
+  groups          CompetitionGroup[]
+  pairs           CompetitionPair[]
+  matches         CompetitionMatch[]
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([clubId])
+  @@index([competitionId])
+}
+
+/// A zona of a category ("Zona A").
+model CompetitionGroup {
+  id            String              @id @default(cuid())
+  clubId        String
+  club          Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition         @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  categoryId    String
+  category      CompetitionCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  name          String              @db.VarChar(30)
+  position      Int
+  pairs         CompetitionPair[]
+  matches       CompetitionMatch[]
+  createdAt     DateTime            @default(now())
+
+  @@index([clubId])
+  @@index([categoryId])
+}
+
+/// A registered pair. Its two players are `CompetitionPlayer` rows (position 1 and 2).
+model CompetitionPair {
+  id            String              @id @default(cuid())
+  clubId        String
+  club          Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition         @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  categoryId    String
+  category      CompetitionCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  groupId       String?
+  group         CompetitionGroup?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  /// 1 = best. Null = unseeded (ordered by registration).
+  seed          Int?
+  players       CompetitionPlayer[]
+  matchesAsA    CompetitionMatch[]  @relation("MatchPairA")
+  matchesAsB    CompetitionMatch[]  @relation("MatchPairB")
+  matchesWon    CompetitionMatch[]  @relation("MatchWinner")
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([clubId])
+  @@index([competitionId])
+  @@index([categoryId])
+}
+
+/// One player of a pair, with their share of the registration fee.
+model CompetitionPlayer {
+  id            String               @id @default(cuid())
+  clubId        String
+  club          Club                 @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition          @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  pairId        String
+  pair          CompetitionPair      @relation(fields: [pairId], references: [id], onDelete: Cascade)
+  /// 1 or 2.
+  position      Int
+  name          String               @db.VarChar(100)
+  /// Digits-only, optional: the desk often registers just a name.
+  phone         String?              @db.VarChar(20)
+  /// The club's Player with that phone, when one was given.
+  playerId      String?
+  player        Player?              @relation(fields: [playerId], references: [id], onDelete: SetNull)
+  /// When the player paid the registration fee. Null = pending.
+  paidAt        DateTime?
+  paymentMethod PlayerPaymentMethod?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  @@unique([pairId, position])
+  @@index([clubId])
+  @@index([competitionId])
+  @@index([playerId])
+}
+
+/// A match of the fixture. Group/round-robin matches know both pairs up front; a knockout match
+/// can wait for the winners of earlier ones (`placeholderA/B` says who, e.g. "1° Zona A").
+model CompetitionMatch {
+  id            String              @id @default(cuid())
+  clubId        String
+  club          Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition         @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  categoryId    String
+  category      CompetitionCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  stage         MatchStage
+  groupId       String?
+  group         CompetitionGroup?   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  /// Round-robin: the round ("fecha"). Knockout: 1 = first round … last = final.
+  round         Int
+  /// Order inside the round.
+  position      Int
+  pairAId       String?
+  pairA         CompetitionPair?    @relation("MatchPairA", fields: [pairAId], references: [id], onDelete: SetNull)
+  pairBId       String?
+  pairB         CompetitionPair?    @relation("MatchPairB", fields: [pairBId], references: [id], onDelete: SetNull)
+  placeholderA  String?             @db.VarChar(40)
+  placeholderB  String?             @db.VarChar(40)
+  courtId       String?
+  court         Court?              @relation(fields: [courtId], references: [id], onDelete: SetNull)
+  startsAt      DateTime?
+  /// Games per set, from pair A's side: [[6,4],[3,6],[10,8]]. Null = not played yet.
+  sets          Json?
+  winnerPairId  String?
+  winnerPair    CompetitionPair?    @relation("MatchWinner", fields: [winnerPairId], references: [id], onDelete: SetNull)
+  /// Knockout: the match the winner moves on to, and on which side.
+  nextMatchId   String?
+  nextMatch     CompetitionMatch?   @relation("MatchNext", fields: [nextMatchId], references: [id], onDelete: SetNull)
+  previousMatches CompetitionMatch[] @relation("MatchNext")
+  /// "A" or "B".
+  nextSlot      String?             @db.VarChar(1)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([clubId])
+  @@index([competitionId])
+  @@index([categoryId])
+}
+
+enum SignupRequestStatus {
+  /// Waiting for someone at the club to answer the player.
+  PENDING
+  /// The club talked to the player (registered them or not).
+  HANDLED
+  /// Not worth following up (a test, a duplicate, a mistake).
+  DISMISSED
+}
+
+/// A player asked through the WhatsApp bot to sign up for a torneo or peña. The bot only takes the
+/// request and hands the chat to the club; the staff registers the pair from the panel.
+model CompetitionSignupRequest {
+  id            String              @id @default(cuid())
+  clubId        String
+  club          Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition         @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  /// The player's WhatsApp number (wa_id) — opens their chat in Conversaciones.
+  waId          String              @db.VarChar(32)
+  /// The name the bot knows them by, if any.
+  playerName    String?             @db.VarChar(100)
+  status        SignupRequestStatus @default(PENDING)
+  handledAt     DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([clubId, status])
+  @@index([competitionId])
 }

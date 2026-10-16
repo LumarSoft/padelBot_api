@@ -29,7 +29,7 @@ const atConfirm: SessionContext = {
 function makeService(): LlmService {
   // The OpenAI client refuses to construct without a key — and it SHOULD, in production.
   process.env.OPENAI_API_KEY ??= 'test-key'
-  return new LlmService({} as never, {} as never, {} as never)
+  return new LlmService({} as never, {} as never, {} as never, {} as never)
 }
 
 /** Calls the private in-place helper the way every fallback path does. */

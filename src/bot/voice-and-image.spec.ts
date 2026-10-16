@@ -33,7 +33,8 @@ function setup(opts: { transcript?: string | null; pending?: unknown; descriptio
     {} as never, // waitlist
     {} as never, // players
     {} as never, // notifications
-    { botPaused: jest.fn().mockResolvedValue(false) } as never, // credits
+    { botPaused: jest.fn().mockResolvedValue(false) } as never, // credits,
+    {} as never, // competitionSignups
   )
   const handleMessage = jest.spyOn(service, 'handleMessage').mockResolvedValue({ text: 'respuesta' })
   return { service, llm, handleMessage, sessionService }

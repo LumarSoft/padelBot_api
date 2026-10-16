@@ -1,10 +1,23 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, UseGuards } from '@nestjs/common'
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common'
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { AuthenticatedUser } from '../auth/types/jwt-payload'
 import { ProductsService } from './products.service'
 import { CreateProductDto } from './dto/create-product.dto'
 import { UpdateProductDto } from './dto/update-product.dto'
+import { FindByBarcodeDto } from './dto/find-by-barcode.dto'
 
 @Controller('products')
 @UseGuards(JwtAuthGuard)
@@ -14,6 +27,12 @@ export class ProductsController {
   @Get()
   findAll(@CurrentUser() user: AuthenticatedUser) {
     return this.productsService.findAll(user.clubId)
+  }
+
+  /** What the point of sale's scanner read. Declared before `:id` so it isn't taken for one. */
+  @Get('by-barcode')
+  findByBarcode(@CurrentUser() user: AuthenticatedUser, @Query() query: FindByBarcodeDto) {
+    return this.productsService.findByBarcode(user.clubId, query.code)
   }
 
   @Get(':id')

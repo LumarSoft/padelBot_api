@@ -20,7 +20,7 @@ function setup(error: unknown) {
     court: { findMany: jest.fn().mockResolvedValue([]) },
     product: { findMany: jest.fn().mockResolvedValue([]) },
   }
-  const service = new LlmService(prisma as never, {} as never, {} as never)
+  const service = new LlmService(prisma as never, {} as never, {} as never, {} as never)
   const create = jest.fn().mockRejectedValue(error)
   const openai = { audio: { transcriptions: { create } }, chat: { completions: { create } } }
   ;(service as unknown as { openai: typeof openai }).openai = openai

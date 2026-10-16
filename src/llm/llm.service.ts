@@ -3,6 +3,8 @@ import OpenAI, { APIError, toFile } from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
 import { PlansService } from '../plans/plans.service'
+import { CompetitionSignupsService } from '../competitions/competition-signups.service'
+import { competitionsResult, toCompetitionOptions } from '../bot/lib/competitions'
 import { todayKey } from '../availability/lib/datetime'
 import { courtScheduleSelect } from '../availability/lib/schedule'
 import { BotState, HandlerResult, SessionContext } from '../bot/types'
@@ -64,6 +66,7 @@ export class LlmService {
     private readonly prisma: PrismaService,
     private readonly availability: AvailabilityService,
     private readonly plans: PlansService,
+    private readonly competitionSignups: CompetitionSignupsService,
   ) {
     this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   }
@@ -386,6 +389,8 @@ export class LlmService {
     switch (name) {
       case 'navigate_booking':
         return this.handleNavigateBooking(args, state, ctx, clubId)
+      case 'show_competitions':
+        return this.handleShowCompetitions(ctx, clubId)
       default:
         this.logger.error(`LLM called an unknown tool: ${name}`)
         return Promise.resolve(this.inPlace(NOT_UNDERSTOOD, state, ctx))
@@ -393,6 +398,12 @@ export class LlmService {
   }
 
   // ── Tool handlers ──────────────────────────────────────────────────────────
+
+  /** The open torneos and peñas — the same picker the menu's "3" opens. */
+  private async handleShowCompetitions(ctx: SessionContext, clubId: string): Promise<HandlerResult> {
+    const open = await this.competitionSignups.openForPlayers(clubId)
+    return competitionsResult(toCompetitionOptions(open), ctx)
+  }
 
   private async handleNavigateBooking(
     args: BookingToolArgs,

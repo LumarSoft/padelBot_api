@@ -8,9 +8,9 @@ import { BotState, SessionContext } from '../types'
 describe('buildInteractive', () => {
   const ctx = (over: Partial<SessionContext> = {}): SessionContext => ({ ...over })
 
-  it('offers booking and "mis turnos" on the menu, with the ids onMenu accepts', () => {
+  it('offers booking, "mis turnos" and torneos on the menu, with the ids onMenu accepts', () => {
     const i = buildInteractive(BotState.MENU, ctx())
-    expect(i?.buttons?.map(b => b.id)).toEqual(['1', '2'])
+    expect(i?.buttons?.map(b => b.id)).toEqual(['1', '2', '3'])
   })
 
   it('lists the player’s bookings with ids the FSM resolves, court in the description', () => {
@@ -167,5 +167,25 @@ describe('buildInteractive', () => {
       )
       expect(i?.list?.rows.map(r => r.id)).toEqual(['12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00'])
     })
+  })
+})
+
+describe('torneos picker', () => {
+  it('lists the open events as rows the FSM resolves, with kind and date below', () => {
+    const i = buildInteractive(BotState.COMPETITION_PICK, {
+      competitionOptions: [
+        {
+          id: 'c1',
+          kind: 'PENA',
+          name: 'Peña de los jueves',
+          when: 'jueves 22/10 · 20:00',
+          feeCents: 0,
+          categories: [],
+        },
+      ],
+    })
+    expect(i?.list?.rows).toEqual([
+      { id: 'torneo:c1', title: 'Peña de los jueves', description: 'Peña · jueves 22/10 · 20:00' },
+    ])
   })
 })

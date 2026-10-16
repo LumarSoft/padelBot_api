@@ -30,7 +30,8 @@ function setup() {
     {} as never, // waitlist
     {} as never, // players
     notifications as never,
-    { botPaused: jest.fn().mockResolvedValue(false) } as never, // credits
+    { botPaused: jest.fn().mockResolvedValue(false) } as never, // credits,
+    {} as never, // competitionSignups
   )
   return { service, sessionService, notifications }
 }
