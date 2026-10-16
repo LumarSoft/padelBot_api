@@ -2109,6 +2109,13 @@ The club's kiosk catalog (balls, drinks, snacks, accessories). Stock is **opt-in
 `stockQuantity: null` means the club doesn't track it. See [Stock (kiosco)](#stock-kiosco) for the
 ledger, counts and counter sales.
 
+**Barcodes:** a product may carry the `barcode` the panel's point of sale («Mostrador») reads with a
+USB/Bluetooth scanner (it types the code and Enter, like a keyboard). Optional, trimmed, printable
+ASCII without spaces, up to 64 characters, and **unique per club** (two clubs may share an EAN).
+A scan resolves with `GET /products/by-barcode`; a code nobody has is then linked to an existing
+product (`PATCH`) or creates one (`POST`). The sale and the delivery themselves go through
+`POST /stock/counter-sales` and `POST /stock/purchases`.
+
 ### GET /products
 
 Lists the caller's club products, by category and name.
@@ -2125,6 +2132,7 @@ Lists the caller's club products, by category and name.
     "priceCents": 200000,
     "category": "BEBIDA",
     "isActive": true,
+    "barcode": "7790895000782",
     "stockQuantity": 9,
     "lowStockThreshold": 24,
     "createdAt": "2026-08-01T12:00:00.000Z",
@@ -2134,6 +2142,34 @@ Lists the caller's club products, by category and name.
 ```
 
 `stockQuantity` may be negative: a sale is never blocked for lack of stock, the next count corrects it.
+`barcode` is `null` for products picked by hand.
+
+### GET /products/by-barcode
+
+The product a scanned code belongs to, in the caller's club. Inactive products are returned too
+(with `isActive: false`): the point of sale warns but never refuses what's on the counter.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Query** — `code` (required; trimmed; printable ASCII without spaces, 1..64 chars)
+
+```
+GET /products/by-barcode?code=7790895000782
+```
+
+`200 OK` — the product (same shape as in `GET /products`)
+
+`404 Not Found` — no product of the caller's club has that code (the panel offers to load it)
+
+```json
+{ "statusCode": 404, "message": "No hay ningún producto con el código 7790895000782" }
+```
+
+`400 Bad Request` — `code` missing, blank or not a valid barcode
+
+```json
+{ "statusCode": 400, "message": ["El código de barras no es válido"], "error": "Bad Request" }
+```
 
 ### POST /products
 
@@ -2150,11 +2186,12 @@ Creates a product. Sending `stockQuantity` starts tracking its stock with an `AD
 | priceCents        | number  | Yes      | integer ≥ 0                                                     |
 | category          | string  | No       | `PELOTA` \| `BEBIDA` \| `SNACK` \| `ACCESORIO` \| `OTRO` (default `OTRO`) |
 | isActive          | boolean | No       | default `true`                                                  |
+| barcode           | string  | No       | trimmed; printable ASCII, no spaces, 1..64 chars; unique in the club. Blank/`null` = no code |
 | stockQuantity     | number  | No       | integer 0..100000. Omit to not track stock                      |
 | lowStockThreshold | number  | No       | integer 0..100000 or `null`. `null` = "para comprar" only at 0  |
 
 ```json
-{ "name": "Overgrip", "priceCents": 450000, "category": "ACCESORIO", "stockQuantity": 20, "lowStockThreshold": 6 }
+{ "name": "Overgrip", "priceCents": 450000, "category": "ACCESORIO", "barcode": "7798123450012", "stockQuantity": 20, "lowStockThreshold": 6 }
 ```
 
 `201 Created` — the product (same shape as in `GET /products`)
@@ -2162,6 +2199,12 @@ Creates a product. Sending `stockQuantity` starts tracking its stock with an `AD
 `400 Bad Request` — validation error
 
 `403 Forbidden` — a `stockQuantity` (starting to track stock) on a plan without kiosk stock.
+
+`409 Conflict` — another product of the club already has that `barcode`
+
+```json
+{ "statusCode": 409, "message": "El código 7790895000782 ya es de «Agua mineral 500 ml»" }
+```
 
 ### PATCH /products/:id
 
@@ -2171,10 +2214,15 @@ re-evaluates the low-stock alert flag. Neither sends a push (the owner is the on
 
 **Auth required:** Yes
 
-**Request body** — any subset of the `POST /products` fields; `stockQuantity` also accepts `null`.
+**Request body** — any subset of the `POST /products` fields; `stockQuantity` also accepts `null`,
+and `barcode: null` (or blank) removes the code.
 
 ```json
 { "lowStockThreshold": 12 }
+```
+
+```json
+{ "barcode": "7790895000782" }
 ```
 
 `200 OK` — the updated product
@@ -2182,6 +2230,8 @@ re-evaluates the low-stock alert flag. Neither sends a push (the owner is the on
 `404 Not Found` — product not in the caller's club
 
 `403 Forbidden` — a `stockQuantity` on a product not tracked yet, on a plan without kiosk stock. Products already tracked keep working.
+
+`409 Conflict` — another product of the club already has that `barcode` (same body as in `POST /products`)
 
 ### DELETE /products/:id
 
@@ -2213,8 +2263,9 @@ shelf and sells loose drinks) and scoped to the caller's club.
 
 ### POST /stock/purchases
 
-"Entró mercadería": adds one delivery of several products. A product nobody tracked yet starts
-being tracked from the received quantity.
+"Entró mercadería": adds one delivery of several products — what the point of sale's «Cargar
+stock» sends once the scanned delivery is confirmed. A product nobody tracked yet starts being
+tracked from the received quantity.
 
 **Auth required:** Yes (OWNER or STAFF)
 
@@ -2352,7 +2403,9 @@ A product's ledger, newest first.
 ### POST /stock/counter-sales
 
 "Venta suelta": kiosk products sold outside any turno (someone buys a drink without playing),
-paid on the spot. Each product becomes a counter sale with a price snapshot; it counts in
+paid on the spot — the point of sale's «Cobrar» sends the whole scanned ticket here, and undoes it
+line by line with `DELETE /stock/counter-sales/:id`. Each product becomes a counter sale with a
+price snapshot (one ticket's lines share `createdAt`); it counts in
 `GET /stats/revenue` (kiosk revenue + cash/QR of that day) and takes the units out of stock
 when the product is tracked. Never blocked for lack of stock.
 

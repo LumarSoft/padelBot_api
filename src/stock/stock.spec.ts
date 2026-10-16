@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common'
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common'
 import { BookingsService } from '../bookings/bookings.service'
 import { StockService } from './stock.service'
 import { consumoDeltas, isLowStock } from './lib/stock-math'
@@ -73,6 +73,7 @@ function fakeDb(products: FakeProduct[], lines: FakeLine[] = []) {
     products: new Map(products.map(p => [p.id, { ...p }])),
     lines: [...lines],
     movements: [] as Record<string, unknown>[],
+    sales: [] as Record<string, unknown>[],
   }
   let inTx = false
   const write =
@@ -126,6 +127,15 @@ function fakeDb(products: FakeProduct[], lines: FakeLine[] = []) {
         }),
       ),
     },
+    counterSale: {
+      create: jest.fn(
+        write(async ({ data }: { data: Record<string, unknown> }) => {
+          const sale = { id: `cs${state.sales.length + 1}`, ...data }
+          state.sales.push(sale)
+          return sale
+        }),
+      ),
+    },
     booking: {
       updateMany: jest.fn(write(async ({ where }: Query) => ({ count: where.clubId === CLUB ? 1 : 0 }))),
     },
@@ -151,6 +161,7 @@ function fakeDb(products: FakeProduct[], lines: FakeLine[] = []) {
         products: new Map([...state.products].map(([id, p]) => [id, { ...p }])),
         lines: [...state.lines],
         movements: [...state.movements],
+        sales: [...state.sales],
       }
       inTx = true
       try {
@@ -170,6 +181,7 @@ function fakeDb(products: FakeProduct[], lines: FakeLine[] = []) {
     productRow: (id: string) => state.products.get(id)!,
     lines: () => state.lines,
     movements: () => state.movements,
+    sales: () => state.sales,
   }
 }
 
@@ -457,5 +469,135 @@ describe('kiosk stock and the plan', () => {
     await stock.registerPurchase(CLUB, 7, { items: [{ productId: 'agua', quantity: 24 }] })
 
     expect(db.stockOf('agua')).toBe(24)
+  })
+})
+
+/**
+ * The point of sale: scanning builds a ticket (the panel adds one per scan, and a repeated
+ * product may arrive as several lines) and "Cobrar" posts it as one counter sale; "Cargar
+ * stock" posts the scanned delivery as one purchase. Each lands in the same ledger as the rest.
+ */
+describe('point of sale tickets', () => {
+  it('charges a ticket of several products in one go: one sale per product, stock out, ledger linked', async () => {
+    const { db, stock } = setup([product('agua', 20), product('coca', 10)])
+
+    const sales = await stock.createCounterSale(CLUB, 7, {
+      items: [
+        { productId: 'agua', quantity: 1 },
+        { productId: 'coca', quantity: 2 },
+        { productId: 'agua', quantity: 1 },
+      ],
+      method: 'QR',
+    })
+
+    expect(sales).toHaveLength(2)
+    expect(db.sales()).toEqual([
+      expect.objectContaining({ productId: 'agua', quantity: 2, unitPriceCents: 200_000, method: 'QR', userId: 7 }),
+      expect.objectContaining({ productId: 'coca', quantity: 2, unitPriceCents: 200_000, method: 'QR', userId: 7 }),
+    ])
+    // One ticket: every line carries the same moment.
+    expect(db.sales()[0].createdAt).toBe(db.sales()[1].createdAt)
+    expect(db.stockOf('agua')).toBe(18)
+    expect(db.stockOf('coca')).toBe(8)
+    expect(db.movements()).toEqual([
+      expect.objectContaining({ productId: 'agua', type: 'SALE', quantity: -2, stockAfter: 18, counterSaleId: 'cs1' }),
+      expect.objectContaining({ productId: 'coca', type: 'SALE', quantity: -2, stockAfter: 8, counterSaleId: 'cs2' }),
+    ])
+  })
+
+  it('charges products without stock control too, without touching their stock', async () => {
+    const { db, stock } = setup([product('agua', 20), product('paleta', null)])
+
+    await stock.createCounterSale(CLUB, 7, {
+      items: [
+        { productId: 'agua', quantity: 1 },
+        { productId: 'paleta', quantity: 1 },
+      ],
+      method: 'CASH',
+    })
+
+    expect(db.sales()).toHaveLength(2)
+    expect(db.stockOf('paleta')).toBeNull()
+    expect(db.movements()).toEqual([expect.objectContaining({ productId: 'agua', quantity: -1 })])
+  })
+
+  it('refuses a ticket with another club’s product and writes nothing', async () => {
+    const { db, stock } = setup([product('agua', 20), { ...product('ajeno', 5), clubId: 'club-2' }])
+
+    await expect(
+      stock.createCounterSale(CLUB, 7, {
+        items: [
+          { productId: 'agua', quantity: 1 },
+          { productId: 'ajeno', quantity: 1 },
+        ],
+        method: 'CASH',
+      }),
+    ).rejects.toBeInstanceOf(NotFoundException)
+    expect(db.sales()).toEqual([])
+    expect(db.stockOf('agua')).toBe(20)
+    expect(db.stockOf('ajeno')).toBe(5)
+  })
+
+  it('rolls the whole ticket back when a write fails halfway', async () => {
+    const { db, stock } = setup([product('agua', 20), product('coca', 10)])
+    db.client.counterSale.create.mockImplementationOnce(db.client.counterSale.create.getMockImplementation()!)
+    db.client.counterSale.create.mockRejectedValueOnce(new Error('db down'))
+
+    await expect(
+      stock.createCounterSale(CLUB, 7, {
+        items: [
+          { productId: 'agua', quantity: 1 },
+          { productId: 'coca', quantity: 1 },
+        ],
+        method: 'CASH',
+      }),
+    ).rejects.toThrow('db down')
+    expect(db.sales()).toEqual([])
+    expect(db.stockOf('agua')).toBe(20)
+    expect(db.movements()).toEqual([])
+  })
+
+  it('pushes the owner once, after the sale, when the ticket takes a product to its minimum', async () => {
+    const { notifications, stock } = setup([product('agua', 7, 5), product('coca', 30, 5)])
+
+    await stock.createCounterSale(CLUB, 7, {
+      items: [
+        { productId: 'agua', quantity: 2 },
+        { productId: 'coca', quantity: 1 },
+      ],
+      method: 'CASH',
+    })
+
+    expect(notifications.notifyOwners).toHaveBeenCalledTimes(1)
+    expect(notifications.notifyOwners).toHaveBeenCalledWith(
+      CLUB,
+      expect.objectContaining({ body: 'Agua 500 ml: quedan 5' }),
+    )
+  })
+
+  it('loads a scanned delivery of several products as PURCHASE lines, summing repeated scans', async () => {
+    const { db, stock } = setup([product('agua', 4), product('coca', 0)])
+
+    await stock.registerPurchase(CLUB, 7, {
+      items: [
+        { productId: 'agua', quantity: 6 },
+        { productId: 'coca', quantity: 12 },
+        { productId: 'agua', quantity: 6 },
+      ],
+      note: 'Distribuidora Rosario',
+    })
+
+    expect(db.stockOf('agua')).toBe(16)
+    expect(db.stockOf('coca')).toBe(12)
+    expect(db.movements()).toEqual([
+      expect.objectContaining({
+        productId: 'agua',
+        type: 'PURCHASE',
+        quantity: 12,
+        stockAfter: 16,
+        note: 'Distribuidora Rosario',
+      }),
+      expect.objectContaining({ productId: 'coca', type: 'PURCHASE', quantity: 12, stockAfter: 12, userId: 7 }),
+    ])
   })
 })
