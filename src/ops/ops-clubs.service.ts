@@ -282,7 +282,7 @@ export class OpsClubsService {
       data.currentPeriodEnd = new Date(Date.now() + (dto.months ?? 1) * 30 * DAY_MS)
     }
     if (dto.status === SubscriptionStatus.TRIAL) {
-      data.trialEndsAt = new Date(Date.now() + (dto.days ?? 30) * DAY_MS)
+      data.trialEndsAt = new Date(Date.now() + (dto.days ?? 15) * DAY_MS)
     }
 
     const updated = await this.prisma.club.update({

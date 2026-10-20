@@ -15,7 +15,7 @@ import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-pol
 
 const BCRYPT_ROUNDS = 10
 /** Free-trial length for new clubs. */
-const TRIAL_DAYS = Number(process.env.TRIAL_DAYS) || 30
+const TRIAL_DAYS = Number(process.env.TRIAL_DAYS) || 15
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /** State of one step of the guided setup. */

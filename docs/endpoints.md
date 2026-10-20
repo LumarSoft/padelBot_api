@@ -233,7 +233,7 @@ Rate-limited 40/min per IP.
 ### POST /onboarding/register
 
 **Ops-only** provisioning (header `x-ops-secret` must equal `OPS_ADMIN_SECRET`; fails
-closed when unset): creates the Club (on a `TRIAL_DAYS` free trial, default 14) and its
+closed when unset): creates the Club (on a `TRIAL_DAYS` free trial, default 15) and its
 OWNER user, then returns the login payload (token + user).
 
 The club is created **empty** — no demo courts, no example bookings. Courts, prices,
@@ -3463,7 +3463,7 @@ Manual billing from the UI — the same thing `npm run subscription` does from t
 | ------ | ------ | -------- | ----------------------------------------------------------- |
 | status | string | Yes      | `TRIAL` \| `ACTIVE` \| `PAST_DUE` \| `CANCELLED`            |
 | months | number | No       | 1–24. With `ACTIVE`: paid months from now. Default 1.       |
-| days   | number | No       | 1–180. With `TRIAL`: trial days from now. Default 30.       |
+| days   | number | No       | 1–180. With `TRIAL`: trial days from now. Default 15.       |
 | plan   | string | No       | `saque` \| `bandeja` \| `smash`. Resets the month's AI-credit alerts. |
 | grandfatheredFeatures | boolean | No | `false` once a plan is agreed with a club that predates the plans: from then on it gets only its plan's modules. |
 

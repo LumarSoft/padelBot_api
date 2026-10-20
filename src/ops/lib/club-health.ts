@@ -14,9 +14,9 @@ export type ClubHealthStatus =
   | 'atRisk'
   /** Used up its plan's credits this month: the bot is paused until it changes plan. */
   | 'botPaused'
-  /** Free month ending in a few days: the moment to close the sale. */
+  /** Free trial ending in a few days: the moment to close the sale. */
   | 'trialEnding'
-  /** In its free month and already taking bookings. */
+  /** In its free trial and already taking bookings. */
   | 'starting'
   /** Paying, live and the bot books on its own. */
   | 'healthy'
