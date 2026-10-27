@@ -30,6 +30,8 @@ function setup() {
     {} as never, // waitlist
     {} as never, // players
     notifications as never,
+    { botPaused: jest.fn().mockResolvedValue(false) } as never, // credits,
+    {} as never, // competitionSignups
   )
   return { service, sessionService, notifications }
 }
@@ -54,6 +56,15 @@ describe('explicit human hand-off', () => {
     expect(notifications.notifyClub).toHaveBeenCalledWith(
       CLUB,
       expect.objectContaining({ body: expect.stringContaining(WA_ID) }),
+    )
+  })
+
+  it('opens that chat when the staff taps the push', async () => {
+    const { service, notifications } = setup()
+    await handoff(service)
+    expect(notifications.notifyClub).toHaveBeenCalledWith(
+      CLUB,
+      expect.objectContaining({ data: { conversationId: 'session-1' } }),
     )
   })
 

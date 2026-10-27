@@ -19,6 +19,8 @@ const slotSelect = {
   createdAt: true,
   updatedAt: true,
   court: { select: { id: true, name: true } },
+  /** The torneo or peña a BLOCKED slot is held for, so the agenda can say which. */
+  competition: { select: { id: true, name: true, kind: true } },
 } as const
 
 @Injectable()
@@ -100,6 +102,8 @@ export class SlotsService {
         endsAt: dto.endsAt ? endsAt : undefined,
         priceCents: dto.priceCents,
         status: dto.status,
+        // Freeing one cell of a torneo or peña by hand detaches it from the event.
+        ...(dto.status && dto.status !== SlotStatus.BLOCKED ? { competitionId: null } : {}),
       },
       select: slotSelect,
     })
@@ -130,10 +134,7 @@ export class SlotsService {
     }
     const priceByCourt = new Map(courts.map(c => [c.id, c.priceCents]))
 
-    const dates = this.filterByWeekday(
-      this.enumerateDates(dto.fromDate, dto.toDate),
-      dto.daysOfWeek,
-    )
+    const dates = this.filterByWeekday(this.enumerateDates(dto.fromDate, dto.toDate), dto.daysOfWeek)
     if (dates.length === 0) return { blocked: 0, created: 0, skipped: 0 }
 
     const targets: { courtId: string; startsAt: Date; endsAt: Date }[] = []
@@ -232,6 +233,8 @@ export class SlotsService {
         clubId,
         courtId: { in: courtIds },
         status: SlotStatus.BLOCKED,
+        // A torneo's or peña's turnos are freed by editing or cancelling the event, not here.
+        competitionId: null,
         startsAt: { gte: from, lt: to },
       },
       select: { id: true, startsAt: true },

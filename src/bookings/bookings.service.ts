@@ -1,3 +1,4 @@
+import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
 import {
   BadRequestException,
   ConflictException,
@@ -14,7 +15,7 @@ import { SetBookingProductsDto } from './dto/set-booking-products.dto'
 import { LocalPaymentDto } from './dto/local-payment.dto'
 import { AddPlayerPaymentDto } from './dto/add-player-payment.dto'
 import { BookingAccountView, computeAccount } from './lib/account'
-import { DepositOutcome, PlayerRescheduleMode, Prisma, SlotStatus } from 'generated/prisma/client'
+import { DepositMode, DepositOutcome, PlayerRescheduleMode, Prisma, SlotStatus } from 'generated/prisma/client'
 import { bandDateTimes, bandsForDate, courtScheduleSelect, findBandInSchedule } from '../availability/lib/schedule'
 import { resolveBandPriceCents } from '../availability/lib/pricing'
 import { dniFromIdentification, dniMatches } from '../common/identity'
@@ -26,6 +27,9 @@ import { NotificationsService } from '../notifications/notifications.service'
 import { PlayersService } from '../players/players.service'
 import { SlotPricingService } from '../pricing/slot-pricing.service'
 import { AuditService } from '../audit/audit.service'
+import { splitPaymentLockedMessage } from '../plans/lib/features'
+import { PlansService } from '../plans/plans.service'
+import { StockService } from '../stock/stock.service'
 
 /** Booking a schedule band that may not have a materialized Slot row yet. */
 export interface BookBandInput {
@@ -59,6 +63,7 @@ const AUDITED_BOOKING_FIELDS = [
   'settledAt',
   'notes',
   'deletedAt',
+  'attendanceConfirmed',
 ]
 
 const bookingSelect = {
@@ -86,6 +91,9 @@ const bookingSelect = {
   mpPaymentId: true,
   paymentExpiresAt: true,
   receiptUploadedAt: true,
+  attendanceAskedAt: true,
+  attendanceConfirmed: true,
+  attendanceAnsweredAt: true,
   createdAt: true,
   updatedAt: true,
   slot: {
@@ -116,6 +124,7 @@ type BookingForEvent = {
   id: string
   clubId: string
   playerName: string
+  status?: string
   slot: { startsAt: Date; endsAt: Date; court: { name: string } }
 }
 
@@ -155,6 +164,20 @@ const roundToWholePesos = (cents: number): number => Math.round(cents / 100) * 1
 const PAYMENT_WINDOW_MS = (Number(process.env.PAYMENT_WINDOW_MIN) || 30) * 60 * 1000
 /** No-shows before the bot demands the FULL court price as the deposit. */
 const NO_SHOW_FULL_THRESHOLD = Number(process.env.NO_SHOW_FULL_THRESHOLD) || 3
+/** No payer to recognize: nothing will be transferred for this booking. */
+const NO_KNOWN_PAYER = { mpUserId: null, cuit: null }
+
+/**
+ * A player at the no-show threshold asked for a court at a club that charges nothing up front.
+ * Where there is a seña, the bot answers that risk by asking the full price; with nothing to ask,
+ * a person of the club decides. Nothing is booked. Extends ForbiddenException so any caller that
+ * doesn't know it still reads it as a refusal.
+ */
+export class NoShowReviewRequiredException extends ForbiddenException {
+  constructor(readonly noShowCount: number) {
+    super('Por las ausencias anteriores, este turno lo tiene que confirmar el club.')
+  }
+}
 
 export interface PendingBookingResult {
   id: string
@@ -166,9 +189,12 @@ export interface PendingBookingResult {
   creditAppliedCents: number
   /** True when credit covered the whole deposit — the booking is already CONFIRMED. */
   confirmedByCredit: boolean
+  /** True when there was nothing to charge (club on NONE, or a seña that works out to $0): the
+   *  booking was created CONFIRMED on the spot — no transfer, no payment window. */
+  confirmedWithoutDeposit: boolean
 }
 
-type CancelledPendingInfo = { playerPhone: string | null; clubId: string }
+type CancelledPendingInfo = { bookingId: string; playerPhone: string | null; clubId: string }
 
 /** Identity of who actually transferred, captured from MercadoPago. */
 export interface PayerInfo {
@@ -176,6 +202,30 @@ export interface PayerInfo {
   email?: string | null
   mpUserId?: string | null
 }
+
+/**
+ * Which clubs a transfer seen on the SHARED env MercadoPago account (no clubId) may confirm:
+ * only AUTO clubs that did NOT connect their own account — a club with its own account is
+ * reconciled scoped to it (and with its DNI rules), and the same account can be both the
+ * shared one and a club's own. The sales demo club is never eligible: its señas are simulated,
+ * so real money must never land on one of its fake bookings.
+ */
+const SHARED_ACCOUNT_CLUBS = {
+  paymentVerificationMode: 'AUTO',
+  mpAccessToken: null,
+  slug: { not: SALES_DEMO_SLUG },
+} as const
+
+/**
+ * A fijo's "¿venís?" was asked (and maybe answered) for the slot's OLD time. On a move, clear it
+ * so FixedConfirmationsService asks again for the new time — like `reminderSentAt`.
+ */
+const ATTENDANCE_RESET = {
+  attendanceAskedAt: null,
+  attendanceConfirmed: null,
+  attendanceAnsweredAt: null,
+  attendanceAlertSentAt: null,
+} as const
 
 @Injectable()
 export class BookingsService {
@@ -188,6 +238,8 @@ export class BookingsService {
     private readonly notifications: NotificationsService,
     private readonly players: PlayersService,
     private readonly slotPricing: SlotPricingService,
+    private readonly stock: StockService,
+    private readonly plans: PlansService,
     private readonly audit: AuditService,
   ) {}
 
@@ -291,6 +343,9 @@ export class BookingsService {
           notes: dto.notes,
           bookedByUserId: bookedByUserId ?? null,
           depositCents,
+          // Nothing to collect up front (club on NONE, or a $0 seña): the booking is simply
+          // confirmed, instead of sitting "pendiente de seña" for money nobody owes.
+          ...(depositCents === 0 ? { status: 'CONFIRMED' as const } : {}),
         },
         select: bookingSelect,
       })
@@ -397,7 +452,11 @@ export class BookingsService {
     return booking
   }
 
-  async cancel(clubId: string, id: string) {
+  /**
+   * `attendanceDeclined`: the cancellation IS a fijo's "no puedo" (WhatsApp or front desk) —
+   * recorded in the same conditional write, so the answer and the release can't half-happen.
+   */
+  async cancel(clubId: string, id: string, options: { attendanceDeclined?: boolean } = {}) {
     const booking = await this.findOne(clubId, id)
     if (booking.status === 'CANCELLED') {
       throw new BadRequestException('La reserva ya fue cancelada')
@@ -416,7 +475,11 @@ export class BookingsService {
       // were still unpaid would silently swallow the deposit that just landed.
       const { count } = await tx.booking.updateMany({
         where: { id, status: booking.status },
-        data: { status: 'CANCELLED', depositOutcome },
+        data: {
+          status: 'CANCELLED',
+          depositOutcome,
+          ...(options.attendanceDeclined ? { attendanceConfirmed: false, attendanceAnsweredAt: new Date() } : {}),
+        },
       })
       if (count !== 1) return null
 
@@ -516,7 +579,7 @@ export class BookingsService {
       // reminder already sent for the old time would suppress the (now-wrong) one for the new time.
       return tx.booking.update({
         where: { id },
-        data: { slotId: dto.newSlotId, reminderSentAt: null },
+        data: { slotId: dto.newSlotId, reminderSentAt: null, ...ATTENDANCE_RESET },
         select: bookingSelect,
       })
     })
@@ -543,8 +606,8 @@ export class BookingsService {
     if (slot.status !== SlotStatus.AVAILABLE) throw new ConflictException(`Slot ${dto.slotId} is not available`)
 
     const plan = await this.resolvePaymentPlan(clubId, slot.priceCents)
-    const policy = await this.applyPlayerPolicy(clubId, dto, slot.priceCents, plan.depositCents)
-    const known = await this.findKnownPayerIdentity(clubId, dto.playerPhone)
+    const policy = await this.applyPlayerPolicy(clubId, dto, slot.priceCents, plan)
+    const known = policy.depositCents > 0 ? await this.findKnownPayerIdentity(clubId, dto.playerPhone) : NO_KNOWN_PAYER
 
     return this.createPendingWithCredit(clubId, policy, plan.roundAmount, known, async (tx, data) => {
       // Atomic check-and-lock — the loser of a concurrent race gets a clean conflict.
@@ -587,8 +650,9 @@ export class BookingsService {
 
     const bandPriceCents = resolveBandPriceCents(court.priceCents, court.priceRules, input.dateKey, band.start)
     const plan = await this.resolvePaymentPlan(clubId, bandPriceCents)
-    const policy = await this.applyPlayerPolicy(clubId, input, bandPriceCents, plan.depositCents)
-    const known = await this.findKnownPayerIdentity(clubId, input.playerPhone)
+    const policy = await this.applyPlayerPolicy(clubId, input, bandPriceCents, plan)
+    const known =
+      policy.depositCents > 0 ? await this.findKnownPayerIdentity(clubId, input.playerPhone) : NO_KNOWN_PAYER
 
     return this.createPendingWithCredit(clubId, policy, plan.roundAmount, known, async (tx, data) => {
       const existing = await tx.slot.findFirst({
@@ -631,7 +695,8 @@ export class BookingsService {
    * Shared core of the pending-booking flow with player credit: consumes available
    * credit to reduce (or fully cover) the deposit inside the same transaction that
    * locks the slot. When credit covers everything the booking is created CONFIRMED
-   * directly — no transfer, no expiry window.
+   * directly — no transfer, no expiry window. Same when there is nothing to charge at all
+   * (club on NONE, or a seña that works out to $0): the bot works as a booking book.
    */
   private async createPendingWithCredit(
     clubId: string,
@@ -657,13 +722,18 @@ export class BookingsService {
     }>,
   ): Promise<PendingBookingResult> {
     const { depositCents, playerId, availableCreditCents } = policy
-    const creditApplied = playerId ? Math.min(availableCreditCents, depositCents) : 0
+    // Nothing to charge: confirmed on the spot. Holding it PENDING would ask the player for a
+    // $0 transfer nobody can make, and the expiry sweep would hand the court to someone else.
+    // Player credit isn't spent on it: it stays for a booking that does carry a seña.
+    const withoutDeposit = depositCents <= 0
+    const creditApplied = playerId && !withoutDeposit ? Math.min(availableCreditCents, depositCents) : 0
     const remainingCents = depositCents - creditApplied
     const coveredByCredit = creditApplied > 0 && remainingCents === 0
+    const confirmedNow = withoutDeposit || coveredByCredit
 
     const booking = await this.prisma.$transaction(async tx => {
       if (creditApplied > 0) await this.consumeCredit(tx, playerId!, creditApplied)
-      const transferAmountCents = coveredByCredit
+      const transferAmountCents = confirmedNow
         ? null
         : remainingCents === depositCents
           ? await this.resolvePendingTransferAmount(tx, depositCents, roundAmount, known)
@@ -672,61 +742,93 @@ export class BookingsService {
             remainingCents
       return create(tx, {
         playerId,
-        status: coveredByCredit ? 'CONFIRMED' : 'PENDING_PAYMENT',
+        status: confirmedNow ? 'CONFIRMED' : 'PENDING_PAYMENT',
         depositCents,
         creditAppliedCents: creditApplied,
         transferAmountCents,
-        paymentExpiresAt: coveredByCredit ? null : new Date(Date.now() + PAYMENT_WINDOW_MS),
+        paymentExpiresAt: confirmedNow ? null : new Date(Date.now() + PAYMENT_WINDOW_MS),
       })
     })
+
+    // Born CONFIRMED, so no payment confirmation will ever announce it: tell the panel and the
+    // staff app now, or the club only finds out when the players walk in.
+    if (confirmedNow) await this.announceConfirmedBooking(booking.id)
 
     return {
       id: booking.id,
       depositCents: booking.depositCents,
       transferAmountCents: booking.transferAmountCents ?? 0,
       creditAppliedCents: booking.creditAppliedCents,
-      confirmedByCredit: booking.status === 'CONFIRMED',
+      confirmedByCredit: coveredByCredit,
+      confirmedWithoutDeposit: withoutDeposit,
+    }
+  }
+
+  /** Best-effort live event + staff push for a bot booking that was confirmed at creation. */
+  private async announceConfirmedBooking(bookingId: string): Promise<void> {
+    try {
+      const booking = await this.prisma.booking.findUnique({
+        where: { id: bookingId },
+        select: {
+          id: true,
+          clubId: true,
+          playerName: true,
+          status: true,
+          slot: { select: { startsAt: true, endsAt: true, court: { select: { name: true } } } },
+        },
+      })
+      if (booking) this.emitBookingChange('created', booking)
+    } catch (err) {
+      // The booking is already made; failing to announce it must not tell the player it failed.
+      this.logger.warn(`Could not announce confirmed booking ${bookingId}: ${String(err)}`)
     }
   }
 
   /**
    * Resolves the club's payment policy for a booking: how much the player must transfer
-   * (the full court price when depositMode = FULL, else a percentage of it as the seña —
-   * default 25%, one of four padel players; a 0-priced court yields 0), whether the club
-   * requires DNI-matched confirmation, and whether the transfer amount should be a clean
-   * round number. The amount is rounded (no centavos tag) when the deposit isn't reconciled
-   * by a unique amount — i.e. in DNI mode (payer identity disambiguates) or in RECEIPT mode
-   * (an admin verifies the receipt photo by hand, so the centavos trick is unnecessary).
+   * (nothing when depositMode = NONE, the full court price when FULL, else a percentage of it
+   * as the seña — default 25%, one of four padel players; a 0-priced court yields 0, which
+   * books like NONE), whether the club requires DNI-matched confirmation, and whether the
+   * transfer amount should be a clean round number. The amount is rounded (no centavos tag)
+   * when the deposit isn't reconciled by a unique amount — i.e. in DNI mode (payer identity
+   * disambiguates) or in RECEIPT mode (an admin verifies the receipt photo by hand, so the
+   * centavos trick is unnecessary).
    */
   private async resolvePaymentPlan(
     clubId: string,
     priceCents: number,
-  ): Promise<{ depositCents: number; requireDniMatch: boolean; roundAmount: boolean }> {
+  ): Promise<{ depositMode: DepositMode; depositCents: number; requireDniMatch: boolean; roundAmount: boolean }> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
       select: { depositMode: true, depositPercent: true, requireDniMatch: true, paymentVerificationMode: true },
     })
+    const depositMode = club?.depositMode ?? DepositMode.DEPOSIT
     const depositCents =
-      club?.depositMode === 'FULL'
-        ? priceCents
-        : Math.ceil((priceCents * (club?.depositPercent ?? DEFAULT_DEPOSIT_PERCENT)) / 100)
+      depositMode === DepositMode.NONE
+        ? 0
+        : depositMode === DepositMode.FULL
+          ? priceCents
+          : Math.ceil((priceCents * (club?.depositPercent ?? DEFAULT_DEPOSIT_PERCENT)) / 100)
     const requireDniMatch = club?.requireDniMatch ?? false
     const roundAmount = requireDniMatch || club?.paymentVerificationMode === 'RECEIPT'
-    return { depositCents, requireDniMatch, roundAmount }
+    return { depositMode, depositCents, requireDniMatch, roundAmount }
   }
 
   /**
    * CRM hook on the player-facing (bot) booking paths: links/refreshes the Player,
    * refuses blocked players, and at NO_SHOW_FULL_THRESHOLD ausencias escalates the
-   * deposit to the FULL court price (the club stops absorbing the no-show risk).
+   * deposit to the FULL court price (the club stops absorbing the no-show risk). When there
+   * is no price to escalate to (club on NONE, or a court with no price) the booking goes to
+   * a person of the club instead (NoShowReviewRequiredException).
    * Admin-created bookings skip this — the front desk can always override.
    */
   private async applyPlayerPolicy(
     clubId: string,
     input: { playerPhone?: string | null; playerName?: string | null; playerDni?: string | null },
     priceCents: number,
-    depositCents: number,
+    plan: { depositMode: DepositMode; depositCents: number },
   ): Promise<{ depositCents: number; playerId: string | null; availableCreditCents: number }> {
+    const { depositCents } = plan
     const playerId = await this.players.upsertForBooking(clubId, input.playerPhone, {
       name: input.playerName,
       dni: input.playerDni,
@@ -738,7 +840,11 @@ export class BookingsService {
       throw new ForbiddenException('Este número no puede reservar por acá. Comunicate directamente con el club.')
     }
     const availableCreditCents = standing?.creditCents ?? 0
-    if ((standing?.noShowCount ?? 0) >= NO_SHOW_FULL_THRESHOLD) {
+    const noShowCount = standing?.noShowCount ?? 0
+    if (noShowCount >= NO_SHOW_FULL_THRESHOLD) {
+      if (plan.depositMode === DepositMode.NONE || priceCents <= 0) {
+        throw new NoShowReviewRequiredException(noShowCount)
+      }
       return { depositCents: priceCents, playerId, availableCreditCents }
     }
     return { depositCents, playerId, availableCreditCents }
@@ -805,6 +911,14 @@ export class BookingsService {
     })
     if (!booking) throw new NotFoundException('Reserva no encontrada')
     if (booking.status === 'CANCELLED') throw new BadRequestException('La reserva está cancelada')
+
+    // This is the desk's only way to record a payment, so every plan can charge the turno.
+    // What the split-payment module adds is charging a player just their share: without it, a
+    // payment has to cover the whole remaining bill. Undoing a payment never asks.
+    if (!(await this.plans.hasFeature(clubId, 'splitPayment'))) {
+      const { view } = await this.loadAccount(clubId, bookingId)
+      if (dto.amountCents < view.remainingCents) throw new ForbiddenException(splitPaymentLockedMessage())
+    }
 
     await this.prisma.bookingPlayerPayment.create({
       data: { clubId, bookingId, playerSlot: dto.playerSlot, amountCents: dto.amountCents, method: dto.method },
@@ -923,6 +1037,50 @@ export class BookingsService {
     ])
   }
 
+  // ── Fijo attendance check (see FixedConfirmationsService) ─────────────────────
+
+  /**
+   * Records that the fijo is coming. Conditional on the booking still being an active fijo, so
+   * a "sí" that races a cancellation never resurrects it. False = nothing changed.
+   */
+  async confirmAttendance(clubId: string, id: string): Promise<boolean> {
+    const { count } = await this.prisma.booking.updateMany({
+      where: { id, clubId, status: 'CONFIRMED', recurringBookingId: { not: null }, deletedAt: null },
+      data: { attendanceConfirmed: true, attendanceAnsweredAt: new Date() },
+    })
+    if (count !== 1) return false
+
+    const booking = await this.prisma.booking.findUnique({ where: { id }, select: bookingSelect })
+    if (booking) this.emitBookingChange('attendance', booking)
+    return true
+  }
+
+  /**
+   * The front desk records a fijo's answer by hand (they called them, or the player told them in
+   * person). "No viene" releases only this date, exactly like the player's "No puedo": the
+   * RecurringBooking keeps booking the next weeks and the freed court goes to the waitlist.
+   */
+  async setAttendance(clubId: string, id: string, confirmed: boolean) {
+    const booking = await this.findOne(clubId, id)
+    if (!booking.recurringBookingId) {
+      throw new BadRequestException('Solo los turnos fijos tienen confirmación de asistencia')
+    }
+    if (booking.status !== 'CONFIRMED') {
+      throw new BadRequestException('Este turno ya no está reservado')
+    }
+    if (!confirmed) {
+      if (new Date(booking.slot.startsAt).getTime() <= Date.now()) {
+        throw new BadRequestException('El turno ya empezó: no hay nada que liberar')
+      }
+      return this.cancel(clubId, id, { attendanceDeclined: true })
+    }
+
+    if (!(await this.confirmAttendance(clubId, id))) {
+      throw new ConflictException('El turno cambió mientras lo confirmábamos. Volvé a abrirlo y fijate.')
+    }
+    return this.findOne(clubId, id)
+  }
+
   /**
    * The MercadoPago identity this phone used on its most recent CONFIRMED transfer in this
    * club, if any. A "known" payer (paid at least once) can transfer a clean ROUND amount
@@ -1038,11 +1196,19 @@ export class BookingsService {
       const { startsAt, endsAt, court } = booking.slot
       // A dedicated "payment confirmed" event (not a generic booking.changed) so the panel can
       // ring the cash alert on every confirmation — automatic (poller) or manual.
+      const summary = `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`
       this.events.emitPaymentConfirmed({
         type: 'payment.confirmed',
         clubId: booking.clubId,
-        summary: `${booking.playerName} · ${court.name} · ${formatDayMonth(startsAt)} · ${formatTimeRange(startsAt, endsAt)}`,
+        summary,
         source: paymentRef ? 'AUTO' : 'MANUAL',
+      })
+      // The staff app must hear about the money too — the panel's cash sound only rings for
+      // someone sitting in front of it.
+      void this.notifications.notifyClub(booking.clubId, {
+        title: '💸 Seña cobrada — reserva confirmada',
+        body: summary,
+        data: { bookingId },
       })
 
       // The money path is the one the audit exists for: who confirmed, how, and against what.
@@ -1097,13 +1263,13 @@ export class BookingsService {
       where: {
         ...(clubId ? { clubId } : {}),
         // Never auto-confirm a RECEIPT-mode booking — those are verified by hand from the panel.
-        club: { paymentVerificationMode: 'AUTO' },
+        club: clubId ? { paymentVerificationMode: 'AUTO' } : SHARED_ACCOUNT_CLUBS,
         status: 'PENDING_PAYMENT',
         transferAmountCents: amountCents,
         createdAt: { lte: paidAt },
         paymentExpiresAt: { gte: paidAt },
       },
-      select: { id: true, playerDni: true, payerMpUserId: true },
+      select: { id: true, playerDni: true, payerMpUserId: true, receiptPayerDni: true, receiptOperationRef: true },
     })
 
     if (candidates.length === 0) {
@@ -1111,6 +1277,14 @@ export class BookingsService {
       // expiry cron cancelled the pending before this poll tick saw the money.
       // The transfer is real and on time — try to revive the booking.
       return this.reviveExpiredCandidate(amountCents, paymentRef, paidAt, clubId, payer)
+    }
+
+    // Strongest link: the operation number on the receipt the player sent IS this
+    // MercadoPago payment. The money is real (we're reading it from MP), so confirm.
+    const byOperation = candidates.filter(c => c.receiptOperationRef !== null && c.receiptOperationRef === paymentRef)
+    if (byOperation.length === 1) {
+      const confirmed = await this.confirmPayment(byOperation[0].id, paymentRef, payer)
+      return confirmed ? byOperation[0].id : null
     }
 
     // Strict mode (per club): only auto-confirm when the payer's DNI matches the
@@ -1125,7 +1299,11 @@ export class BookingsService {
         )
         return null
       }
-      const matched = candidates.filter(c => dniMatches(c.playerDni, payerDni))
+      // The payer can be the player (DNI given at booking) or whoever's CUIT is on the
+      // receipt photo the player sent (a friend paying, or a player who skipped the DNI).
+      const matched = candidates.filter(
+        c => dniMatches(c.playerDni, payerDni) || dniMatches(c.receiptPayerDni, payerDni),
+      )
       if (matched.length !== 1) {
         this.logger.warn(
           `Transfer ${paymentRef}: payer DNI matched ${matched.length} of ${candidates.length} pending bookings — manual review`,
@@ -1169,7 +1347,7 @@ export class BookingsService {
     const candidates = await this.prisma.booking.findMany({
       where: {
         ...(clubId ? { clubId } : {}),
-        club: { paymentVerificationMode: 'AUTO' },
+        club: clubId ? { paymentVerificationMode: 'AUTO' } : SHARED_ACCOUNT_CLUBS,
         // Cancelled by expiry, never paid: no payment ref and no explicit deposit outcome.
         status: 'CANCELLED',
         mpPaymentId: null,
@@ -1226,20 +1404,47 @@ export class BookingsService {
    *    incoming payer matches (MercadoPago id, then DNI). This guards against a stranger's
    *    same-round-amount transfer ever confirming someone else's booking.
    */
-  private disambiguateByPayer<T extends { playerDni: string | null; payerMpUserId: string | null }>(
-    candidates: T[],
-    payer?: PayerInfo,
-  ): T | null {
+  private disambiguateByPayer<
+    T extends { playerDni: string | null; payerMpUserId: string | null; receiptPayerDni?: string | null },
+  >(candidates: T[], payer?: PayerInfo): T | null {
     const payerMpUserId = payer?.mpUserId ?? null
     const payerDni = dniFromIdentification(payer?.cuit)
     const identityMatches = (c: T): boolean =>
-      (payerMpUserId !== null && c.payerMpUserId === payerMpUserId) || dniMatches(c.playerDni, payerDni)
+      (payerMpUserId !== null && c.payerMpUserId === payerMpUserId) ||
+      dniMatches(c.playerDni, payerDni) ||
+      dniMatches(c.receiptPayerDni, payerDni)
 
     const eligible = candidates.filter(c => {
-      const expectsIdentity = c.payerMpUserId !== null || c.playerDni !== null
+      const expectsIdentity = c.payerMpUserId !== null || c.playerDni !== null || !!c.receiptPayerDni
       return expectsIdentity ? identityMatches(c) : true
     })
     return eligible.length === 1 ? eligible[0] : null
+  }
+
+  /**
+   * Stores who paid according to the receipt photo the player sent, so the poller can match
+   * the real MercadoPago transfer even when the payer isn't the player or no DNI was given.
+   * Only for the player's own pending booking; it never confirms anything by itself.
+   */
+  async recordReceiptReading(
+    bookingId: string,
+    reading: { payerDni: string | null; operationRef: string | null },
+  ): Promise<void> {
+    await this.prisma.booking.updateMany({
+      where: { id: bookingId, status: 'PENDING_PAYMENT' },
+      data: {
+        ...(reading.payerDni ? { receiptPayerDni: reading.payerDni } : {}),
+        ...(reading.operationRef ? { receiptOperationRef: reading.operationRef } : {}),
+      },
+    })
+  }
+
+  /** Sets the DNI the player typed after booking (only while the deposit is pending). */
+  async recordPendingPlayerDni(bookingId: string, dni: string): Promise<void> {
+    await this.prisma.booking.updateMany({
+      where: { id: bookingId, status: 'PENDING_PAYMENT' },
+      data: { playerDni: dni },
+    })
   }
 
   /** Whether the club requires DNI-matched auto-confirmation. */
@@ -1274,6 +1479,7 @@ export class BookingsService {
       select: {
         id: true,
         transferAmountCents: true,
+        playerDni: true,
         slot: { select: { startsAt: true, endsAt: true, court: { select: { name: true } } } },
       },
     })
@@ -1331,11 +1537,17 @@ export class BookingsService {
     startsAt: Date
     courtName: string
     priceCents: number
+    /** A seña rides on this booking (paid, or still pending) — the bot only promises it
+     *  "sigue valiendo" when there is one. A booking made without a seña never had any. */
+    carriesDeposit: boolean
   } | null> {
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, clubId, playerPhone, status: { in: ['CONFIRMED', 'PENDING_PAYMENT'] } },
       select: {
+        status: true,
         rescheduleCount: true,
+        transferAmountCents: true,
+        creditAppliedCents: true,
         slot: { select: { startsAt: true, priceCents: true, court: { select: { name: true } } } },
       },
     })
@@ -1352,6 +1564,8 @@ export class BookingsService {
       startsAt: booking.slot.startsAt,
       courtName: booking.slot.court.name,
       priceCents: booking.slot.priceCents,
+      carriesDeposit:
+        booking.status === 'PENDING_PAYMENT' || booking.transferAmountCents !== null || booking.creditAppliedCents > 0,
     }
 
     if (configured !== PlayerRescheduleMode.SELF) {
@@ -1440,6 +1654,7 @@ export class BookingsService {
             slotId: newSlotId,
             // The reminder was scheduled against the old time; let it be re-evaluated.
             reminderSentAt: null,
+            ...ATTENDANCE_RESET,
             rescheduleCount: { increment: 1 },
           },
         })
@@ -1656,7 +1871,7 @@ export class BookingsService {
       endsAt: booking.slot.endsAt,
       priceCents: booking.slot.priceCents,
     })
-    return { playerPhone: booking.playerPhone, clubId: booking.clubId }
+    return { bookingId: booking.id, playerPhone: booking.playerPhone, clubId: booking.clubId }
   }
 
   /**
@@ -1740,7 +1955,7 @@ export class BookingsService {
           endsAt: booking.slot.endsAt,
           priceCents: booking.slot.priceCents,
         })
-        results.push({ playerPhone: booking.playerPhone, clubId: booking.clubId })
+        results.push({ bookingId: booking.id, playerPhone: booking.playerPhone, clubId: booking.clubId })
       } catch (err) {
         this.logger.error(`Failed to cancel expired booking ${booking.id}`, err)
       }
@@ -1752,26 +1967,36 @@ export class BookingsService {
   // ── Booking products (consumos) ─────────────────────────────────────────────
 
   /**
-   * Replaces all products associated with a booking in a single transaction.
-   * Passing an empty items array clears all consumos. Club-scoped.
+   * Replaces all products associated with a booking and moves the kiosk stock by the net change,
+   * in one transaction: the bill and the shelf never disagree. Passing an empty items array
+   * clears all consumos (and puts their units back). Club-scoped.
    */
-  async setBookingProducts(clubId: string, bookingId: string, dto: SetBookingProductsDto) {
-    const booking = await this.prisma.booking.findFirst({ where: { id: bookingId, clubId }, select: { id: true } })
-    if (!booking) throw new NotFoundException(`Booking ${bookingId} not found`)
+  async setBookingProducts(clubId: string, bookingId: string, dto: SetBookingProductsDto, userId?: number) {
+    const productIds = [...new Set(dto.items.map(i => i.productId))]
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: productIds }, clubId },
+      select: { id: true, priceCents: true },
+    })
+    const priceMap = new Map(products.map(p => [p.id, p.priceCents]))
+    const missing = productIds.filter(id => !priceMap.has(id))
+    if (missing.length > 0) throw new NotFoundException(`Productos no encontrados: ${missing.join(', ')}`)
 
-    if (dto.items.length > 0) {
-      const productIds = dto.items.map(i => i.productId)
-      const products = await this.prisma.product.findMany({
-        where: { id: { in: productIds }, clubId },
-        select: { id: true, priceCents: true },
+    const alerts = await this.prisma.$transaction(async tx => {
+      // Touching the booking locks it until commit, so two saves of the same bill can't both
+      // read the old lines and move the stock twice. It also scopes the booking to the club.
+      const { count } = await tx.booking.updateMany({
+        where: { id: bookingId, clubId },
+        data: { updatedAt: new Date() },
       })
-      const priceMap = new Map(products.map(p => [p.id, p.priceCents]))
-      const missing = productIds.filter(id => !priceMap.has(id))
-      if (missing.length > 0) throw new NotFoundException(`Productos no encontrados: ${missing.join(', ')}`)
+      if (count === 0) throw new NotFoundException(`Booking ${bookingId} not found`)
 
-      await this.prisma.$transaction([
-        this.prisma.bookingProduct.deleteMany({ where: { bookingId } }),
-        this.prisma.bookingProduct.createMany({
+      const before = await tx.bookingProduct.findMany({
+        where: { bookingId },
+        select: { productId: true, quantity: true },
+      })
+      await tx.bookingProduct.deleteMany({ where: { bookingId } })
+      if (dto.items.length > 0) {
+        await tx.bookingProduct.createMany({
           data: dto.items.map(item => ({
             bookingId,
             productId: item.productId,
@@ -1780,12 +2005,12 @@ export class BookingsService {
             unitPriceCents: priceMap.get(item.productId)!,
             playerMask: item.players.reduce((mask, player) => mask | (1 << (player - 1)), 0),
           })),
-        }),
-      ])
-    } else {
-      await this.prisma.bookingProduct.deleteMany({ where: { bookingId } })
-    }
+        })
+      }
+      return this.stock.applyConsumos(tx, { clubId, bookingId, userId, before, after: dto.items })
+    })
 
+    this.stock.notifyLowStock(clubId, alerts)
     return this.findOne(clubId, bookingId)
   }
 
@@ -1802,7 +2027,8 @@ export class BookingsService {
 
     if (action === 'created') {
       void this.notifications.notifyClub(booking.clubId, {
-        title: 'Nueva reserva pendiente de seña',
+        // Born CONFIRMED (no seña to wait for) vs. a hold the club expects money for.
+        title: booking.status === 'CONFIRMED' ? '✅ Nueva reserva confirmada' : 'Nueva reserva pendiente de seña',
         body: summary,
         data: { bookingId: booking.id },
       })
@@ -1821,9 +2047,10 @@ export class BookingsService {
       created: `Se creó la reserva de ${booking.playerName}`,
       cancelled: `Se canceló la reserva de ${booking.playerName}`,
       rescheduled: `Se reprogramó la reserva de ${booking.playerName}`,
+      attendance: `${booking.playerName} confirmó asistencia al turno fijo`,
     }
     void this.audit.record({
-      action: action === 'created' ? 'CREATE' : 'STATUS_CHANGE',
+      action: action === 'created' ? 'CREATE' : action === 'attendance' ? 'UPDATE' : 'STATUS_CHANGE',
       entity: 'Booking',
       entityId: booking.id,
       clubId: booking.clubId,
@@ -1854,6 +2081,7 @@ export class BookingsService {
       settledAt: booking.settledAt,
       notes: booking.notes,
       deletedAt: booking.deletedAt,
+      attendanceConfirmed: booking.attendanceConfirmed,
     }
   }
 }

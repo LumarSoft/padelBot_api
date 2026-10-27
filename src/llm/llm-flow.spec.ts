@@ -1,4 +1,5 @@
 import { LlmService, validBookingDate } from './llm.service'
+import { buildSystemPrompt } from './system.prompt'
 import { BotState, SessionContext } from '../bot/types'
 import { NOT_UNDERSTOOD, TOO_MANY_MESSAGES } from '../bot/messages'
 
@@ -28,7 +29,7 @@ const atConfirm: SessionContext = {
 function makeService(): LlmService {
   // The OpenAI client refuses to construct without a key — and it SHOULD, in production.
   process.env.OPENAI_API_KEY ??= 'test-key'
-  return new LlmService({} as never, {} as never)
+  return new LlmService({} as never, {} as never, {} as never, {} as never)
 }
 
 /** Calls the private in-place helper the way every fallback path does. */
@@ -109,5 +110,45 @@ describe('validBookingDate', () => {
   it('accepts a leap day the calendar really has', () => {
     expect(validBookingDate('2028-02-29', '2028-02-01')).toBe('2028-02-29')
     expect(validBookingDate('2027-02-29', '2027-02-01')).toBeNull()
+  })
+})
+
+/**
+ * The model answers "¿hay que pagar seña?" from the club's real policy. A club on NONE must never
+ * hear its bot ask for a transfer; a club with a seña gets the percentage, never an invented
+ * amount (the booking step quotes it).
+ */
+describe('the club payment policy in the system prompt', () => {
+  const base = {
+    clubName: 'Global Padel',
+    courts: [],
+    currentDate: 'Miércoles 14 de octubre de 2026, 16:00',
+    state: BotState.MENU,
+    ctx: {},
+  }
+
+  it('tells the model a club without seña confirms on the spot and never asks for money', () => {
+    const prompt = buildSystemPrompt({ ...base, payment: { mode: 'NONE', percent: 25 } })
+    expect(prompt).toContain('NO pide seña')
+    expect(prompt).toContain('se abona en el club')
+    expect(prompt).toContain('Nunca pidas transferencias, alias ni comprobantes')
+  })
+
+  it('states the seña percentage of a DEPOSIT club, never an amount', () => {
+    const prompt = buildSystemPrompt({ ...base, payment: { mode: 'DEPOSIT', percent: 30 } })
+    expect(prompt).toContain('seña del 30%')
+    expect(prompt).toContain('no los inventes')
+  })
+
+  it('states the full price for a FULL club', () => {
+    expect(buildSystemPrompt({ ...base, payment: { mode: 'FULL', percent: 25 } })).toContain('precio total del turno')
+  })
+
+  it('keeps the static prefix first, so OpenAI prompt caching still hits across clubs', () => {
+    const none = buildSystemPrompt({ ...base, payment: { mode: 'NONE', percent: 25 } })
+    const deposit = buildSystemPrompt({ ...base, payment: { mode: 'DEPOSIT', percent: 25 } })
+    const shared = none.slice(0, none.indexOf('━━━ DATOS DEL CLUB'))
+    expect(shared.length).toBeGreaterThan(500)
+    expect(deposit.startsWith(shared)).toBe(true)
   })
 })

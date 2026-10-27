@@ -6,6 +6,14 @@ import { BotState, SessionContext } from './types'
 
 const SESSION_TTL_MINUTES = 30
 
+export interface SessionSnapshot {
+  id: string
+  state: string
+  mode: string
+  humanUntil: Date | null
+  context: SessionContext
+}
+
 @Injectable()
 export class ConversationSessionService {
   constructor(
@@ -13,15 +21,12 @@ export class ConversationSessionService {
     private readonly events: BookingEventsService,
   ) {}
 
-  async getOrCreate(
-    waId: string,
-    clubId: string,
-  ): Promise<{ id: string; state: string; mode: string; context: SessionContext }> {
+  async getOrCreate(waId: string, clubId: string): Promise<SessionSnapshot> {
     const now = new Date()
 
     const existing = await this.prisma.conversationSession.findUnique({
       where: { waId_clubId: { waId, clubId } },
-      select: { id: true, state: true, mode: true, context: true, expiresAt: true },
+      select: { id: true, state: true, mode: true, humanUntil: true, context: true, expiresAt: true },
     })
 
     if (existing) {
@@ -30,18 +35,37 @@ export class ConversationSessionService {
         const reset = await this.prisma.conversationSession.update({
           where: { id: existing.id },
           data: { state: BotState.IDLE, context: keepName(ctx) as Prisma.InputJsonValue, expiresAt: newExpiry() },
-          select: { id: true, state: true, mode: true, context: true },
+          select: { id: true, state: true, mode: true, humanUntil: true, context: true },
         })
-        return { id: reset.id, state: reset.state, mode: reset.mode, context: safeParseContext(reset.context) }
+        return { ...reset, context: safeParseContext(reset.context) }
       }
-      return { id: existing.id, state: existing.state, mode: existing.mode, context: ctx }
+      return {
+        id: existing.id,
+        state: existing.state,
+        mode: existing.mode,
+        humanUntil: existing.humanUntil,
+        context: ctx,
+      }
     }
 
     const created = await this.prisma.conversationSession.create({
       data: { waId, clubId, state: BotState.IDLE, context: {}, expiresAt: newExpiry() },
-      select: { id: true, state: true, mode: true, context: true },
+      select: { id: true, state: true, mode: true, humanUntil: true, context: true },
     })
-    return { id: created.id, state: created.state, mode: created.mode, context: safeParseContext(created.context) }
+    return { ...created, context: safeParseContext(created.context) }
+  }
+
+  /**
+   * The id of the player's chat at this club — what `GET /conversations/:id/messages` takes —
+   * without touching it (unlike {@link getOrCreate}, which resets an expired one). Null if the
+   * player never wrote.
+   */
+  async findId(waId: string, clubId: string): Promise<string | null> {
+    const session = await this.prisma.conversationSession.findUnique({
+      where: { waId_clubId: { waId, clubId } },
+      select: { id: true },
+    })
+    return session?.id ?? null
   }
 
   async update(id: string, state: BotState, ctx: SessionContext): Promise<void> {
@@ -56,10 +80,25 @@ export class ConversationSessionService {
     })
   }
 
-  async setMode(sessionId: string, mode: 'AI' | 'HUMAN'): Promise<void> {
+  /**
+   * Switches who answers the chat. `humanUntil` makes a HUMAN takeover temporary (the bot
+   * takes the chat back after it); null = indefinite, or clears it when going back to AI.
+   */
+  async setMode(sessionId: string, mode: 'AI' | 'HUMAN', humanUntil: Date | null = null): Promise<void> {
     await this.prisma.conversationSession.update({
       where: { id: sessionId },
-      data: { mode },
+      data: { mode, humanUntil },
+    })
+  }
+
+  /**
+   * Hands a chat to the club and flags it in the panel ("Pide asesor"): the bot goes quiet until
+   * someone switches it back from Conversaciones.
+   */
+  async requestAdvisor(sessionId: string): Promise<void> {
+    await this.prisma.conversationSession.update({
+      where: { id: sessionId },
+      data: { mode: 'HUMAN', humanUntil: null, needsAdvisor: true },
     })
   }
 

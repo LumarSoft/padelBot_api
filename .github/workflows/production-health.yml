@@ -1,0 +1,23 @@
+name: Production API health
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: production-api-health
+  cancel-in-progress: true
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verify API and database readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(curl --fail --silent --show-error --max-time 20 --retry 2 --retry-all-errors https://api.gestionatupadel.com/health)"
+          test "$(jq -r '.status' <<<"$response")" = "ok"
+          test "$(jq -r '.db' <<<"$response")" = "up"

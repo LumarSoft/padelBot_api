@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { Observable, Subject, filter } from 'rxjs'
 
-export type BookingAction = 'created' | 'cancelled' | 'rescheduled'
+/** `attendance` = a fijo confirmed they're coming (FixedConfirmationsService). */
+export type BookingAction = 'created' | 'cancelled' | 'rescheduled' | 'attendance'
 
 export interface BookingEvent {
   type: 'booking.changed'
@@ -50,7 +51,30 @@ export interface SlotFreedEvent {
   priceCents: number
 }
 
-export type AppEvent = BookingEvent | ConversationEvent | PaymentReceiptEvent | PaymentConfirmedEvent | SlotFreedEvent
+/** A torneo or peña changed (pairs, fixture, results, its blocked turnos) — the panel refetches it. */
+export interface CompetitionChangedEvent {
+  type: 'competition.changed'
+  clubId: string
+  competitionId: string
+}
+
+/** A player asked the bot to sign up for a torneo or peña — the panel lights its inbox. */
+export interface CompetitionSignupEvent {
+  type: 'competition.signup'
+  clubId: string
+  competitionId: string
+  competitionName: string
+  playerName: string | null
+}
+
+export type AppEvent =
+  | BookingEvent
+  | ConversationEvent
+  | PaymentReceiptEvent
+  | PaymentConfirmedEvent
+  | SlotFreedEvent
+  | CompetitionChangedEvent
+  | CompetitionSignupEvent
 
 @Injectable()
 export class BookingEventsService {
@@ -74,6 +98,14 @@ export class BookingEventsService {
   }
 
   emitSlotFreed(event: SlotFreedEvent): void {
+    this.publish(event)
+  }
+
+  emitCompetitionChanged(event: CompetitionChangedEvent): void {
+    this.publish(event)
+  }
+
+  emitCompetitionSignup(event: CompetitionSignupEvent): void {
     this.publish(event)
   }
 

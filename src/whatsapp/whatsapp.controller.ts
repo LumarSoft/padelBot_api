@@ -16,6 +16,7 @@ import { BotService } from '../bot/bot.service'
 import { BotReply, InboundMedia } from '../bot/types'
 import { TECHNICAL_ERROR } from '../bot/messages'
 import { KeyedSerialQueue } from '../common/keyed-serial-queue'
+import { FixedConfirmationsService } from '../fixed-confirmations/fixed-confirmations.service'
 import { WhatsAppLinesService } from '../whatsapp-lines/whatsapp-lines.service'
 import { WhatsAppService } from './whatsapp.service'
 
@@ -32,6 +33,7 @@ export class WhatsAppController {
     private readonly whatsappService: WhatsAppService,
     private readonly whatsappLinesService: WhatsAppLinesService,
     private readonly botService: BotService,
+    private readonly fixedConfirmations: FixedConfirmationsService,
   ) {}
 
   /**
@@ -81,11 +83,21 @@ export class WhatsAppController {
 
     for (const entry of payload?.entry ?? []) {
       for (const change of entry?.changes ?? []) {
-        if (change?.field !== 'messages') continue
-
         const value = change?.value
         const phoneNumberId: string | undefined = value?.metadata?.phone_number_id
         if (!phoneNumberId) continue
+
+        if (change?.field === 'smb_message_echoes') {
+          await this.processEchoes(phoneNumberId, value?.message_echoes ?? [])
+          continue
+        }
+        if (change?.field === 'history' || change?.field === 'smb_app_state_sync') {
+          // Coexistence onboarding sync (past chats / contacts). The bot doesn't need them to
+          // work; we only log that the sync arrived so a failed sync is visible.
+          this.logger.log(`Coexistence ${change.field} webhook received for line ${phoneNumberId}`)
+          continue
+        }
+        if (change?.field !== 'messages') continue
 
         for (const message of value?.messages ?? []) {
           const waId: string | undefined = message?.from
@@ -108,14 +120,52 @@ export class WhatsAppController {
             const body = extractInteractiveReply(message)
             if (!body) continue
             await this.inbound.enqueue(waId, () => this.processMessage(phoneNumberId, waId, body))
+          } else if (message?.type === 'button') {
+            // A quick-reply tap on a TEMPLATE we sent (the fijo's "¿venís?"). Unlike interactive
+            // replies its payload is whatever we set at send time, so it's routed to the feature
+            // that sent it; an unknown payload falls back to the button's text as a message.
+            const payload: string | undefined = message?.button?.payload
+            const text: string | undefined = message?.button?.text
+            if (!payload && !text) continue
+            await this.inbound.enqueue(waId, () => this.processTemplateButton(phoneNumberId, waId, payload, text))
+          } else if (message?.type === 'audio') {
+            // Voice notes are transcribed and then follow the normal text flow.
+            const extracted = extractMedia(message)
+            const media = extracted ? { ...extracted, phoneNumberId } : null
+            await this.inbound.enqueue(waId, () => this.processAudio(phoneNumberId, waId, media))
           } else if (message?.type === 'image' || message?.type === 'document') {
             // Likely a transfer receipt. In RECEIPT mode the bot downloads and stores it for
             // the admin to verify; in AUTO mode it just acknowledges (the poller confirms).
-            const media = extractMedia(message)
+            const extracted = extractMedia(message)
+            const media = extracted ? { ...extracted, phoneNumberId } : null
             await this.inbound.enqueue(waId, () => this.processAttachment(phoneNumberId, waId, media))
           }
         }
       }
+    }
+  }
+
+  /**
+   * Coexistence: messages the club sent by hand from its WhatsApp Business app. Logged in the
+   * chat as ADMIN and the bot steps aside on that chat for a while (BotService.recordOwnerReply).
+   */
+  private async processEchoes(phoneNumberId: string, echoes: any[]): Promise<void> {
+    for (const echo of echoes) {
+      const waId = toWaId(echo?.to)
+      const messageId: string | undefined = echo?.id
+      if (!waId || !messageId) continue
+      if (!(await this.whatsappService.claimMessage(messageId))) continue
+
+      const text: string =
+        echo?.type === 'text' ? (echo?.text?.body ?? '') : `[${echo?.type ?? 'mensaje'} enviado desde el celular]`
+      await this.inbound.enqueue(waId, async () => {
+        try {
+          const clubId = await this.resolveClubId(phoneNumberId)
+          if (clubId) await this.botService.recordOwnerReply(waId, clubId, text)
+        } catch (err) {
+          this.logger.error(`Failed to record club reply to ${waId}`, err)
+        }
+      })
     }
   }
 
@@ -129,6 +179,51 @@ export class WhatsAppController {
     } catch (err) {
       // Transport-level safety net (the bot already has its own): never leave the user silent.
       this.logger.error(`Failed to process message from ${waId}`, err)
+      await this.sendCourtesy(phoneNumberId, waId)
+    }
+  }
+
+  private async processTemplateButton(
+    phoneNumberId: string,
+    waId: string,
+    payload: string | undefined,
+    text: string | undefined,
+  ): Promise<void> {
+    let clubId: string | null = null
+    let reply: string | null = null
+    try {
+      clubId = await this.resolveClubId(phoneNumberId)
+      if (!clubId) return
+      reply = payload ? await this.fixedConfirmations.handleButtonReply(clubId, waId, payload) : null
+    } catch (err) {
+      this.logger.error(`Failed to process template button from ${waId}`, err)
+      await this.sendCourtesy(phoneNumberId, waId)
+      return
+    }
+
+    if (reply === null) {
+      if (text) await this.processMessage(phoneNumberId, waId, text)
+      return
+    }
+
+    await this.whatsappService.sendText(phoneNumberId, waId, reply)
+    try {
+      // Logged after the send: the player already has their answer even if the chat log hiccups.
+      await this.botService.recordExchange(waId, clubId, text ?? payload ?? '', reply)
+    } catch (err) {
+      this.logger.error(`Failed to log template button exchange with ${waId}`, err)
+    }
+  }
+
+  private async processAudio(phoneNumberId: string, waId: string, media: InboundMedia | null): Promise<void> {
+    try {
+      const clubId = await this.resolveClubId(phoneNumberId)
+      if (!clubId) return
+
+      const reply = await this.botService.handleAudio(waId, clubId, media)
+      await this.deliver(phoneNumberId, waId, reply)
+    } catch (err) {
+      this.logger.error(`Failed to process audio from ${waId}`, err)
       await this.sendCourtesy(phoneNumberId, waId)
     }
   }
@@ -176,6 +271,17 @@ export class WhatsAppController {
   }
 }
 
+/**
+ * Echo recipients are phone numbers, while inbound senders (and our sessions) use wa_id. For
+ * Argentine mobiles those differ by the "9" (54 341… vs 549 341…), so normalize to wa_id.
+ */
+export function toWaId(phone: unknown): string | undefined {
+  if (typeof phone !== 'string') return undefined
+  const digits = phone.replace(/\D/g, '')
+  if (!digits) return undefined
+  return digits.startsWith('54') && !digits.startsWith('549') && digits.length === 12 ? '549' + digits.slice(2) : digits
+}
+
 /** Pulls the selected option id out of an inbound interactive (button or list) reply. */
 function extractInteractiveReply(message: any): string | undefined {
   const interactive = message?.interactive
@@ -184,10 +290,11 @@ function extractInteractiveReply(message: any): string | undefined {
   return undefined
 }
 
-/** Pulls the Meta media id + mime type out of an inbound image/document message. */
+/** Pulls the Meta media id, mime type and caption out of an inbound image/document/audio message. */
 function extractMedia(message: any): InboundMedia | null {
-  const node = message?.type === 'image' ? message?.image : message?.document
+  const node = message?.[message?.type]
   const mediaId: string | undefined = node?.id
   if (!mediaId) return null
-  return { mediaId, mimeType: node?.mime_type ?? null }
+  const caption: string | undefined = typeof node?.caption === 'string' ? node.caption.trim() || undefined : undefined
+  return { mediaId, mimeType: node?.mime_type ?? null, ...(caption ? { caption } : {}) }
 }

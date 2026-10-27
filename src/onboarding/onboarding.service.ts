@@ -9,11 +9,13 @@ import { RequestClubDto } from './dto/request-club.dto'
 import { SaveSetupProgressDto } from './dto/save-setup-progress.dto'
 import { notifyOps } from '../common/ops-alert'
 import { formatSignupAlert } from './lib/signup-alert'
+import { todayKey } from '../availability/lib/datetime'
 import { REQUIRED_STEP_IDS, SETUP_STEP_IDS, SetupProgress, SetupStepId, parseSetupProgress } from './lib/setup-steps'
+import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 
 const BCRYPT_ROUNDS = 10
 /** Free-trial length for new clubs. */
-const TRIAL_DAYS = Number(process.env.TRIAL_DAYS) || 14
+const TRIAL_DAYS = Number(process.env.TRIAL_DAYS) || 15
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /** State of one step of the guided setup. */
@@ -50,8 +52,7 @@ export interface SetupStatus {
 const setupClubSelect = {
   name: true,
   locationInfo: true,
-  transferAlias: true,
-  mpConnectedAt: true,
+  ...paymentSetupSelect,
   setupCompletedAt: true,
   setupProgress: true,
 } as const
@@ -91,10 +92,24 @@ export class OnboardingService {
         howFound: dto.howFound ?? null,
         contactWindow: dto.contactWindow ?? null,
         contactWindowNote: dto.contactWindowNote?.trim() || null,
+        plan: dto.plan ?? null,
+        utmSource: dto.utmSource?.trim() || null,
+        utmMedium: dto.utmMedium?.trim() || null,
+        utmCampaign: dto.utmCampaign?.trim() || null,
       },
     })
     await notifyOps(formatSignupAlert(lead))
     return { received: true }
+  }
+
+  /** One more visit to a `/register` screen today (see SignupFunnelDaily). */
+  async recordFunnelStep(step: string, index: number): Promise<void> {
+    const dateKey = todayKey()
+    await this.prisma.signupFunnelDaily.upsert({
+      where: { dateKey_step: { dateKey, step } },
+      create: { dateKey, step, stepIndex: index, visits: 1 },
+      update: { stepIndex: index, visits: { increment: 1 } },
+    })
   }
 
   /**
@@ -114,6 +129,7 @@ export class OnboardingService {
           data: {
             name: dto.clubName.trim(),
             slug: await this.availableSlug(dto.clubName),
+            ...(dto.plan ? { plan: dto.plan } : {}),
             trialEndsAt: new Date(Date.now() + TRIAL_DAYS * DAY_MS),
           },
           select: { id: true },
@@ -163,9 +179,9 @@ export class OnboardingService {
     ])
 
     const progress = parseSetupProgress(club.setupProgress)
-    // A club can take deposits once it can tell players WHERE to transfer: either its own
-    // MercadoPago account is connected (auto-reconciled) or an alias is loaded (manual).
-    const canTakePayments = Boolean(club.mpConnectedAt) || Boolean(club.transferAlias)
+    // A club that charges a seña is ready once it can tell players WHERE to transfer (its own
+    // MercadoPago connected, or an alias loaded). A club on NONE charges nothing: done as is.
+    const canTakePayments = paymentsConfigured(club)
 
     const doneByStep: Record<SetupStepId, boolean> = {
       complejo: Boolean(club.locationInfo),

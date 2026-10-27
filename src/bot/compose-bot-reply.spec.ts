@@ -1,4 +1,14 @@
-import { composeBotReply, welcome, confirmBooking, dayAvailabilityList, courtsAtTimeList } from './messages'
+import {
+  bookingConfirmedNoDeposit,
+  composeBotReply,
+  welcome,
+  confirmBooking,
+  dayAvailabilityList,
+  courtsAtTimeList,
+  noShowReviewRequested,
+  rescheduleConfirm,
+  rescheduleDone,
+} from './messages'
 import { BandOption, BotState, SessionContext } from './types'
 
 /**
@@ -8,7 +18,7 @@ import { BandOption, BotState, SessionContext } from './types'
 describe('composeBotReply', () => {
   it('shows the menu button and a concise body (no enumerated list) on the menu', () => {
     const r = composeBotReply(BotState.MENU, {}, welcome('Mateo'))
-    expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['1', '2'])
+    expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['1', '2', '3'])
     expect(r.text).toContain('Tocá una opción')
     expect(r.text).not.toContain('1️⃣')
     // the greeting prefix is preserved
@@ -84,5 +94,62 @@ describe('composeBotReply', () => {
     const r = composeBotReply(BotState.BOOK_CONFIRM, ctx, summary)
     expect(r.interactive?.buttons?.map(b => b.id)).toEqual(['si', 'no'])
     expect(r.text).toBe(summary) // summary is not an option list — keep it
+  })
+})
+
+/**
+ * "Sin seña": the bot's last word on a booking is the confirmation itself. It lands on the MENU
+ * state like the payment message does, so it must go out as plain text — never buried under a
+ * menu botonera — and it must not read like a payment request.
+ */
+describe('composeBotReply without a seña', () => {
+  const booked: SessionContext = {
+    playerName: 'Mateo',
+    selectedDate: '2026-10-17',
+    selectedCourtName: 'Cancha 2',
+    selectedSlotLabel: '20:00 - 21:30',
+    selectedSlotPrice: 2400000,
+  }
+
+  it('sends the confirmation as is, without menu buttons', () => {
+    const text = bookingConfirmedNoDeposit(booked)
+    const r = composeBotReply(BotState.MENU, {}, text)
+    expect(r.interactive).toBeUndefined()
+    expect(r.text).toBe(text)
+  })
+
+  it('confirms the booking without a single word about paying up front', () => {
+    const text = bookingConfirmedNoDeposit(booked)
+    expect(text).toContain('reserva confirmada')
+    expect(text).toContain('17/10')
+    expect(text).toContain('Cancha 2')
+    expect(text).toContain('$24.000')
+    expect(text).not.toMatch(/alias|transfer|seña|minutos/i)
+  })
+
+  it('leaves the price out when the court has none loaded', () => {
+    expect(bookingConfirmedNoDeposit({ ...booked, selectedSlotPrice: 0 })).not.toContain('$')
+  })
+
+  it('sends the no-show hand-off as plain text too, naming the requested turno', () => {
+    const text = noShowReviewRequested(booked)
+    const r = composeBotReply(BotState.MENU, {}, text)
+    expect(r.interactive).toBeUndefined()
+    expect(text).toContain('20:00 - 21:30')
+    expect(text).toContain('te responden por acá')
+  })
+
+  it('confirms a move with the yes/no buttons and no seña in the wording', () => {
+    const text = rescheduleConfirm('sábado 17/10 · 18:00–19:30 · Cancha 1', booked, 0, false)
+    const r = composeBotReply(BotState.RESCHEDULE_CONFIRM, booked, text)
+    expect(r.text).toContain('Mismo precio. ¿Lo muevo?')
+    expect(r.text).not.toContain('seña')
+  })
+
+  it('states the new price, not a credit "a favor", after moving a booking without seña', () => {
+    expect(rescheduleDone(booked, -300000, false)).toContain('sale *$24.000* y se abona en el club')
+    expect(rescheduleDone(booked, -300000, false)).not.toContain('a favor')
+    // With a seña the old wording stays.
+    expect(rescheduleDone(booked, -300000, true)).toContain('a favor')
   })
 })

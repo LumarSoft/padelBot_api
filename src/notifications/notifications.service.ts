@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { Expo, ExpoPushMessage } from 'expo-server-sdk'
+import { Prisma } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { RegisterDeviceTokenDto } from './dto/register-device-token.dto'
 import { UnregisterDeviceTokenDto } from './dto/unregister-device-token.dto'
@@ -37,9 +38,21 @@ export class NotificationsService {
    * `DeviceNotRegistered` (uninstalled app, revoked permission) are pruned immediately.
    */
   async notifyClub(clubId: string, payload: PushPayload): Promise<void> {
+    await this.send(clubId, { clubId }, payload)
+  }
+
+  /**
+   * Same as {@link notifyClub} but only to the club owner's devices — for things the staff
+   * doesn't act on (e.g. "hay que comprar agua"), so the front desk isn't spammed.
+   */
+  async notifyOwners(clubId: string, payload: PushPayload): Promise<void> {
+    await this.send(clubId, { clubId, user: { role: 'OWNER' } }, payload)
+  }
+
+  private async send(clubId: string, where: Prisma.DeviceTokenWhereInput, payload: PushPayload): Promise<void> {
     try {
       const devices = await this.prisma.deviceToken.findMany({
-        where: { clubId },
+        where,
         select: { token: true },
       })
       if (devices.length === 0) return

@@ -8,6 +8,8 @@ import { PrismaModule } from './prisma/prisma.module'
 import { CryptoModule } from './common/crypto/crypto.module'
 import { StorageModule } from './storage/storage.module'
 import { PricingModule } from './pricing/pricing.module'
+import { PlansModule } from './plans/plans.module'
+import { BillingModule } from './billing/billing.module'
 import { AuthModule } from './auth/auth.module'
 import { UsersModule } from './users/users.module'
 import { OnboardingModule } from './onboarding/onboarding.module'
@@ -23,15 +25,21 @@ import { WhatsAppModule } from './whatsapp/whatsapp.module'
 import { EventsModule } from './events/events.module'
 import { PaymentsModule } from './payments/payments.module'
 import { ClubsModule } from './clubs/clubs.module'
+import { HelpModule } from './help/help.module'
 import { ConversationsModule } from './conversations/conversations.module'
 import { StatsModule } from './stats/stats.module'
 import { PriceRulesModule } from './price-rules/price-rules.module'
 import { NotificationsModule } from './notifications/notifications.module'
 import { ProductsModule } from './products/products.module'
+import { StockModule } from './stock/stock.module'
 import { BookingRemindersModule } from './booking-reminders/booking-reminders.module'
 import { OpsModule } from './ops/ops.module'
 import { AuditModule } from './audit/audit.module'
 import { AuditContextMiddleware } from './audit/audit-context.middleware'
+import { DemoModule } from './demo/demo.module'
+import { FixedConfirmationsModule } from './fixed-confirmations/fixed-confirmations.module'
+import { CompetitionsModule } from './competitions/competitions.module'
+import { ImprovementsModule } from './improvements/improvements.module'
 
 @Module({
   imports: [
@@ -45,6 +53,8 @@ import { AuditContextMiddleware } from './audit/audit-context.middleware'
     CryptoModule,
     StorageModule,
     PricingModule,
+    PlansModule,
+    BillingModule,
     AuthModule,
     UsersModule,
     OnboardingModule,
@@ -60,13 +70,19 @@ import { AuditContextMiddleware } from './audit/audit-context.middleware'
     EventsModule,
     PaymentsModule,
     ClubsModule,
+    HelpModule,
     ConversationsModule,
     StatsModule,
     PriceRulesModule,
     NotificationsModule,
     ProductsModule,
+    StockModule,
     BookingRemindersModule,
     OpsModule,
+    DemoModule,
+    FixedConfirmationsModule,
+    CompetitionsModule,
+    ImprovementsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

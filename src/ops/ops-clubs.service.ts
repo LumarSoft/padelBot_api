@@ -1,10 +1,17 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { Role, SubscriptionStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 import { subscriptionState, SubscriptionState } from '../clubs/lib/subscription'
 import { shiftDateKey, todayKey } from '../availability/lib/datetime'
 import { generateTempPassword, hashPassword } from '../common/password'
 import { UpdateSubscriptionDto } from './dto/update-subscription.dto'
+import { PlanUsage } from '../plans/plans.service'
+import { creditPercent, creditsPaused, monthStartKey } from '../plans/lib/ai-credits'
+import { planDefinition, planName } from '../plans/lib/plans'
+import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
+import { ClubHealth, clubHealth, CLUB_HEALTH_ORDER } from './lib/club-health'
+import { OpsMonthStatesService } from './ops-month-states.service'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 /** Window the per-club activity numbers cover. */
@@ -18,6 +25,10 @@ export interface OpsClubRow {
   name: string
   slug: string
   createdAt: Date
+  /** The sales demo: shown apart, never counted among the clubs' states. */
+  isDemo: boolean
+  /** One word on how the club is doing, and every signal behind it (see lib/club-health.ts). */
+  health: ClubHealth
   subscription: SubscriptionState
 
   /** The three things the bot cannot run without. A club missing any of these is not live. */
@@ -47,6 +58,19 @@ export interface OpsClubRow {
 
   /** What this club costs us in OpenAI over the same window (micro-USD). */
   llmCostMicroUsd: number
+
+  /** The plan's limits against what the club uses. An unknown key has no limits. */
+  plan: {
+    name: string
+    known: boolean
+    courts: PlanUsage
+    /** Active users, the owner included. */
+    users: PlanUsage
+    /** This calendar month's AI credits. At 100% the bot is paused (`paused`) until it changes plan. */
+    aiCredits: PlanUsage & { percent: number | null; paused: boolean }
+    /** Predates the plans: keeps every module whatever its plan, until we clear it. */
+    grandfatheredFeatures: boolean
+  }
 }
 
 /** One panel user of a club, as ops sees it when handling a password-reset support request. */
@@ -65,7 +89,10 @@ export interface ClubUserRow {
 export class OpsClubsService {
   private readonly logger = new Logger(OpsClubsService.name)
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly monthStates: OpsMonthStatesService,
+  ) {}
 
   /**
    * Every tenant, with the state we'd otherwise have to open a DB console to see.
@@ -77,8 +104,9 @@ export class OpsClubsService {
   async list(): Promise<OpsClubRow[]> {
     const since = new Date(Date.now() - ACTIVITY_DAYS * DAY_MS)
     const sinceKey = shiftDateKey(todayKey(), -(ACTIVITY_DAYS - 1))
+    const today = todayKey()
 
-    const [clubs, bookings, conversations, logins, llm] = await Promise.all([
+    const [clubs, bookings, conversations, logins, llm, activeUsers, monthCredits] = await Promise.all([
       this.prisma.club.findMany({
         orderBy: { createdAt: 'desc' },
         select: {
@@ -90,9 +118,9 @@ export class OpsClubsService {
           plan: true,
           trialEndsAt: true,
           currentPeriodEnd: true,
+          grandfatheredFeatures: true,
           setupCompletedAt: true,
-          transferAlias: true,
-          mpConnectedAt: true,
+          ...paymentSetupSelect,
           _count: { select: { courts: true, whatsappLines: true } },
         },
       }),
@@ -121,11 +149,20 @@ export class OpsClubsService {
         where: { dateKey: { gte: sinceKey } },
         _sum: { costMicroUsd: true },
       }),
+      this.prisma.user.groupBy({ by: ['clubId'], where: { isActive: true }, _count: true }),
+      // Credits are the messages the bot sends (WhatsApp replies and templates), not AI steps.
+      this.prisma.whatsAppMessageDaily.groupBy({
+        by: ['clubId'],
+        where: { dateKey: { gte: monthStartKey(today), lte: today } },
+        _sum: { botService: true, utility: true },
+      }),
     ])
 
     const conversationsByClub = new Map(conversations.map(c => [c.clubId, c._count]))
     const loginByClub = new Map(logins.map(l => [l.clubId, l._max.lastLoginAt]))
     const llmByClub = new Map(llm.map(l => [l.clubId, l._sum.costMicroUsd ?? 0]))
+    const usersByClub = new Map(activeUsers.map(u => [u.clubId, u._count]))
+    const creditsByClub = new Map(monthCredits.map(c => [c.clubId, (c._sum.botService ?? 0) + (c._sum.utility ?? 0)]))
 
     const activityByClub = new Map<string, { bot: number; panel: number; deposits: number }>()
     for (const b of bookings) {
@@ -139,7 +176,7 @@ export class OpsClubsService {
 
     const dormantBefore = new Date(Date.now() - DORMANT_DAYS * DAY_MS)
 
-    return clubs.map(club => {
+    const rows = clubs.map((club): OpsClubRow => {
       // Only the four subscription fields — `subscriptionState` spreads what it's given,
       // so handing it the whole club row would nest a copy of the club inside its own
       // `subscription` object.
@@ -152,37 +189,68 @@ export class OpsClubsService {
       const activity = activityByClub.get(club.id) ?? { bot: 0, panel: 0, deposits: 0 }
       const lastPanelLoginAt = loginByClub.get(club.id) ?? null
 
-      const paymentsConfigured = Boolean(club.transferAlias) || Boolean(club.mpConnectedAt)
-      const ready = club._count.courts > 0 && paymentsConfigured && club._count.whatsappLines > 0
+      const definition = planDefinition(club.plan)
+      const credits = creditsByClub.get(club.id) ?? 0
+      const allowance = definition?.aiCredits ?? null
+      const paused = creditsPaused(credits, allowance, club.slug === SALES_DEMO_SLUG)
+
+      const paymentsReady = paymentsConfigured(club)
+      const ready = club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0
+      const readiness = {
+        courts: club._count.courts,
+        paymentsConfigured: paymentsReady,
+        mpConnected: Boolean(club.mpConnectedAt),
+        whatsappLines: club._count.whatsappLines,
+        ready,
+        setupCompletedAt: club.setupCompletedAt,
+      }
+      const clubActivity = {
+        bookingsBot: activity.bot,
+        bookingsPanel: activity.panel,
+        depositsCents: activity.deposits,
+        conversations: conversationsByClub.get(club.id) ?? 0,
+        lastPanelLoginAt,
+        // A club still in trial hasn't had time to go dormant — don't cry wolf on it.
+        dormant:
+          subscription.subscriptionStatus !== SubscriptionStatus.TRIAL &&
+          (lastPanelLoginAt === null || lastPanelLoginAt < dormantBefore),
+      }
 
       return {
         id: club.id,
         name: club.name,
         slug: club.slug,
         createdAt: club.createdAt,
+        isDemo: club.slug === SALES_DEMO_SLUG,
+        health: clubHealth({
+          createdAt: club.createdAt,
+          subscription,
+          readiness,
+          activity: clubActivity,
+          credits: { used: credits, limit: allowance, paused },
+        }),
         subscription,
-        readiness: {
-          courts: club._count.courts,
-          paymentsConfigured,
-          mpConnected: Boolean(club.mpConnectedAt),
-          whatsappLines: club._count.whatsappLines,
-          ready,
-          setupCompletedAt: club.setupCompletedAt,
-        },
-        activity: {
-          bookingsBot: activity.bot,
-          bookingsPanel: activity.panel,
-          depositsCents: activity.deposits,
-          conversations: conversationsByClub.get(club.id) ?? 0,
-          lastPanelLoginAt,
-          // A club still in trial hasn't had time to go dormant — don't cry wolf on it.
-          dormant:
-            subscription.subscriptionStatus !== SubscriptionStatus.TRIAL &&
-            (lastPanelLoginAt === null || lastPanelLoginAt < dormantBefore),
-        },
+        readiness,
+        activity: clubActivity,
         llmCostMicroUsd: llmByClub.get(club.id) ?? 0,
+        plan: {
+          name: planName(club.plan),
+          known: definition !== null,
+          courts: { used: club._count.courts, limit: definition?.courts ?? null },
+          users: { used: usersByClub.get(club.id) ?? 0, limit: definition?.users ?? null },
+          aiCredits: { used: credits, limit: allowance, percent: creditPercent(credits, allowance), paused },
+          grandfatheredFeatures: club.grandfatheredFeatures,
+        },
       }
     })
+
+    // Most urgent first; the demo last. Same state: the newest club first (the query's order).
+    const rank = (row: OpsClubRow) =>
+      row.isDemo ? CLUB_HEALTH_ORDER.length : CLUB_HEALTH_ORDER.indexOf(row.health.status)
+    return rows
+      .map((row, index) => ({ row, index }))
+      .sort((a, b) => rank(a.row) - rank(b.row) || a.index - b.index)
+      .map(({ row }) => row)
   }
 
   /**
@@ -196,16 +264,25 @@ export class OpsClubsService {
     const data: {
       subscriptionStatus: SubscriptionStatus
       plan?: string
+      aiCreditsAlertMonth?: null
+      aiCreditsAlertPercent?: null
+      grandfatheredFeatures?: boolean
       currentPeriodEnd?: Date
       trialEndsAt?: Date
     } = { subscriptionStatus: dto.status }
 
-    if (dto.plan) data.plan = dto.plan
+    if (dto.plan) {
+      data.plan = dto.plan
+      // A new allowance starts its own 80% / 100% alerts.
+      data.aiCreditsAlertMonth = null
+      data.aiCreditsAlertPercent = null
+    }
+    if (dto.grandfatheredFeatures !== undefined) data.grandfatheredFeatures = dto.grandfatheredFeatures
     if (dto.status === SubscriptionStatus.ACTIVE) {
       data.currentPeriodEnd = new Date(Date.now() + (dto.months ?? 1) * 30 * DAY_MS)
     }
     if (dto.status === SubscriptionStatus.TRIAL) {
-      data.trialEndsAt = new Date(Date.now() + (dto.days ?? 14) * DAY_MS)
+      data.trialEndsAt = new Date(Date.now() + (dto.days ?? 15) * DAY_MS)
     }
 
     const updated = await this.prisma.club.update({
@@ -220,6 +297,8 @@ export class OpsClubsService {
     })
 
     this.logger.log(`Subscription of ${club.name} (${clubId}) set to ${dto.status}`)
+    // This month's row follows the change, so the business view never waits for the night.
+    await this.monthStates.recordClub(clubId)
     return subscriptionState(updated)
   }
 

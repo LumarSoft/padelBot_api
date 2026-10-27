@@ -41,6 +41,9 @@ function makeService(prisma: PrismaMock): BookingsService {
     {} as never,
     {} as never,
     { repriceSlot: jest.fn(), repriceFutureSlots: jest.fn() } as never,
+    {} as never,
+    {} as never, // plans
+    { record: jest.fn() } as never, // audit
   )
 }
 

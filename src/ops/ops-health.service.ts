@@ -1,5 +1,10 @@
 import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
+import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
+import { todayKey } from '../availability/lib/datetime'
+import { creditsPaused, monthStartKey } from '../plans/lib/ai-credits'
+import { nextPlanWithRoom, planDefinition } from '../plans/lib/plans'
+import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
 import { PaymentsService, PollerHealth } from '../payments/payments.service'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -23,6 +28,7 @@ export interface HealthIssue {
     | 'MP_TOKEN_EXPIRING'
     | 'ADVISOR_WAITING'
     | 'CLUB_NOT_LIVE'
+    | 'BOT_PAUSED_NO_CREDITS'
   severity: 'critical' | 'warning'
   /** Written for a human on call, in Spanish, saying what broke and for whom. */
   message: string
@@ -50,14 +56,16 @@ export class OpsHealthService {
     const now = new Date()
     const poller = this.payments.getPollerHealth()
 
-    const [clubs, stuckPendings, receipts, advisorWaiting, webhookDedupRows] = await Promise.all([
+    const today = todayKey()
+    const [clubs, stuckPendings, receipts, advisorWaiting, webhookDedupRows, monthCredits] = await Promise.all([
       this.prisma.club.findMany({
         select: {
           id: true,
           name: true,
+          slug: true,
+          plan: true,
           mpTokenExpiresAt: true,
-          mpConnectedAt: true,
-          transferAlias: true,
+          ...paymentSetupSelect,
           subscriptionStatus: true,
           _count: { select: { courts: true, whatsappLines: true } },
         },
@@ -84,7 +92,13 @@ export class OpsHealthService {
         _count: true,
       }),
       this.prisma.processedWebhookMessage.count(),
+      this.prisma.whatsAppMessageDaily.groupBy({
+        by: ['clubId'],
+        where: { dateKey: { gte: monthStartKey(today), lte: today } },
+        _sum: { botService: true, utility: true },
+      }),
     ])
+    const creditsUsed = new Map(monthCredits.map(c => [c.clubId, (c._sum.botService ?? 0) + (c._sum.utility ?? 0)]))
 
     const clubName = new Map(clubs.map(c => [c.id, c.name]))
     const issues: HealthIssue[] = []
@@ -155,14 +169,30 @@ export class OpsHealthService {
         })
       }
 
+      // Its month's credits ran out: the bot doesn't answer until it moves to a bigger plan.
+      const plan = planDefinition(club.plan)
+      const used = creditsUsed.get(club.id) ?? 0
+      if (plan && creditsPaused(used, plan.aiCredits, club.slug === SALES_DEMO_SLUG)) {
+        const next = nextPlanWithRoom(p => p.aiCredits, used)
+        issues.push({
+          kind: 'BOT_PAUSED_NO_CREDITS',
+          severity: 'critical',
+          message:
+            `El bot de ${club.name} está pausado: usó sus ${plan.aiCredits.toLocaleString('es-AR')} créditos del mes ` +
+            `(plan ${plan.name}). ${next ? `Ofrecele pasar a ${next.name}.` : 'Ningún plan le alcanza: hablalo con el club.'}`,
+          clubId: club.id,
+          clubName: club.name,
+        })
+      }
+
       // A club that pays (or is on trial) but cannot take a booking end to end is a club
       // we onboarded badly — and it will churn without ever telling us why.
-      const paymentsConfigured = Boolean(club.transferAlias) || Boolean(club.mpConnectedAt)
-      const live = club._count.courts > 0 && paymentsConfigured && club._count.whatsappLines > 0
+      const paymentsReady = paymentsConfigured(club)
+      const live = club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0
       if (!live && club.subscriptionStatus !== 'CANCELLED') {
         const missing = [
           club._count.courts === 0 && 'canchas',
-          !paymentsConfigured && 'cobros',
+          !paymentsReady && 'cobros',
           club._count.whatsappLines === 0 && 'línea de WhatsApp',
         ].filter(Boolean)
         issues.push({

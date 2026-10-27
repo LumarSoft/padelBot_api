@@ -37,4 +37,15 @@ export const TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'show_competitions',
+      description:
+        'Usá esta función cuando el jugador pregunta por torneos, peñas o americanos del club ' +
+        '(cuándo hay, cuánto salen, qué categorías) o quiere anotarse a uno. ' +
+        'El sistema le muestra los que tienen inscripción abierta y él elige.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
 ]

@@ -2,6 +2,14 @@
 
 ## Auth
 
+Every route behind `JwtAuthGuard` checks the token against the database, not only its
+signature: a token whose user was deleted or deactivated, or moved to another club, gets
+`401 { "message": "Tu sesión ya no es válida. Ingresá de nuevo." }` on its next request, even
+though it hasn't expired. So deactivating an employee (`PATCH /users/:id`) cuts the sessions
+they left open, not just their next login. The handler then sees **fresh** claims (role, name,
+club name), so a role change applies on the next request too. The check is cached per user for
+up to 30 seconds; a change made through `PATCH /users/:id` skips that wait.
+
 ### POST /auth/login
 
 Authenticates a club staff user by email + password and returns a signed JWT
@@ -58,13 +66,13 @@ whose claims include the user's `clubId` (the tenant). The token must be sent as
 
 ### GET /auth/me
 
-Authoritative session check: validates the caller's JWT **against the database** and returns
-fresh claims (name, club name, role, `mustChangePassword`). Clients call it on boot to decide
-whether a stored token is still a usable session.
+Session check: returns the caller's **fresh** claims (name, club name, role,
+`mustChangePassword`) as read from the database by the guard (see [Auth](#auth)). Clients call it
+on boot to decide whether a stored token is still a usable session.
 
-It re-reads the user instead of echoing the token's claims because a JWT keeps verifying after
-the reality it describes changed. A token whose user was deleted/deactivated — or that points at
-a club the user left — would otherwise look valid while every club-scoped endpoint answers `200`
+The claims come from the database rather than the token because a JWT keeps verifying after the
+reality it describes changed. A token whose user was deleted/deactivated — or that points at a
+club the user left — would otherwise look valid while every club-scoped endpoint answers `200`
 with empty data, leaving the client "logged in" on a session that shows nothing.
 
 **Auth required:** Yes (`Authorization: Bearer <token>`)
@@ -172,6 +180,10 @@ a prospect has none by definition.
 | fixedSlots          | string | No       | `NONE` \| `FEW` \| `SOME` \| `MANY`                      |
 | howFound            | string | No       | `INSTAGRAM` \| `REFERRAL` \| `GOOGLE` \| `OTHER_CLUB` \| `OTHER` |
 | contactWindow       | string | No       | `MORNING` \| `AFTERNOON` \| `EVENING` \| `ANY`           |
+| plan                | string | No       | `saque` \| `bandeja` \| `smash` — the pricing card they came from (`/register?plan=…`); shown first in the ops alert |
+| utmSource           | string | No       | ≤100 chars — the campaign they arrived by (`utm_source` of the landing's or `/register`'s URL) |
+| utmMedium           | string | No       | ≤100 chars (`utm_medium`)                                |
+| utmCampaign         | string | No       | ≤100 chars (`utm_campaign`); the ops alert names it      |
 
 The allowed values live in `src/onboarding/lib/signup-answers.ts`, together with the Spanish
 labels the ops alert renders.
@@ -197,10 +209,31 @@ labels the ops alert renders.
 
 `201 Created` — `{ "received": true }`
 
+### POST /onboarding/funnel
+
+The `/register` signup counts each screen a visitor reaches, once per page load, so ops can see
+where prospects drop out (`SignupFunnelDaily`, per club-local day). Anonymous: no cookie, no id.
+Rate-limited 40/min per IP.
+
+**Auth required:** No (`proxyPublicToApi`, like the signup).
+
+**Request body**
+
+| Field | Type   | Required | Constraints                                                        |
+| ----- | ------ | -------- | ------------------------------------------------------------------ |
+| step  | string | Yes      | a question id of `features/signup/lib/questions.ts`, `summary` or `sent` (letters, digits, `_`, `-`; ≤40) |
+| index | int    | Yes      | 0–60, its position in the flow                                     |
+
+```json
+{ "step": "courtCount", "index": 2 }
+```
+
+`204 No Content`
+
 ### POST /onboarding/register
 
 **Ops-only** provisioning (header `x-ops-secret` must equal `OPS_ADMIN_SECRET`; fails
-closed when unset): creates the Club (on a `TRIAL_DAYS` free trial, default 14) and its
+closed when unset): creates the Club (on a `TRIAL_DAYS` free trial, default 15) and its
 OWNER user, then returns the login payload (token + user).
 
 The club is created **empty** — no demo courts, no example bookings. Courts, prices,
@@ -209,7 +242,8 @@ owner; seeding fake rows would only leave them data to hunt down and delete.
 
 **Auth required:** ops secret header
 
-**Request body** — `clubName` (2–80), `ownerName` (1–100), `email`, `password` (8–72)
+**Request body** — `clubName` (2–80), `ownerName` (1–100), `email`, `password` (8–72),
+`plan` (optional: `saque` \| `bandeja` \| `smash`, default `saque`)
 
 `201 Created` — token + user · `403 Forbidden` — missing/invalid ops secret · `409 Conflict` — email in use
 
@@ -222,7 +256,9 @@ having opened the wizard.
 
 Steps: `complejo` · `canchas` · `pagos` · `whatsapp` · `fijos` · `equipo` · `kiosco`.
 `required` marks the three the bot cannot operate without (`canchas`, `pagos`, `whatsapp`);
-`ready` is true once all of those are done. Every step is skippable regardless.
+`ready` is true once all of those are done. Every step is skippable regardless. `pagos` is done
+when the club can be paid (MercadoPago connected or an alias loaded) — or right away when
+`depositMode` is `NONE`, since the bot charges nothing.
 
 **Auth required:** Yes
 
@@ -336,16 +372,24 @@ it to the employee out-of-band; no email delivery involved). The user is flagged
 
 `409 Conflict` — email already in use
 
+`403 Forbidden` — the plan's active-user limit is full (Saque 2, Bandeja 5, owner included); the message names the plan with room
+
+```json
+{ "statusCode": 403, "message": "Tu plan Saque incluye 2 usuarios activos, con vos incluido. Para sumar a alguien, desactivá a quien ya no use el panel o pasate a Bandeja: escribinos y lo cambiamos." }
+```
+
 ### PATCH /users/:id
 
-Updates a team member's name, role or active state. Deactivated users cannot log in.
-The caller cannot edit themself (avoids self-lockout).
+Updates a team member's name, role or active state. Deactivated users cannot log in, and the
+sessions they already have open get `401` on their next request (see [Auth](#auth)); a role change
+also applies on their next request. The caller cannot edit themself (avoids self-lockout).
 
 **Auth required:** Yes (OWNER only)
 
 **Request body** — `{ "name"?: string, "role"?: "OWNER" | "STAFF", "isActive"?: boolean }`
 
-`200 OK` — updated user · `400 Bad Request` — attempted self-edit · `404 Not Found`
+`200 OK` — updated user · `400 Bad Request` — attempted self-edit · `404 Not Found` ·
+`403 Forbidden` — reactivating (`isActive: true` on an inactive user) beyond the plan's active-user limit
 
 ### POST /users/:id/reset-password
 
@@ -439,7 +483,8 @@ Creates a court.
 }
 ```
 
-`201 Created` — the created court · `400 Bad Request` — invalid weeklyHours shape
+`201 Created` — the created court · `400 Bad Request` — invalid weeklyHours shape ·
+`403 Forbidden` — the plan's court limit is reached (Saque 2, Bandeja 4); existing courts are never touched
 
 ### POST /courts/bulk-price
 
@@ -467,6 +512,8 @@ returns the preview without writing. Owner-only.
   "priceRulesUpdated": 3
 }
 ```
+
+`403 Forbidden` — a future `effectiveDate` (scheduling) on a plan without scheduled price rises. Applying today and the adjustments already scheduled are not affected.
 
 ### GET /courts/scheduled-price-adjustments
 
@@ -532,11 +579,14 @@ Lists slots, ordered by `startsAt`. Optional filters via query string.
     "priceCents": 1200000,
     "status": "AVAILABLE",
     "court": { "id": "clx...", "name": "Cancha 1" },
+    "competition": null,
     "createdAt": "...",
     "updatedAt": "..."
   }
 ]
 ```
+
+`competition` is `{ "id", "name", "kind": "TOURNAMENT" | "PENA" }` on a `BLOCKED` slot held for a torneo or peña (see Competitions), `null` otherwise. Setting such a slot to a status other than `BLOCKED` with `PATCH /slots/:id` detaches it from the event.
 
 ### GET /slots/:id
 
@@ -625,7 +675,7 @@ Blocks many slots at once (e.g. a tournament): every selected court, for every d
 
 ### POST /slots/bulk-unblock
 
-The inverse of `bulk-block`: frees every `BLOCKED` slot of the selected courts inside the date range (optionally only on the chosen time bands). Only `BLOCKED` slots are touched, so a booking inside the range can never be freed by accident. Slots are matched by their real wall-clock start, so bands that were blocked before the court's schedule changed are still reachable.
+The inverse of `bulk-block`: frees every `BLOCKED` slot of the selected courts inside the date range (optionally only on the chosen time bands). Only `BLOCKED` slots are touched, so a booking inside the range can never be freed by accident, and never one held for a torneo or peña (free those by editing or cancelling the event). Slots are matched by their real wall-clock start, so bands that were blocked before the court's schedule changed are still reachable.
 
 **Auth required:** Yes
 
@@ -761,6 +811,56 @@ money goes and records it on the booking as `depositOutcome`: cancelled
 become the player's `creditCents`, applied automatically to their next booking); later →
 `FORFEITED`. Unpaid bookings just restore any player credit they had consumed.
 
+### PATCH /bookings/:id/attendance
+
+The front desk records a fijo's answer by hand (they called them, or the player said it in person).
+Same effect as the player's tap on the WhatsApp question (see `docs/FIXED_CONFIRMATIONS.md`):
+`confirmed: true` marks them as coming; `confirmed: false` ("no viene") releases **only this
+date** — the booking is cancelled exactly like `PATCH /bookings/:id/cancel` (slot back to
+`AVAILABLE`, waitlist offered the court) while the recurring booking keeps the next weeks.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field     | Type    | Required | Constraints                                 |
+| --------- | ------- | -------- | ------------------------------------------- |
+| confirmed | boolean | Yes      | `true` = viene · `false` = no viene (libera) |
+
+```json
+{ "confirmed": true }
+```
+
+**Responses**
+
+`200 OK` — the updated booking. Every booking carries the attendance fields:
+
+```json
+{
+  "id": "clx...",
+  "status": "CONFIRMED",
+  "recurringBookingId": "clr...",
+  "attendanceAskedAt": "2026-10-13T22:00:00.000Z",
+  "attendanceConfirmed": true,
+  "attendanceAnsweredAt": "2026-10-14T13:05:12.000Z"
+}
+```
+
+`attendanceAskedAt` = when the WhatsApp question went out (null = not asked);
+`attendanceConfirmed` = `true` / `false` / `null` (no answer yet); `attendanceAnsweredAt` = when
+the answer arrived. With `confirmed: false` the response is the cancelled booking
+(`status: "CANCELLED"`, `attendanceConfirmed: false`).
+
+`400 Bad Request` — not a fijo, no longer booked, or (for `false`) the turno already started
+
+```json
+{ "statusCode": 400, "message": "Solo los turnos fijos tienen confirmación de asistencia" }
+```
+
+`404 Not Found` — booking not found in the caller's club
+
+`409 Conflict` — the booking changed while confirming it
+
 ### DELETE /bookings/:id
 
 Soft-deletes a booking so it drops out of the club's lists (mobile/panel). Only a
@@ -854,6 +954,9 @@ Streams the latest transfer-receipt image for a booking (RECEIPT verification mo
 ### PUT /bookings/:id/products
 
 Replaces all consumo lines (products consumed during the court session) attached to a booking. Passing an empty `items` array clears all consumos. Club-scoped.
+
+Moves kiosk stock by the **net change** of the bill, in the same transaction: adding 2 waters takes 2 out, lowering it to 1 later puts 1 back, clearing the bill puts every unit back, re-saving it unchanged (or only re-splitting it among players) moves nothing. Only tracked products move (see [Stock (kiosco)](#stock-kiosco)); a sale is never blocked for lack of stock.
+
 
 Each line records which of the 4 fixed anonymous players (`1`..`4`) share its cost — used by the panel to split the turno's bill (court price ÷ 4 plus each player's share of shared consumos).
 
@@ -984,6 +1087,8 @@ again if a payment is undone. Returns the refreshed account.
 | method      | enum | Yes      | CASH \| QR \| TRANSFER |
 
 `200 OK` — refreshed account · `400 Bad Request` — cancelled booking · `404 Not Found`
+
+`403 Forbidden` — on a plan without split payment (Saque, unless the club predates the plans) a payment must cover the whole remaining bill: the desk charges the turno in one payment, charging a player only their share is refused. Removing a payment is never refused.
 
 ### DELETE /bookings/:id/payments/:paymentId
 
@@ -1139,6 +1244,571 @@ Occurrences whose booking was CANCELLED are treated as deliberately skipped ("el
 
 `404 Not Found`
 
+## Competitions (Torneos y Peñas)
+
+A **torneo** or a **peña** (`kind`: `TOURNAMENT` | `PENA`). Both hold courts during one or more time windows (`sessions`), take pair registrations and play matches. A peña is a single round-robin category ("General") with no bracket; a torneo has categories whose format is `ROUND_ROBIN`, `GROUPS_KNOCKOUT` (zonas + cuadro) or `KNOCKOUT`. Open to STAFF.
+
+**Court blocking.** Every band of the courts' grid that overlaps a session becomes a `BLOCKED` slot tagged with the event (`Slot.competitionId`): missing slots are created, `AVAILABLE` ones are claimed, a band already blocked for something else is left alone. If any turno in the way is **booked**, the whole create/update is refused with `409` naming them (no half-blocked event). Editing courts or sessions re-syncs the block; cancelling or deleting the event frees its turnos. `POST /slots/bulk-unblock` never frees an event's turnos.
+
+**Every write returns the full event detail** (same shape as `GET /competitions/:id`) and emits the SSE event `competition.changed` (`{ type, clubId, competitionId }`).
+
+**Money:** `entryFeeCents` is the registration fee **per player**, in cents.
+
+### GET /competitions
+
+Lists the club's events, newest first.
+
+**Auth required:** Yes
+
+**Query params:** `kind` (`TOURNAMENT` | `PENA`), `status` (`OPEN` | `IN_PROGRESS` | `FINISHED` | `CANCELLED`), both optional.
+
+**Responses**
+
+`200 OK`
+```json
+[
+  {
+    "id": "clx...",
+    "kind": "PENA",
+    "name": "Peña de los jueves",
+    "description": null,
+    "status": "OPEN",
+    "matchFormat": "ONE_SET",
+    "entryFeeCents": 500000,
+    "createdAt": "2026-10-16T00:00:00.000Z",
+    "updatedAt": "2026-10-16T00:00:00.000Z",
+    "sessions": [{ "id": "clx...", "dateKey": "2026-10-23", "startTime": "20:00", "endTime": "23:00" }],
+    "courts": [{ "id": "clx...", "name": "Cancha 1" }],
+    "_count": { "pairs": 6, "categories": 1 }
+  }
+]
+```
+
+### GET /competitions/:id
+
+The full event: sessions, courts, categories (with zonas and computed tables), pairs with their players and payment, matches, and the fee totals.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+```json
+{
+  "id": "clx...",
+  "kind": "TOURNAMENT",
+  "name": "Torneo Primavera",
+  "status": "IN_PROGRESS",
+  "matchFormat": "ONE_SET",
+  "entryFeeCents": 1000000,
+  "sessions": [{ "id": "clx...", "dateKey": "2026-10-24", "startTime": "09:00", "endTime": "23:00" }],
+  "courts": [{ "id": "clx...", "name": "Cancha 1" }],
+  "categories": [
+    {
+      "id": "cat1",
+      "name": "4ta",
+      "format": "GROUPS_KNOCKOUT",
+      "groupSize": 3,
+      "advancePerGroup": 2,
+      "maxPairs": 16,
+      "fixtureGeneratedAt": "2026-10-20T15:00:00.000Z",
+      "bracketGeneratedAt": null,
+      "standings": null,
+      "groups": [
+        {
+          "id": "g1",
+          "name": "Zona A",
+          "position": 0,
+          "standings": [
+            { "pairId": "p1", "played": 2, "won": 2, "lost": 0, "setsWon": 2, "setsLost": 0, "gamesWon": 12, "gamesLost": 5 }
+          ]
+        }
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "id": "p1",
+      "categoryId": "cat1",
+      "groupId": "g1",
+      "seed": 1,
+      "createdAt": "2026-10-16T00:00:00.000Z",
+      "players": [
+        { "id": "cp1", "position": 1, "name": "Juan Pérez", "phone": "5493411234567", "playerId": "clx...", "paidAt": "2026-10-16T00:00:00.000Z", "paymentMethod": "CASH" },
+        { "id": "cp2", "position": 2, "name": "Lucas Gómez", "phone": null, "playerId": null, "paidAt": null, "paymentMethod": null }
+      ]
+    }
+  ],
+  "matches": [
+    {
+      "id": "m1",
+      "categoryId": "cat1",
+      "stage": "GROUP",
+      "groupId": "g1",
+      "round": 1,
+      "position": 0,
+      "pairAId": "p1",
+      "pairBId": "p2",
+      "placeholderA": null,
+      "placeholderB": null,
+      "courtId": null,
+      "startsAt": null,
+      "sets": [[6, 4]],
+      "winnerPairId": "p1",
+      "nextMatchId": null,
+      "nextSlot": null
+    }
+  ],
+  "fees": { "expectedCents": 2000000, "collectedCents": 1000000 }
+}
+```
+
+`standings` is set on `ROUND_ROBIN` categories once their fixture exists; zonas carry their own. Tables order by wins, set difference, game difference, the match between the two pairs, then seed. In a knockout match `sets: null` with a `winnerPairId` is a bye.
+
+`404 Not Found` — `{ "message": "Evento no encontrado" }`
+
+### POST /competitions
+
+Creates a torneo or a peña and blocks its courts.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field         | Type     | Required | Constraints |
+| ------------- | -------- | -------- | ----------- |
+| kind          | string   | Yes      | `TOURNAMENT` \| `PENA` |
+| name          | string   | Yes      | 2–120 chars |
+| description   | string   | No       | max 2000 chars |
+| matchFormat   | string   | No       | `ONE_SET` (default; americano / peña) \| `BEST_OF_THREE` (completo) |
+| entryFeeCents | integer  | No       | ≥ 0, per player (default 0) |
+| courtIds      | string[] | Yes      | 1–30, must belong to the club |
+| sessions      | object[] | Yes      | 1–14 `{ dateKey: "YYYY-MM-DD", startTime: "HH:MM", endTime: "HH:MM" }`; an end at or before the start ends past midnight; sessions can't overlap |
+| categories    | object[] | Torneo   | 1–12 `{ name (1–60), format, groupSize? (2–8, default 3), advancePerGroup? (1–4, default 2), maxPairs? (2–128) }`. Ignored for a peña |
+
+```json
+{
+  "kind": "PENA",
+  "name": "Peña de los jueves",
+  "entryFeeCents": 500000,
+  "courtIds": ["clx1", "clx2"],
+  "sessions": [{ "dateKey": "2026-10-23", "startTime": "20:00", "endTime": "23:00" }]
+}
+```
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "El torneo necesita al menos una categoría" }`, `"Dos franjas del evento se superponen"`, `"Una o más canchas no pertenecen a este complejo"`, `"No pueden pasar más parejas que las que tiene cada zona"`
+
+`409 Conflict`
+```json
+{ "message": "Hay turnos reservados en ese horario: Cancha 2 · jueves 23/10 21:00. Movelos o cancelalos y volvé a intentar." }
+```
+
+### PATCH /competitions/:id
+
+Edits the event. `courtIds` and `sessions` replace the current ones and re-sync the blocked turnos.
+
+**Auth required:** Yes
+
+**Request body** (all optional)
+
+| Field         | Type     | Constraints |
+| ------------- | -------- | ----------- |
+| name          | string   | 2–120 chars |
+| description   | string   | max 2000 chars |
+| matchFormat   | string   | `ONE_SET` \| `BEST_OF_THREE`; refused once a result is loaded |
+| entryFeeCents | integer  | ≥ 0 |
+| courtIds      | string[] | 1–30 |
+| sessions      | object[] | 1–14, same shape as on create |
+| status        | string   | `OPEN` \| `IN_PROGRESS` \| `FINISHED` (cancel with `POST /competitions/:id/cancel`) |
+
+**Responses**
+
+`200 OK` — the event detail
+
+`404 Not Found` — `{ "message": "Evento no encontrado" }`
+
+`409 Conflict` — booked turnos in the way (as on create), `"El evento está cancelado"`, `"Ya hay resultados cargados: no se puede cambiar el formato"`
+
+### POST /competitions/:id/cancel
+
+Cancels the event and frees its turnos. Registrations and results are kept.
+
+**Auth required:** Yes
+
+**Responses**
+
+`201 Created` — the event detail with `"status": "CANCELLED"`
+
+`409 Conflict` — `{ "message": "El evento está cancelado" }`
+
+### DELETE /competitions/:id
+
+Deletes the event with everything in it and frees its turnos.
+
+**Auth required:** Yes
+
+**Responses**
+
+`204 No Content`
+
+`404 Not Found` — `{ "message": "Evento no encontrado" }`
+
+### POST /competitions/:id/categories
+
+Adds a category to a torneo.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field           | Type    | Required | Constraints |
+| --------------- | ------- | -------- | ----------- |
+| name            | string  | Yes      | 1–60 chars |
+| format          | string  | Yes      | `ROUND_ROBIN` \| `GROUPS_KNOCKOUT` \| `KNOCKOUT` |
+| groupSize       | integer | No       | 2–8 (default 3) |
+| advancePerGroup | integer | No       | 1–4 (default 2), ≤ groupSize |
+| maxPairs        | integer | No       | 2–128 |
+
+```json
+{ "name": "Mixto", "format": "GROUPS_KNOCKOUT", "groupSize": 3, "advancePerGroup": 2, "maxPairs": 12 }
+```
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "Una peña tiene una sola categoría" }`
+
+### PATCH /competitions/:id/categories/:categoryId
+
+Edits a category before its fixture. Same fields as above, all optional; `maxPairs: null` removes the cap.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`400 Bad Request` — `{ "message": "Ya hay 10 parejas anotadas en esta categoría" }`
+
+`409 Conflict` — `{ "message": "El fixture de esta categoría ya está armado: borralo para cambiarla" }`
+
+### DELETE /competitions/:id/categories/:categoryId
+
+Removes an empty category of a torneo.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "La categoría tiene parejas anotadas: borralas o pasalas a otra primero" }`
+
+### POST /competitions/:id/pairs
+
+Registers a pair. A player with a phone is linked to (or added to) the club's players.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field      | Type     | Required | Constraints |
+| ---------- | -------- | -------- | ----------- |
+| categoryId | string   | Torneo   | omit in a peña (its only category) |
+| players    | object[] | Yes      | exactly 2 `{ name (2–100), phone? (max 20) }` |
+| seed       | integer  | No       | 1–999, 1 = best |
+
+```json
+{
+  "categoryId": "cat1",
+  "players": [{ "name": "Juan Pérez", "phone": "3411234567" }, { "name": "Lucas Gómez" }],
+  "seed": 1
+}
+```
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "Elegí la categoría de la pareja" }`
+
+`409 Conflict` — `{ "message": "4ta ya tiene el cupo completo (16 parejas)" }`, `"El fixture de 4ta ya está armado: borralo para sumar parejas"`, `"El evento está finalizado: reabrilo para hacer cambios"`
+
+### PATCH /competitions/:id/pairs/:pairId
+
+Edits a pair: its players (both, by position), its seed (`null` clears it) or its category (only before either category's fixture).
+
+**Auth required:** Yes
+
+**Request body:** `categoryId?`, `players?` (exactly 2, as on create), `seed?`
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "El fixture de su categoría ya está armado: no se puede mover la pareja" }`
+
+### DELETE /competitions/:id/pairs/:pairId
+
+Removes a pair before its category's fixture.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "El fixture de su categoría ya está armado: borralo para sacar la pareja" }`
+
+### PATCH /competitions/:id/players/:playerId/payment
+
+Marks one player's registration fee as paid (with how) or back to pending. `playerId` is the pair player's id (`pairs[].players[].id`).
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field  | Type    | Required | Constraints |
+| ------ | ------- | -------- | ----------- |
+| paid   | boolean | Yes      | |
+| method | string  | No       | `CASH` (default) \| `QR` \| `TRANSFER` |
+
+```json
+{ "paid": true, "method": "TRANSFER" }
+```
+
+**Responses**
+
+`200 OK` — the event detail
+
+`404 Not Found` — `{ "message": "Jugador no encontrado" }`
+
+### POST /competitions/:id/categories/:categoryId/fixture
+
+Draws the category's fixture from its pairs (seed first, then registration order):
+
+- `ROUND_ROBIN`: everyone vs everyone, packed in waves (`round`) over the event's courts, each match with its `courtId`.
+- `GROUPS_KNOCKOUT`: zonas of about `groupSize` (seeds dealt in a snake), each with its round robin.
+- `KNOCKOUT`: the bracket straight away (byes go to the top seeds and advance on their own).
+
+Moves the event from `OPEN` to `IN_PROGRESS`.
+
+**Auth required:** Yes
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "Hacen falta al menos 2 parejas para armar el fixture" }`, `"Con una sola zona tienen que pasar al menos 2 parejas al cuadro"`
+
+`409 Conflict` — `{ "message": "El fixture de esta categoría ya está armado" }`
+
+### DELETE /competitions/:id/categories/:categoryId/fixture
+
+Undoes the fixture (zonas, matches and bracket) while no result is loaded. The event goes back to `OPEN` when no category has a fixture left.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "Ya hay resultados cargados: borralos primero" }`
+
+### POST /competitions/:id/categories/:categoryId/bracket
+
+`GROUPS_KNOCKOUT` only: once every zona match has a result, seeds the bracket with the best `advancePerGroup` of each zona (1° of every zona, then 2°…, zona-mates kept apart in round one). Knockout matches show `placeholderA/B` ("1° Zona A") and link to the next one (`nextMatchId`, `nextSlot`).
+
+**Auth required:** Yes
+
+**Responses**
+
+`201 Created` — the event detail
+
+`400 Bad Request` — `{ "message": "Esta categoría no tiene zonas" }`
+
+`409 Conflict` — `{ "message": "Faltan 3 resultados de las zonas" }`, `"El cuadro de esta categoría ya está armado"`
+
+### DELETE /competitions/:id/categories/:categoryId/bracket
+
+Undoes the bracket of a zonas category (the zonas stay) while it has no results.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — the event detail
+
+`409 Conflict` — `{ "message": "Ya hay resultados cargados: borralos primero" }`
+
+### PATCH /competitions/:id/matches/:matchId
+
+Loads or clears a result, and/or sets the court and time. In a knockout match the winner moves on to the next match.
+
+**Auth required:** Yes
+
+**Request body** (all optional)
+
+| Field    | Type          | Constraints |
+| -------- | ------------- | ----------- |
+| sets     | number[][] \| null | games per set from pair A's side. `ONE_SET`: exactly one set; `BEST_OF_THREE`: 2 or 3 sets, the third may be a super tie-break (10-8). No tied sets. `null` clears the result |
+| courtId  | string \| null | a club court |
+| startsAt | string \| null | ISO 8601 |
+
+```json
+{ "sets": [[6, 4], [3, 6], [10, 8]] }
+```
+
+**Responses**
+
+`200 OK` — the event detail
+
+`400 Bad Request` — `{ "message": "Con 1 set cada uno falta cargar el tercero" }`, `"Este partido se juega a un set"`, `"Un set no puede terminar empatado"`, `"Todavía no se sabe quién juega este partido"`
+
+`404 Not Found` — `{ "message": "Partido no encontrado" }`
+
+`409 Conflict` — `{ "message": "El partido siguiente ya tiene resultado: borralo primero" }`, `"El cuadro ya está armado: borralo para cambiar resultados de las zonas"`
+
+## Competition sign-up requests (inscripciones por WhatsApp)
+
+When a player asks the bot for torneos or peñas (menu option 3, the words "torneo"/"peña"/"americano"/"inscribirme", or the LLM's `show_competitions` tool), the bot lists the events with status `OPEN` and a session today or later (soonest first, at most 10). Picking one records a `CompetitionSignupRequest`, pushes the club ("🏆 Quieren anotarse a …", `data: { competitionId }`), emits SSE `competition.signup` (`{ type, clubId, competitionId, competitionName, playerName }`) and hands the chat to a person: `mode = HUMAN`, `needsAdvisor = true`. The bot never registers the pair — the desk does it from the panel or the app. A second request from the same number for the same event while the first is `PENDING` is not duplicated nor pushed again. Open to STAFF.
+
+### GET /competition-signup-requests
+
+The club's sign-up requests, newest first (at most 200).
+
+**Auth required:** Yes
+
+**Query params:** `status` (`PENDING` | `HANDLED` | `DISMISSED`), `competitionId`, both optional.
+
+**Responses**
+
+`200 OK`
+```json
+[
+  {
+    "id": "clx...",
+    "competitionId": "clx...",
+    "waId": "5493411234567",
+    "playerName": "Juan",
+    "status": "PENDING",
+    "handledAt": null,
+    "createdAt": "2026-10-16T02:10:00.000Z",
+    "competition": { "id": "clx...", "name": "Torneo Primavera", "kind": "TOURNAMENT", "status": "OPEN" }
+  }
+]
+```
+
+### PATCH /competition-signup-requests/:id
+
+Marks a request as handled, dismissed, or back to pending. Emits `competition.changed` so other screens refresh.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field  | Type   | Required | Constraints |
+| ------ | ------ | -------- | ----------- |
+| status | string | Yes      | `PENDING` \| `HANDLED` \| `DISMISSED` |
+
+```json
+{ "status": "HANDLED" }
+```
+
+**Responses**
+
+`200 OK` — the updated request (same shape as in the list)
+
+`404 Not Found` — `{ "message": "Solicitud no encontrada" }`
+
+## WhatsApp lines
+
+Maps a Meta `phone_number_id` to the club so the bot knows which tenant an incoming message belongs to. All routes are scoped to the caller's club.
+
+### GET /whatsapp-lines
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+[{ "id": "cl…", "phoneNumberId": "1109940228878973", "displayPhone": "+54 9 341 555-0000", "isActive": true, "coexistence": true, "createdAt": "2026-10-12T22:00:00.000Z" }]
+```
+
+### POST /whatsapp-lines
+
+Manual registration of a line already set up in Meta (the number's messages go out with the global `WHATSAPP_TOKEN`).
+
+**Auth required:** Yes
+
+| Field | Type | Required | Constraints |
+| ----- | ---- | -------- | ----------- |
+| phoneNumberId | string | Yes | Meta phone number id, globally unique |
+| displayPhone | string | Yes | Human-readable number |
+
+`201 Created` → the line · `409 Conflict` when the phone number id is already registered.
+
+### GET /whatsapp-lines/embedded-signup/config
+
+Public ids the panel needs to open the Embedded Signup popup. `enabled` is `false` until `WHATSAPP_APP_ID`, `WHATSAPP_ES_CONFIG_ID` and `WHATSAPP_APP_SECRET` are all set.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{ "enabled": true, "appId": "1542936483770854", "configId": "123456789012345", "apiVersion": "v25.0" }
+```
+
+### POST /whatsapp-lines/embedded-signup
+
+Finishes Meta's Embedded Signup popup from the panel: exchanges the one-time `code` for the WABA's business token (stored encrypted), subscribes the app to the WABA webhooks, then either registers the number (Cloud API only) or — for **coexistence** (number stays on the club's WhatsApp Business app) — triggers the contacts + history sync. Creates or updates the club's line. Requires `WHATSAPP_APP_ID` and `WHATSAPP_APP_SECRET`.
+
+**Auth required:** Yes (OWNER only)
+
+| Field | Type | Required | Constraints |
+| ----- | ---- | -------- | ----------- |
+| code | string | Yes | `FB.login` response code (30 s TTL) |
+| wabaId | string | Yes | digits, from the `WA_EMBEDDED_SIGNUP` session message |
+| phoneNumberId | string | Yes | digits, from the `WA_EMBEDDED_SIGNUP` session message |
+| coexistence | boolean | No | `true` when the flow finished as `FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING` |
+
+```json
+{ "code": "AQB…", "wabaId": "123456789012345", "phoneNumberId": "109876543210987", "coexistence": true }
+```
+
+**Responses**
+
+`201 Created`
+
+```json
+{ "id": "cl…", "phoneNumberId": "109876543210987", "displayPhone": "+54 9 341 555-0000", "isActive": true, "coexistence": true, "createdAt": "2026-10-12T22:00:00.000Z" }
+```
+
+`403 Forbidden` — caller is STAFF · `409 Conflict` — the number belongs to another club · `502 Bad Gateway` — Meta rejected a step (`{ "message": "Meta rechazó la conexión (exchange_code). Probá de nuevo en unos minutos." }`) · `503 Service Unavailable` — `WHATSAPP_APP_ID`/`WHATSAPP_APP_SECRET` not configured.
+
+### DELETE /whatsapp-lines/:id
+
+**Auth required:** Yes
+
+`204 No Content` · `404 Not Found`
+
+### Webhook fields (`POST /webhook`, Meta → API)
+
+The app must be subscribed to `messages` and, for coexistence numbers, also to `smb_message_echoes`, `history` and `smb_app_state_sync`. An `smb_message_echoes` event (the club answered from the phone) is stored in the chat as `ADMIN` and pauses the bot on that chat for `WHATSAPP_OWNER_REPLY_PAUSE_HOURS` (default 6).
+
+A `messages` entry with `type: "button"` is a tap on a quick-reply button of a **template** we
+sent (`message.button.payload` / `.text`). Payloads `FIJO:YES:<bookingId>` / `FIJO:NO:<bookingId>`
+are the fijo's answer to the attendance question (`docs/FIXED_CONFIRMATIONS.md`): handled in the
+sender's serial queue, only after checking the booking belongs to the line's club and to the
+number that tapped, idempotently. Any other payload is treated as the button's text, like a typed
+message.
+
 ## Clubs
 
 Per-club settings. The transfer config holds the MercadoPago alias/CVU players send the deposit to.
@@ -1157,7 +1827,7 @@ fallback message. The panel itself is never blocked.
 ```json
 {
   "subscriptionStatus": "TRIAL",
-  "plan": "base",
+  "plan": "saque",
   "trialEndsAt": "2026-07-23T00:00:00.000Z",
   "currentPeriodEnd": null,
   "severity": "trial",
@@ -1165,6 +1835,71 @@ fallback message. The panel itself is never blocked.
   "daysLeft": 14
 }
 ```
+
+### GET /clubs/me/plan
+
+The club's commercial plan (`saque` | `bandeja` | `smash`), its limits and how much of them is
+used. Courts and users are soft limits: creating beyond them is refused (`403`), what the club
+already has is never touched. An unknown plan key restricts nothing (`known: false`, no limits).
+Open to STAFF too.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{
+  "plan": { "key": "saque", "name": "Saque", "known": true },
+  "courts": { "used": 2, "limit": 2 },
+  "users": { "used": 1, "limit": 2 },
+  "aiCredits": {
+    "used": 640,
+    "limit": 1000,
+    "month": "2026-10",
+    "percent": 64,
+    "paused": false
+  },
+  "features": {
+    "fixedConfirmation": { "enabled": false, "plan": "Bandeja" },
+    "kioscoStock": { "enabled": false, "plan": "Bandeja" },
+    "waitlist": { "enabled": false, "plan": "Bandeja" },
+    "splitPayment": { "enabled": false, "plan": "Bandeja" },
+    "scheduledPriceAdjustments": { "enabled": false, "plan": "Bandeja" }
+  },
+  "grandfatheredFeatures": false,
+  "creditsNotice": { "level": 80, "dismissed": false }
+}
+```
+
+`creditsNotice` drives the panel's "te quedan pocos créditos" banner: `level` is the threshold
+crossed — 80 / 90 / 95 (20%, 10%, 5% left) or 100 (none left) — null below 80%, and whether the
+calling user closed it at that level. Each higher level shows again; while the bot is paused it is
+never `dismissed`.
+
+`features` says whether the club may use (turn on) each module and the cheapest plan that
+includes it. Clubs that existed before the plans were enforced have `grandfatheredFeatures`
+and every module. Only switching a module ON is refused (`403`, message naming the plan); what
+the club already has running keeps working.
+
+`aiCredits` counts this calendar month (club-local): one credit per WhatsApp message the bot
+sends (replies, buttons, payment notices, reminders, fijo confirmations). Understanding audios
+and reading receipts costs nothing; replies the staff types from the panel never count. `limit`
+is the plan's (Saque 1.000, Bandeja 2.000, Smash 3.000). A credit stands for one bot message plus
+the AI an average message takes. Once they're used up, `paused` is true: the bot stops answering
+players (each conversation is told once that the club answers by hand, and the staff gets a push),
+and sends no reminders, fijo confirmations or waitlist offers; payment messages still go out. It
+comes back as soon as the club is on a bigger plan, or on the 1st of the month. Ops and the club
+are warned at 80%, 90%, 95% and 100% (the club by push: owners, and everyone at 100%).
+
+### POST /clubs/me/plan/credits-notice/dismiss
+
+Closes the credits banner for the calling user at the level it's showing now: it shows again at
+the next level (90, 95, 100). Does nothing while the bot is paused. Facturación always shows the
+state.
+
+**Auth required:** Yes
+
+`204 No Content`
 
 ### GET /clubs/me/faq
 
@@ -1246,7 +1981,7 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 | ----------------------- | ------ | -------- | ---------------------------------- |
 | transferAlias           | string | No       | max 120 chars                      |
 | transferHolder          | string | No       | max 120 chars                      |
-| depositMode             | enum   | No       | `DEPOSIT` \| `FULL`                |
+| depositMode             | enum   | No       | `DEPOSIT` \| `FULL` \| `NONE`      |
 | depositPercent          | int    | No       | 1–100 (used when `DEPOSIT`)        |
 | cancellationWindowHours | int    | No       | 0–168; cancelling ≥ N h before the slot credits the deposit to the player, later forfeits it |
 | requireDniMatch         | bool   | No       | only relevant in `AUTO` mode       |
@@ -1256,6 +1991,8 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 | maxPlayerReschedules    | int    | No       | 0–10; how many times ONE booking may be moved by the player |
 
 `AUTO` reconciles the deposit automatically via MercadoPago; `RECEIPT` makes the bot ask the player for a receipt photo that an admin verifies manually from the panel (the poller skips RECEIPT clubs).
+
+**`depositMode`.** `DEPOSIT` asks a seña of `depositPercent`% of the court price; `FULL` asks the whole price; `NONE` asks nothing — the bot takes name, day and time and books the court **CONFIRMED** on the spot (no alias, no transfer, no payment window), and the club charges at the desk. With `NONE` the alias, `requireDniMatch` and `paymentVerificationMode` are ignored, and a player at the no-show threshold is handed to the club (push) instead of being asked the full price. A seña that works out to $0 (a court with no price) books the same way as `NONE`.
 
 **Player-side reschedule policy.** The bot never *cancels* a booking — it **moves** it. Rescheduling keeps the deposit alive on the same booking, frees the old court for the waitlist to resell, and takes no money out of the club, which is why a player can be allowed to do it alone. A real cancellation moves money (credit vs forfeit, per `cancellationWindowHours`) and stays a decision of the club, from the panel.
 
@@ -1272,6 +2009,54 @@ Updates the caller's club transfer config. **Owner only.** Send a field as an em
 `200 OK` — the updated transfer config
 
 `403 Forbidden` — caller is not the club owner
+
+### GET /clubs/me/fixed-confirmation
+
+The automatic WhatsApp question to the fijos ("¿venís?", see `docs/FIXED_CONFIRMATIONS.md`).
+Readable by staff and owner — the agenda shows the answers only when it's on.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+{ "enabled": true, "leadHours": 24 }
+```
+
+### PATCH /clubs/me/fixed-confirmation
+
+Turns the question on/off and sets how early it goes out. **Owner only.**
+
+**Auth required:** Yes (role `owner`)
+
+**Request body**
+
+| Field     | Type    | Required | Constraints                                                   |
+| --------- | ------- | -------- | ------------------------------------------------------------- |
+| enabled   | boolean | No       | on/off (default off: needs the Meta template approved first)  |
+| leadHours | int     | No       | one of `3`, `6`, `12`, `24`, `48` — hours before the turno    |
+
+```json
+{ "enabled": true, "leadHours": 24 }
+```
+
+**Responses**
+
+`200 OK` — the updated config
+
+```json
+{ "enabled": true, "leadHours": 24 }
+```
+
+`400 Bad Request` — `leadHours` outside the allowed values
+
+```json
+{ "statusCode": 400, "message": ["leadHours must be one of the following values: 3, 6, 12, 24, 48"], "error": "Bad Request" }
+```
+
+`403 Forbidden` — caller is not the club owner
+
+`403 Forbidden` — turning it ON (`enabled: true` while off) on a plan without the module (Saque, unless the club predates the plans). Already on keeps working, and can be tuned or turned off.
 
 ### GET /clubs/me/mercadopago
 
@@ -1346,6 +2131,409 @@ Disconnects the club's MercadoPago account (clears stored tokens). **Owner only.
 
 `403 Forbidden` — caller is not the club owner
 
+## Billing
+
+The owner's "Facturación" page. Credits are one per WhatsApp message the bot sends, counted
+against the plan's monthly credits; there is nothing to buy.
+
+### GET /billing
+
+The owner's "Facturación" page in one call: plan, renewal date (`currentPeriodEnd`, or
+`trialEndsAt` on a trial) and this month's credits.
+
+**Auth required:** Yes (OWNER only)
+
+`200 OK`
+
+```json
+{
+  "plan": { "key": "bandeja", "name": "Bandeja", "known": true },
+  "subscription": { "status": "ACTIVE", "severity": "ok", "renewsAt": "2026-11-10T21:00:00.000Z" },
+  "credits": { "month": "2026-10", "used": 2000, "included": 2000, "percent": 100, "paused": true }
+}
+```
+
+`403 Forbidden` — caller is not the club owner
+
+## Products
+
+The club's kiosk catalog (balls, drinks, snacks, accessories). Stock is **opt-in per product**:
+`stockQuantity: null` means the club doesn't track it. See [Stock (kiosco)](#stock-kiosco) for the
+ledger, counts and counter sales.
+
+**Barcodes:** a product may carry the `barcode` the panel's point of sale («Mostrador») reads with a
+USB/Bluetooth scanner (it types the code and Enter, like a keyboard). Optional, trimmed, printable
+ASCII without spaces, up to 64 characters, and **unique per club** (two clubs may share an EAN).
+A scan resolves with `GET /products/by-barcode`; a code nobody has is then linked to an existing
+product (`PATCH`) or creates one (`POST`). The sale and the delivery themselves go through
+`POST /stock/counter-sales` and `POST /stock/purchases`.
+
+### GET /products
+
+Lists the caller's club products, by category and name.
+
+**Auth required:** Yes
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx...",
+    "name": "Agua mineral 500 ml",
+    "priceCents": 200000,
+    "category": "BEBIDA",
+    "isActive": true,
+    "barcode": "7790895000782",
+    "stockQuantity": 9,
+    "lowStockThreshold": 24,
+    "createdAt": "2026-08-01T12:00:00.000Z",
+    "updatedAt": "2026-10-14T15:00:00.000Z"
+  }
+]
+```
+
+`stockQuantity` may be negative: a sale is never blocked for lack of stock, the next count corrects it.
+`barcode` is `null` for products picked by hand.
+
+### GET /products/by-barcode
+
+The product a scanned code belongs to, in the caller's club. Inactive products are returned too
+(with `isActive: false`): the point of sale warns but never refuses what's on the counter.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Query** — `code` (required; trimmed; printable ASCII without spaces, 1..64 chars)
+
+```
+GET /products/by-barcode?code=7790895000782
+```
+
+`200 OK` — the product (same shape as in `GET /products`)
+
+`404 Not Found` — no product of the caller's club has that code (the panel offers to load it)
+
+```json
+{ "statusCode": 404, "message": "No hay ningún producto con el código 7790895000782" }
+```
+
+`400 Bad Request` — `code` missing, blank or not a valid barcode
+
+```json
+{ "statusCode": 400, "message": ["El código de barras no es válido"], "error": "Bad Request" }
+```
+
+### POST /products
+
+Creates a product. Sending `stockQuantity` starts tracking its stock with an `ADJUSTMENT`
+("Stock inicial") in the ledger.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field             | Type    | Required | Constraints                                                     |
+| ----------------- | ------- | -------- | --------------------------------------------------------------- |
+| name              | string  | Yes      | max 100 chars                                                   |
+| priceCents        | number  | Yes      | integer ≥ 0                                                     |
+| category          | string  | No       | `PELOTA` \| `BEBIDA` \| `SNACK` \| `ACCESORIO` \| `OTRO` (default `OTRO`) |
+| isActive          | boolean | No       | default `true`                                                  |
+| barcode           | string  | No       | trimmed; printable ASCII, no spaces, 1..64 chars; unique in the club. Blank/`null` = no code |
+| stockQuantity     | number  | No       | integer 0..100000. Omit to not track stock                      |
+| lowStockThreshold | number  | No       | integer 0..100000 or `null`. `null` = "para comprar" only at 0  |
+
+```json
+{ "name": "Overgrip", "priceCents": 450000, "category": "ACCESORIO", "barcode": "7798123450012", "stockQuantity": 20, "lowStockThreshold": 6 }
+```
+
+`201 Created` — the product (same shape as in `GET /products`)
+
+`400 Bad Request` — validation error
+
+`403 Forbidden` — a `stockQuantity` (starting to track stock) on a plan without kiosk stock.
+
+`409 Conflict` — another product of the club already has that `barcode`
+
+```json
+{ "statusCode": 409, "message": "El código 7790895000782 ya es de «Agua mineral 500 ml»" }
+```
+
+### PATCH /products/:id
+
+Updates a product. A new `stockQuantity` is recorded in the ledger as an `ADJUSTMENT`
+("Corrección desde Productos"); `null` stops tracking stock. A new `lowStockThreshold`
+re-evaluates the low-stock alert flag. Neither sends a push (the owner is the one editing).
+
+**Auth required:** Yes
+
+**Request body** — any subset of the `POST /products` fields; `stockQuantity` also accepts `null`,
+and `barcode: null` (or blank) removes the code.
+
+```json
+{ "lowStockThreshold": 12 }
+```
+
+```json
+{ "barcode": "7790895000782" }
+```
+
+`200 OK` — the updated product
+
+`404 Not Found` — product not in the caller's club
+
+`403 Forbidden` — a `stockQuantity` on a product not tracked yet, on a plan without kiosk stock. Products already tracked keep working.
+
+`409 Conflict` — another product of the club already has that `barcode` (same body as in `POST /products`)
+
+### DELETE /products/:id
+
+**Auth required:** Yes
+
+`204 No Content`
+
+`404 Not Found` — product not in the caller's club
+
+`409 Conflict` — the product was already sold (a consumo or a counter sale points at it); deactivate it instead
+
+```json
+{ "statusCode": 409, "message": "Este producto ya tiene ventas registradas. Desactivalo en lugar de borrarlo." }
+```
+
+## Stock (kiosco)
+
+The kiosk's "entra / sale / queda". Every change writes a `StockMovement` (`PURCHASE` |
+`SALE` | `ADJUSTMENT`, signed `quantity`, `stockAfter`) in the same transaction as the change.
+Consumos loaded on a turno (`PUT /bookings/:id/products`) move stock by the net change of the
+bill. Only tracked products (`stockQuantity` not null) move.
+
+**Low-stock push:** when a tracked product drops to `lowStockThreshold` or below (to `0` when no
+minimum is set) after a sale, a consumo or a count, the club **owner's** devices get one push
+("🛒 Hay que comprar …"). It doesn't repeat until the product is restocked above its minimum.
+
+All endpoints are open to **OWNER and STAFF** (the front desk receives deliveries, counts the
+shelf and sells loose drinks) and scoped to the caller's club.
+
+### POST /stock/purchases
+
+"Entró mercadería": adds one delivery of several products — what the point of sale's «Cargar
+stock» sends once the scanned delivery is confirmed. A product nobody tracked yet starts being
+tracked from the received quantity.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Request body**
+
+| Field             | Type   | Required | Constraints                         |
+| ----------------- | ------ | -------- | ----------------------------------- |
+| items             | array  | Yes      | 1..200 lines                        |
+| items[].productId | string | Yes      | must belong to the caller's club    |
+| items[].quantity  | number | Yes      | integer 1..100000 (repeated products are summed) |
+| note              | string | No       | max 200 chars (supplier, invoice…)  |
+
+```json
+{ "items": [{ "productId": "clx-agua", "quantity": 48 }, { "productId": "clx-coca", "quantity": 24 }], "note": "Distribuidora" }
+```
+
+`201 Created` — the updated products
+
+```json
+[
+  { "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA", "stockQuantity": 57, "lowStockThreshold": 24 },
+  { "id": "clx-coca", "name": "Coca-Cola 500 ml", "category": "BEBIDA", "stockQuantity": 55, "lowStockThreshold": 12 }
+]
+```
+
+`404 Not Found` — a product doesn't exist in the caller's club (nothing is written)
+
+```json
+{ "statusCode": 404, "message": "Producto clx-agua no encontrado" }
+```
+
+`400 Bad Request` — validation error
+
+`403 Forbidden` — the delivery includes a product not tracked yet, on a plan without kiosk stock (it would start tracking it).
+
+### POST /stock/counts
+
+"Contar stock": receives the real quantity of each counted product, stores the difference against
+what the system expected as an `ADJUSTMENT` (a zero difference is logged too) and returns it.
+Products left out aren't touched. Counting a product that wasn't tracked starts tracking it.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Request body**
+
+| Field                   | Type   | Required | Constraints                      |
+| ----------------------- | ------ | -------- | -------------------------------- |
+| items                   | array  | Yes      | 1..200 lines, each product once  |
+| items[].productId       | string | Yes      | must belong to the caller's club |
+| items[].countedQuantity | number | Yes      | integer 0..100000                |
+| note                    | string | No       | max 200 chars                    |
+
+```json
+{ "items": [{ "productId": "clx-agua", "countedQuantity": 7 }, { "productId": "clx-grip", "countedQuantity": 12 }] }
+```
+
+`201 Created` — one result per counted product, in the request order. `difference` = counted − expected
+(negative = faltante); `null` when the product wasn't tracked before this count.
+
+```json
+[
+  { "productId": "clx-agua", "name": "Agua mineral 500 ml", "previousQuantity": 10, "countedQuantity": 7, "difference": -3 },
+  { "productId": "clx-grip", "name": "Overgrip", "previousQuantity": null, "countedQuantity": 12, "difference": null }
+]
+```
+
+`400 Bad Request` — validation error, or the same product twice
+
+```json
+{ "statusCode": 400, "message": "Hay un producto repetido en el conteo" }
+```
+
+`404 Not Found` — a product doesn't exist in the caller's club (nothing is written)
+
+`403 Forbidden` — the count includes a product not tracked yet, on a plan without kiosk stock.
+
+### GET /stock/shopping-list
+
+"Para comprar": active tracked products at or below their minimum (or out of stock when no minimum is set).
+
+**Auth required:** Yes (OWNER or STAFF)
+
+`200 OK`
+
+```json
+[{ "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA", "stockQuantity": 9, "lowStockThreshold": 24 }]
+```
+
+### GET /stock/products/:productId/movements
+
+A product's ledger, newest first.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Query** — `limit` (1..200, default 50)
+
+`200 OK`
+
+```json
+{
+  "product": { "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA", "stockQuantity": 9, "lowStockThreshold": 24 },
+  "movements": [
+    {
+      "id": "clm...",
+      "type": "SALE",
+      "quantity": -2,
+      "stockAfter": 9,
+      "note": "Consumo del turno",
+      "createdAt": "2026-10-14T23:10:00.000Z",
+      "counterSaleId": null,
+      "user": { "id": 2, "name": "Santiago Ríos" },
+      "booking": {
+        "id": "clb...",
+        "playerName": "Martín Gómez",
+        "slot": { "startsAt": "2026-10-14T22:30:00.000Z", "court": { "name": "Cancha 1" } }
+      }
+    },
+    {
+      "id": "clm...",
+      "type": "PURCHASE",
+      "quantity": 48,
+      "stockAfter": 11,
+      "note": "Distribuidora",
+      "createdAt": "2026-10-13T14:00:00.000Z",
+      "counterSaleId": null,
+      "user": { "id": 2, "name": "Santiago Ríos" },
+      "booking": null
+    }
+  ]
+}
+```
+
+`404 Not Found` — product not in the caller's club
+
+### POST /stock/counter-sales
+
+"Venta suelta": kiosk products sold outside any turno (someone buys a drink without playing),
+paid on the spot — the point of sale's «Cobrar» sends the whole scanned ticket here, and undoes it
+line by line with `DELETE /stock/counter-sales/:id`. Each product becomes a counter sale with a
+price snapshot (one ticket's lines share `createdAt`); it counts in
+`GET /stats/revenue` (kiosk revenue + cash/QR of that day) and takes the units out of stock
+when the product is tracked. Never blocked for lack of stock.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Request body**
+
+| Field             | Type   | Required | Constraints                          |
+| ----------------- | ------ | -------- | ------------------------------------ |
+| items             | array  | Yes      | 1..50 lines (repeated products are summed) |
+| items[].productId | string | Yes      | must belong to the caller's club     |
+| items[].quantity  | number | Yes      | integer 1..1000                      |
+| method            | string | Yes      | `CASH` \| `QR` \| `TRANSFER`         |
+
+```json
+{ "items": [{ "productId": "clx-agua", "quantity": 2 }], "method": "CASH" }
+```
+
+`201 Created` — the created sales
+
+```json
+[
+  {
+    "id": "cls...",
+    "quantity": 2,
+    "unitPriceCents": 200000,
+    "method": "CASH",
+    "createdAt": "2026-10-14T21:05:00.000Z",
+    "product": { "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA" },
+    "user": { "id": 2, "name": "Santiago Ríos" }
+  }
+]
+```
+
+`404 Not Found` — a product doesn't exist in the caller's club
+
+```json
+{ "statusCode": 404, "message": "Productos no encontrados: clx-agua" }
+```
+
+### GET /stock/counter-sales
+
+The counter sales of one club-local day, newest first, with totals per payment method.
+
+**Auth required:** Yes (OWNER or STAFF)
+
+**Query** — `date` ("YYYY-MM-DD", default today)
+
+`200 OK`
+
+```json
+{
+  "dateKey": "2026-10-14",
+  "sales": [{ "id": "cls...", "quantity": 2, "unitPriceCents": 200000, "method": "CASH", "createdAt": "2026-10-14T21:05:00.000Z", "product": { "id": "clx-agua", "name": "Agua mineral 500 ml", "category": "BEBIDA" }, "user": { "id": 2, "name": "Santiago Ríos" } }],
+  "totalCents": 400000,
+  "byMethod": { "CASH": 400000, "QR": 0, "TRANSFER": 0 }
+}
+```
+
+`400 Bad Request` — `date` isn't `YYYY-MM-DD`
+
+### DELETE /stock/counter-sales/:id
+
+Undoes a counter sale (wrong product, charged twice…) and puts its units back in stock (a `SALE`
+movement with a positive quantity, "Venta suelta anulada").
+
+**Auth required:** Yes (OWNER or STAFF)
+
+`204 No Content`
+
+`404 Not Found` — sale not in the caller's club (or already undone)
+
+```json
+{ "statusCode": 404, "message": "Venta cls... no encontrada" }
+```
+
 ## Stats reports
 
 ### GET /stats/occupancy
@@ -1373,7 +2561,14 @@ every court. Owner-only. Drives "tus martes 15:00 están al 20%, probá un preci
 
 Money per club-local day in a range: deposits actually collected through the transfer
 flow, kiosk consumption, and front-desk collections — both the legacy aggregate and the
-per-player bill payments (CASH → efectivo; QR/TRANSFER → mostrador digital). Owner-only. The panel exports this as CSV.
+per-player bill payments (CASH → efectivo; QR/TRANSFER → mostrador digital). Counter sales
+(`POST /stock/counter-sales`, no turno) count on the day they happened, both in `productsCents`
+and in the cash/QR of their payment method. Owner-only. The panel exports this as CSV.
+
+**Money collected = `depositCents + cashCents + qrCents`.** `productsCents` is what the kiosk
+sold (turno consumos + counter sales), not a collection channel: the turno's bill includes its
+consumos and is paid at the desk, so once paid the kiosk is already inside cash/QR — adding it
+again counts it twice. A consumo not paid yet is in `productsCents` and in none of the three.
 
 **Auth required:** Yes (OWNER only)
 
@@ -1387,14 +2582,361 @@ per-player bill payments (CASH → efectivo; QR/TRANSFER → mostrador digital).
   "toDateKey": "2026-07-09",
   "totalDepositCents": 1250000,
   "totalProductsCents": 340000,
+  "totalCashCents": 2100000,
+  "totalQrCents": 980000,
   "totalBookings": 84,
-  "days": [{ "dateKey": "2026-07-08", "depositCents": 25000, "productsCents": 8000, "bookings": 3 }]
+  "days": [
+    {
+      "dateKey": "2026-07-08",
+      "depositCents": 25000,
+      "productsCents": 8000,
+      "cashCents": 60000,
+      "qrCents": 32000,
+      "bookings": 3
+    }
+  ]
 }
 ```
 
 **Weekly digest:** every Monday 09:05 (club timezone) each club's staff devices get a
 push with last week's numbers (turnos, % ocupación, señas, turnos vendidos por el bot).
 Skipped for clubs with zero bookings that week. Gated by `RUN_SCHEDULER`.
+
+## Staff help (`/help`)
+
+In-context help for the panel: the "Tu primer día" checklist, the club's own house rules,
+the log of help searches that found nothing and which "Novedades" each user has seen. The help
+content itself (the desk and owner questions, the on-screen "Mostrame" guides and the news
+entries) lives in the panel (`front/src/features/help/content`), not in the API.
+
+**How the checklist ticks.** Each task is derived from what that user really did, never from a
+"ya lo leí": `booking` from a `Booking` with `bookedByUserId` = the user; the other four from
+`UserFirstAction`, written once per user by `DeskActionInterceptor` after these endpoints
+succeed (marked with `@RecordsDeskAction`):
+
+| Task          | Endpoint                                   | Counts when                 |
+| ------------- | ------------------------------------------ | --------------------------- |
+| `consumption` | `PUT /bookings/:id/products`               | `items` is not empty        |
+| `deskPayment` | `POST /bookings/:id/payments`              | always                      |
+| `deskPayment` | `PATCH /bookings/:id/local-payment`        | `amountCents` > 0           |
+| `deposit`     | `PATCH /bookings/:id/confirm-payment`      | always                      |
+| `reschedule`  | `PATCH /bookings/:id/reschedule`           | always                      |
+
+Recording never changes or fails the response of those endpoints.
+
+### GET /help/first-day
+
+The caller's "Tu primer día" checklist (any role; the panel shows it to STAFF).
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — tasks in the order the panel teaches them. `dismissedAt` is when the user closed
+the card on the Resumen (null = still showing while incomplete).
+
+```json
+{
+  "tasks": [
+    { "id": "booking", "done": true },
+    { "id": "consumption", "done": false },
+    { "id": "deskPayment", "done": true },
+    { "id": "deposit", "done": false },
+    { "id": "reschedule", "done": false }
+  ],
+  "doneCount": 2,
+  "total": 5,
+  "complete": false,
+  "dismissedAt": null
+}
+```
+
+`401 Unauthorized` — no or invalid token.
+
+```json
+{ "statusCode": 401, "message": "Unauthorized" }
+```
+
+### POST /help/first-day/dismiss
+
+Closes the checklist card on the caller's Resumen. The checklist stays reachable from the "?"
+help.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+{ "dismissedAt": "2026-10-14T19:05:00.000Z" }
+```
+
+### GET /help/first-day/team
+
+Every STAFF member's checklist progress, for the owner's team table ("4 de 5"). **Owner only.**
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  { "userId": 12, "done": ["booking", "deskPayment", "deposit", "reschedule"], "doneCount": 4, "total": 5 },
+  { "userId": 15, "done": [], "doneCount": 0, "total": 5 }
+]
+```
+
+`403 Forbidden` — the caller is not the club owner.
+
+```json
+{ "statusCode": 403, "message": "Solo el dueño del club puede hacer esto" }
+```
+
+### GET /help/house-rules
+
+The club's "reglas de la casa": its own desk questions and answers, in the owner's order. Shown
+next to the built-in answers in the panel's "?" help. Never reaches the bot or the players.
+Empty array when none are loaded.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  { "question": "¿Quién abre los domingos?", "answer": "Lucas. La llave está en la caja fuerte." },
+  { "question": "¿Se fía a los fijos?", "answer": "No. Si no pueden pagar, avisale al dueño." }
+]
+```
+
+### PATCH /help/house-rules
+
+Replaces the whole list (edited as a set from Configuración → Equipo). **Owner only.** Blank
+entries are dropped; order is preserved.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field              | Type   | Required | Constraints  |
+| ------------------ | ------ | -------- | ------------ |
+| entries            | array  | Yes      | Max 40 items |
+| entries[].question | string | Yes      | 2–160 chars  |
+| entries[].answer   | string | Yes      | 1–400 chars  |
+
+```json
+{
+  "entries": [{ "question": "¿Quién abre los domingos?", "answer": "Lucas. La llave está en la caja fuerte." }]
+}
+```
+
+**Responses**
+
+`200 OK` — the saved (cleaned) list.
+
+```json
+[{ "question": "¿Quién abre los domingos?", "answer": "Lucas. La llave está en la caja fuerte." }]
+```
+
+`400 Bad Request` — validation failed (e.g. an answer over 400 chars).
+
+```json
+{ "statusCode": 400, "message": ["entries.0.answer must be shorter than or equal to 400 characters"], "error": "Bad Request" }
+```
+
+`403 Forbidden` — the caller is not the club owner.
+
+```json
+{ "statusCode": 403, "message": "Solo el dueño del club puede hacer esto" }
+```
+
+### POST /help/search-misses
+
+Counts a "?" help search that found nothing, per club and normalized text (lowercase, no
+accents or punctuation, max 80 chars). Searches under 3 characters, or with a run of 6+ digits
+(a phone or a DNI typed in the wrong box), are ignored rather than stored. The panel debounces
+and sends each distinct search once; the route is also rate-limited (20/min per IP).
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field | Type   | Required | Constraints |
+| ----- | ------ | -------- | ----------- |
+| query | string | Yes      | 1–120 chars |
+
+```json
+{ "query": "¿Cómo cierro la caja?" }
+```
+
+**Responses**
+
+`200 OK` — `recorded` is false when the search was ignored.
+
+```json
+{ "recorded": true }
+```
+
+`429 Too Many Requests` — over the rate limit.
+
+```json
+{ "statusCode": 429, "message": "ThrottlerException: Too Many Requests" }
+```
+
+### GET /help/news/seen
+
+The newest "Novedades" entry the caller has seen (any role; today only the owner's "?" shows
+news). The entries and their order live in the panel (`content/news.ts`, newest first): the
+panel shows a dot on the "?" while its newest id differs from `seenId`. Stored per user, not
+per browser, because the owner opens the panel from several devices.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK` — `seenId` is null until the user opens the news for the first time.
+
+```json
+{ "seenId": "confirmacion-fijos" }
+```
+
+`401 Unauthorized` — no or invalid token.
+
+```json
+{ "statusCode": 401, "message": "Unauthorized" }
+```
+
+### POST /help/news/seen
+
+Marks the news as seen up to `newsId` (the newest entry the panel just showed). The server
+doesn't know the entries: it stores the id as given.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field  | Type   | Required | Constraints                                       |
+| ------ | ------ | -------- | ------------------------------------------------- |
+| newsId | string | Yes      | Lowercase slug: `a-z`, `0-9` and `-`, 1–64 chars |
+
+```json
+{ "newsId": "confirmacion-fijos" }
+```
+
+**Responses**
+
+`200 OK`
+
+```json
+{ "seenId": "confirmacion-fijos" }
+```
+
+`400 Bad Request` — `newsId` is not a slug.
+
+```json
+{ "statusCode": 400, "message": ["newsId must be a lowercase slug of up to 64 characters"], "error": "Bad Request" }
+```
+
+## Mejoras (`/improvements`)
+
+"Mejoras" in the panel and the staff app: the improvements Lumarsoft posts (global, the same for
+every club — only published ones) and the club's own suggestions to us. Open to OWNER and STAFF.
+A club only ever sees its own suggestions. Posting improvements and answering suggestions is done
+from the ops console (`/ops/improvements`, `/ops/improvement-suggestions`) or with
+`npm run improvement:post`.
+
+Improvement `status`: `PLANNED` | `IN_PROGRESS` | `RELEASED`.
+Suggestion `status`: `NEW` | `UNDER_REVIEW` | `PLANNED` | `DONE` | `DECLINED`.
+
+### GET /improvements
+
+Published improvements, newest first.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx…",
+    "title": "Torneos y peñas",
+    "body": "Anotá parejas, cobrá la inscripción y el panel arma zonas…",
+    "status": "RELEASED",
+    "publishedAt": "2026-10-15T12:00:00.000Z"
+  }
+]
+```
+
+`401 Unauthorized` — missing or invalid token.
+
+### GET /improvements/suggestions
+
+The caller's club's suggestions (from any of its users), newest first, with our answer.
+`improvement` is the published improvement that answers it, if any.
+
+**Auth required:** Yes
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx…",
+    "title": "Exportar reservas a Excel",
+    "body": "Poder bajar las reservas del mes para el contador",
+    "status": "PLANNED",
+    "opsReply": "¡Buena idea! Lo sumamos para noviembre.",
+    "repliedAt": "2026-10-15T15:00:00.000Z",
+    "createdAt": "2026-10-15T12:00:00.000Z",
+    "authorName": "Ana",
+    "improvement": { "id": "clx…", "title": "Exportar a Excel", "status": "PLANNED" }
+  }
+]
+```
+
+`401 Unauthorized` — missing or invalid token.
+
+### POST /improvements/suggestions
+
+Sends a suggestion to Lumarsoft. Stored as `NEW` and pinged to our ops channel
+(`OPS_ALERT_WEBHOOK_URL`). Rate-limited to 10 per hour.
+
+**Auth required:** Yes
+
+**Request body**
+
+| Field   | Type   | Required | Constraints      |
+| ------- | ------ | -------- | ---------------- |
+| `title` | string | Yes      | 3–120 characters |
+| `body`  | string | Yes      | 10–2000 chars    |
+
+```json
+{ "title": "Exportar reservas a Excel", "body": "Poder bajar las reservas del mes para el contador" }
+```
+
+**Responses**
+
+`201 Created` — the suggestion, same shape as in `GET /improvements/suggestions`.
+
+`400 Bad Request` — validation failed.
+
+```json
+{ "statusCode": 400, "message": ["title must be longer than or equal to 3 characters"], "error": "Bad Request" }
+```
+
+`429 Too Many Requests` — more than 10 in an hour.
+
+---
 
 ## Payments (Webhooks)
 
@@ -1403,6 +2945,8 @@ Deposits are paid by bank transfer to the club's MercadoPago alias/CVU. An incom
 ### POST /webhooks/mercadopago
 
 MercadoPago IPN webhook. The `x-signature` HMAC is verified, the payment is fetched from the MP API, and the booking is reconciled: by `external_reference` for legacy checkout payments, or by exact amount for incoming transfers.
+
+The signature is HMAC-SHA256 with `WEBHOOK_SECRET` over MercadoPago's manifest `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` — trailing `;` included, `data.id` (from the URL's `data.id`, else the body's) lowercased, and any part MercadoPago didn't send left out.
 
 **Auth required:** No (verified via `x-signature` header)
 
@@ -1507,7 +3051,9 @@ No HTTP surface — the waitlist lives inside the bot flow:
 
 1. When a requested day has no availability, the bot offers: "respondé *avisame* y te
    escribo apenas se libere un turno ese día". Answering joins `WaitlistEntry`
-   (club + phone + dateKey, deduped).
+   (club + phone + dateKey, deduped). The offer depends on the club's plan (Bandeja and up,
+   or a club that predates the plans); without it the full-day reply just asks for another
+   date. Players already on a list are notified either way.
 2. Whenever a slot frees (panel cancellation, expired/rejected pending) a `slot.freed`
    event fires and every waitlisted player for that day gets a WhatsApp with the freed
    court/time — throttled to one broadcast per entry per 10 minutes, max 10 recipients.
@@ -1648,10 +3194,11 @@ The signup pipeline — every answer from the `/register` form, plus our sales f
 | Field  | Type   | Required | Constraints                            |
 | ------ | ------ | -------- | -------------------------------------- |
 | status | string | No       | `NEW` \| `CONTACTED` \| `CONVERTED` \| `LOST` — omit for the whole pipeline |
+| due    | string | No       | `today`: the call list instead — open leads (`NEW`/`CONTACTED`) whose `followUpAt` is today or past, oldest date first |
 
 **Responses**
 
-`200 OK` — newest first.
+`200 OK` — newest first (or by `followUpAt` with `due=today`).
 ```json
 [
   {
@@ -1680,6 +3227,11 @@ The signup pipeline — every answer from the `/register` form, plus our sales f
     "internalNotes": null,
     "contactedAt": null,
     "convertedClubId": null,
+    "followUpAt": "2026-07-13T12:00:00.000Z",
+    "lostReason": null,
+    "utmSource": "instagram",
+    "utmMedium": "cpc",
+    "utmCampaign": "verano",
     "createdAt": "2026-07-11T18:00:00.000Z"
   }
 ]
@@ -1701,7 +3253,36 @@ is `null` until we've contacted at least one.
   "last30Days": 4,
   "medianResponseHours": 3.5,
   "byChannel": [{ "value": "REFERRAL", "leads": 3, "converted": 1 }],
-  "byPain": [{ "value": "DEPOSITS", "count": 3 }]
+  "byPain": [{ "value": "DEPOSITS", "count": 3 }],
+  "dueToday": 2,
+  "byCampaign": [{ "value": "verano (instagram / cpc)", "leads": 2, "converted": 1 }],
+  "byLostReason": [{ "value": "PRICE", "count": 1 }]
+}
+```
+
+`dueToday` counts the open leads to call back today or overdue; `byCampaign` groups the leads
+that arrived with UTM parameters (campaign, else source); `byLostReason` the LOST ones by
+`lostReason` (`UNKNOWN` when none was given).
+
+### GET /ops/signup-funnel
+
+Where prospects drop out of `/register`: visits per screen over the last `days` (club-local), in
+flow order, and the leads sent over the same days.
+
+**Auth required:** Yes (ops token)
+
+**Query** — `days` (optional, 1–365, default 30)
+
+`200 OK`
+```json
+{
+  "days": 30,
+  "steps": [
+    { "step": "club", "index": 0, "visits": 40 },
+    { "step": "owner", "index": 1, "visits": 31 },
+    { "step": "sent", "index": 17, "visits": 4 }
+  ],
+  "leads": 4
 }
 ```
 
@@ -1734,9 +3315,14 @@ response-time metric.
 | ------------- | ------ | -------- | ----------------------------------------------- |
 | status        | string | No       | `NEW` \| `CONTACTED` \| `CONVERTED` \| `LOST`   |
 | internalNotes | string | No       | max 4000 chars. Never shown to the prospect.    |
+| followUpAt    | string \| null | No | ISO date-time to call them back; `null` clears it |
+| lostReason    | string \| null | No | with `LOST`: `PRICE` \| `COMPETITOR` \| `NOT_NOW` \| `NO_ANSWER` \| `NOT_A_FIT` \| `OTHER` |
+
+Marking a lead `LOST` clears its `followUpAt`; moving it out of `LOST` clears its `lostReason`.
+Provisioning it (`CONVERTED`) clears the call-back date too.
 
 ```json
-{ "status": "CONTACTED", "internalNotes": "Llamar el lunes, compara con Playtomic." }
+{ "status": "LOST", "lostReason": "PRICE" }
 ```
 
 **Responses**
@@ -1746,6 +3332,19 @@ response-time metric.
 `404 Not Found`
 ```json
 { "message": "Lead no encontrado", "statusCode": 404 }
+```
+
+### DELETE /ops/leads/:id
+
+Deletes a lead for good, only once it's marked `LOST`: a lead we still have to call, or one that
+became a client, can't vanish by a slip. Its answers stop counting in the channel and pain
+summaries of `GET /ops/leads/summary`.
+
+**Auth required:** Yes (ops token)
+
+`204 No Content` · `404 Not Found` · `409 Conflict` — the lead isn't marked `LOST`
+```json
+{ "message": "Solo se pueden eliminar las solicitudes marcadas como perdidas", "statusCode": 409 }
 ```
 
 ### POST /ops/leads/:id/provision
@@ -1763,6 +3362,7 @@ prospect gave us pre-load the `/setup` wizard, they are not written here.
 | password  | string | Yes      | 8–72 chars. Temporary — the owner changes it on first login. |
 | clubName  | string | No       | 2–80 chars. Defaults to the lead's.                       |
 | ownerName | string | No       | 1–100 chars. Defaults to the lead's.                      |
+| plan      | string | No       | `saque` \| `bandeja` \| `smash`. Defaults to the plan the lead picked, then `saque`. |
 | email     | string | No       | valid email. Defaults to the lead's.                      |
 
 ```json
@@ -1797,9 +3397,11 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
     "name": "Club Demo Pádel",
     "slug": "club-demo",
     "createdAt": "2026-06-21T20:30:28.969Z",
+    "isDemo": false,
+    "health": { "status": "trialEnding", "reasons": ["La prueba termina en 3 días"] },
     "subscription": {
       "subscriptionStatus": "TRIAL",
-      "plan": "base",
+      "plan": "saque",
       "trialEndsAt": null,
       "currentPeriodEnd": null,
       "severity": "trial",
@@ -1822,10 +3424,32 @@ opened the panel in 14 days (trial clubs are exempt — they haven't had time).
       "lastPanelLoginAt": "2026-07-11T14:02:00.000Z",
       "dormant": false
     },
-    "llmCostMicroUsd": 41230
+    "llmCostMicroUsd": 41230,
+    "plan": {
+      "name": "Saque",
+      "known": true,
+      "courts": { "used": 2, "limit": 2 },
+      "users": { "used": 1, "limit": 2 },
+      "aiCredits": { "used": 830, "limit": 1000, "percent": 83, "paused": false },
+      "grandfatheredFeatures": true
+    }
   }
 ]
 ```
+
+`health` is one word per club, the most urgent that applies (`lib/club-health.ts`), with every
+signal behind it in `reasons`: `inactive` (the bot no longer answers) · `botPaused` (used up its
+plan's credits this month: the bot is paused) · `atRisk` (lapsed, nobody opens the panel in 14
+days, or a live club whose bot booked nothing in 30 days) · `trialEnding` (5 days or less) · `setup` (can't take a
+booking: no courts, payments or WhatsApp) · `starting` (trial, already live) · `healthy`. Rows come
+sorted by that urgency, the sales demo (`isDemo`) last.
+
+`plan.aiCredits` is this calendar month (club-local): one credit per WhatsApp message the bot
+sends; at 100% the bot is paused (`paused`) until the club moves to a bigger plan or the month
+turns. A job every 5 minutes posts to `OPS_ALERT_WEBHOOK_URL` when a club crosses 80%, 90%, 95% and
+100% of its plan's credits (once each per month, the sales demo excluded), naming the plan to
+offer, and pushes the club too. A send Meta refuses for payment (Graph code 131042) also alerts
+ops, once an hour per number, because the bot is mute on that number until it's fixed.
 
 ### PATCH /ops/clubs/:id/subscription
 
@@ -1839,8 +3463,9 @@ Manual billing from the UI — the same thing `npm run subscription` does from t
 | ------ | ------ | -------- | ----------------------------------------------------------- |
 | status | string | Yes      | `TRIAL` \| `ACTIVE` \| `PAST_DUE` \| `CANCELLED`            |
 | months | number | No       | 1–24. With `ACTIVE`: paid months from now. Default 1.       |
-| days   | number | No       | 1–180. With `TRIAL`: trial days from now. Default 14.       |
-| plan   | string | No       | max 40 chars (`base` / `pro`).                              |
+| days   | number | No       | 1–180. With `TRIAL`: trial days from now. Default 15.       |
+| plan   | string | No       | `saque` \| `bandeja` \| `smash`. Resets the month's AI-credit alerts. |
+| grandfatheredFeatures | boolean | No | `false` once a plan is agreed with a club that predates the plans: from then on it gets only its plan's modules. |
 
 ```json
 { "status": "ACTIVE", "months": 1 }
@@ -1852,7 +3477,7 @@ Manual billing from the UI — the same thing `npm run subscription` does from t
 ```json
 {
   "subscriptionStatus": "ACTIVE",
-  "plan": "base",
+  "plan": "bandeja",
   "trialEndsAt": null,
   "currentPeriodEnd": "2026-08-10T21:00:00.000Z",
   "severity": "ok",
@@ -1865,6 +3490,56 @@ Manual billing from the UI — the same thing `npm run subscription` does from t
 ```json
 { "message": "Club no encontrado", "statusCode": 404 }
 ```
+
+### GET /ops/clubs/:id
+
+The club's ficha: the same row as `GET /ops/clubs` (`club`), our notes on it (`opsNotes`), the
+signup it was provisioned from (`lead`, with its channel and campaign), and the last 6 months
+(oldest first): credits used against the plan, bookings by the bot and from the panel, and what
+it left us (revenue net of IVA as inscripto, Meta + OpenAI cost, margin), like `GET /ops/profitability`.
+
+**Auth required:** Yes (ops token)
+
+`200 OK`
+```json
+{
+  "club": { "id": "clx…", "name": "Padel Norte", "health": { "status": "healthy", "reasons": [] } },
+  "opsNotes": "Paga por transferencia el 5. Hablar con Lucía.",
+  "lead": {
+    "id": "clx…",
+    "createdAt": "2026-09-02T14:00:00.000Z",
+    "contactedAt": "2026-09-02T16:30:00.000Z",
+    "howFound": "INSTAGRAM",
+    "campaign": "verano (instagram / cpc)",
+    "ownerName": "Lucía",
+    "phone": "5493415550000",
+    "email": "lucia@padelnorte.com"
+  },
+  "months": [
+    {
+      "month": "2026-10",
+      "credits": { "used": 640, "included": 1000 },
+      "bookings": { "bot": 120, "panel": 30 },
+      "revenueCents": 4999900,
+      "costCents": 926000,
+      "marginCents": 4073900,
+      "marginPercent": 81
+    }
+  ]
+}
+```
+
+`404 Not Found` — `{ "message": "Club no encontrado", "statusCode": 404 }`
+
+### PATCH /ops/clubs/:id/notes
+
+Our notes on the club (never shown to it). Empty or `null` clears them.
+
+**Auth required:** Yes (ops token)
+
+**Request body** — `{ "opsNotes": "Paga por transferencia el 5." }` (≤8000 chars, or `null`)
+
+`200 OK` — `{ "opsNotes": "Paga por transferencia el 5." }` · `404 Not Found`
 
 ### GET /ops/clubs/:id/users
 
@@ -1916,7 +3591,8 @@ club out-of-band; it is never stored or emailed in plaintext.
 
 ### GET /ops/metrics/business
 
-MRR, activation, GMV and bot-vs-panel across every club. Last 30 days.
+MRR, activation, GMV and bot-vs-panel across every club, the sales demo left out. Last 30 days,
+and the last 12 months.
 
 **Auth required:** Yes (ops token)
 
@@ -1934,9 +3610,40 @@ provisioned.
   "activation": { "provisioned": 1, "activated": 1, "medianDaysToFirstBooking": 0 },
   "gmvCents": 10000000,
   "bookings": { "bot": 22, "panel": 9 },
-  "series": [{ "date": "2026-07-11", "bot": 3, "panel": 1 }]
+  "series": [{ "date": "2026-07-11", "bot": 3, "panel": 1 }],
+  "months": [
+    {
+      "month": "2026-10",
+      "newClubs": 2,
+      "tracked": true,
+      "mrrCents": 13999800,
+      "paying": 2,
+      "newPaying": 1,
+      "churned": 0,
+      "churnedClubs": []
+    }
+  ]
 }
 ```
+
+`months` (oldest first) comes from `ClubMonthState`: each club's subscription as it stood in a
+month, recorded every day at 23:50, on boot and after every change from the console. `mrrCents`
+and `paying` are the month's close (today, for the current one); `newPaying` / `churned` compare
+with the month before (`null` when that month wasn't recorded); `churnedClubs` names who stopped
+paying. Months before the recording started have `tracked: false` and only `newClubs`
+(from `Club.createdAt`).
+
+### GET /ops/weekly-summary
+
+The text of the summary posted to `OPS_ALERT_WEBHOOK_URL` every Monday at 9:00 (club-local) about
+the previous seven days: new leads by channel, contacted, overdue and to call back today, signup
+started vs sent, clubs paying and on trial with the recurring revenue against last month, new
+clubs, clubs with the bot paused, at risk or with the trial ending, and bot vs panel bookings.
+The sales demo is left out. This endpoint previews what the next one would say.
+
+**Auth required:** Yes (ops token)
+
+`200 OK` — `{ "text": "📊 *Resumen semanal de GTP* — 5 al 11 de octubre\n…" }`
 
 ### GET /ops/metrics/bot
 
@@ -1970,6 +3677,83 @@ took over). Costs are in **micro-USD** (integers; 1e-6 USD) and come from `LlmUs
 }
 ```
 
+
+### GET /ops/profitability
+
+Per club and month: what it pays us (its plan), what serving it costs (Meta's WhatsApp messages +
+OpenAI), and the margin. IVA follows Lumarsoft's `TAX_REGIME`: `monotributo` (default) keeps the
+whole price as revenue and adds the 21% IVA on digital services (Meta, OpenAI) to the costs;
+`inscripto` takes the 21% IVA out of the prices instead. `revenue.grossCents` is what the club
+actually paid, `revenue.totalCents` what it leaves us.
+`breakdown` walks the month's totals step by step (real clubs only): AI steps, tokens and the
+model's price per million tokens; Meta messages free vs billed; and the pesos per dollar actually
+paid (`effectiveRate`: the quote, plus 21% IVA on monotributo). Worst first: losses (`negative`),
+then thin margins (`low`, under 30%), then the rest. `noRevenue` marks a club that costs money
+without paying yet (trial). The sales demo is listed (`isDemo`) but left out of `totals`.
+
+Meta is estimated as Lumarsoft pays it: service messages (bot and staff replies) past the first
+1.000 of each number in the month, plus every utility template, at `META_MESSAGE_PRICE_USD`
+(default 0.025). Dollars become pesos at the month's last stored quote of `USD_ARS_QUOTE`
+(`oficial` by default, since Lumarsoft pays in dollars; fetched daily from dolarapi.com; `usdArs.source` says if it fell back to
+`USD_ARS_RATE` or the built-in rate). Plan revenue uses each
+club's **current** plan and status (`ACTIVE` / `PAST_DUE` pay; trial and cancelled don't) and
+`PLAN_PRICE_<KEY>_CENTS`, so a past month is an approximation.
+
+**Auth required:** Yes (ops token)
+
+**Query** — `month` (optional, `YYYY-MM`; default the current month)
+
+`200 OK`
+```json
+{
+  "month": "2026-10",
+  "metaMessagePriceUsd": 0.025,
+  "usdArs": { "rate": 1530, "quote": "oficial", "source": "dolarapi", "dateKey": "2026-10-15", "stale": false },
+  "taxRegime": "monotributo",
+  "breakdown": {
+    "ai": {
+      "model": "gpt-6-luna",
+      "inputPerMTokUsd": 0.1,
+      "outputPerMTokUsd": 0.5,
+      "priceEstimated": false,
+      "steps": 1800,
+      "inputTokens": 4500000,
+      "outputTokens": 300000,
+      "costUsd": 0.6
+    },
+    "meta": { "messages": 1600, "free": 1000, "paid": 600, "costUsd": 15 },
+    "effectiveRate": 1851.3
+  },
+  "totals": {
+    "grossRevenueCents": 4999900,
+    "revenueCents": 4999900,
+    "costCents": 2640000,
+    "metaCents": 2340000,
+    "aiCents": 300000,
+    "marginCents": 2359900,
+    "marginPercent": 47,
+    "messages": { "total": 1600, "free": 1000, "paid": 600 }
+  },
+  "clubs": [
+    {
+      "id": "clx…",
+      "name": "Padel Norte",
+      "plan": "Saque",
+      "subscriptionStatus": "ACTIVE",
+      "isDemo": false,
+      "revenue": { "grossCents": 4999900, "totalCents": 4999900 },
+      "messages": { "total": 1600, "free": 1000, "paid": 600 },
+      "cost": { "metaCents": 2340000, "aiCents": 300000, "totalCents": 2640000 },
+      "marginCents": 2359900,
+      "marginPercent": 47,
+      "flag": null,
+      "credits": { "used": 1500, "included": 1000 }
+    }
+  ]
+}
+```
+
+`400 Bad Request` — `month` not `YYYY-MM`
 ### GET /ops/health
 
 Everything that needs a human, across every club. **An empty `issues` array means nothing is
@@ -1982,7 +3766,8 @@ wrong** — the screen is a to-do list, not a wall of green ticks.
 `200 OK` — `poller` is the reconciliation poller's in-memory state (meaningful on the instance
 running the scheduler, see `RUN_SCHEDULER`). Issue kinds: `POLLER_DOWN`, `CLUB_MP_FAILING`,
 `STUCK_PENDING`, `RECEIPT_AWAITING_REVIEW`, `MP_TOKEN_EXPIRING`, `ADVISOR_WAITING`,
-`CLUB_NOT_LIVE`. Critical ones sort first.
+`CLUB_NOT_LIVE`, `BOT_PAUSED_NO_CREDITS` (critical: the club used up its month's credits and its
+bot is paused; names the plan to offer). Critical ones sort first.
 ```json
 {
   "poller": {
@@ -2005,3 +3790,172 @@ running the scheduler, see `RUN_SCHEDULER`). Issue kinds: `POLLER_DOWN`, `CLUB_M
   "checkedAt": "2026-07-11T21:06:58.317Z"
 }
 ```
+
+### GET /ops/help/search-misses
+
+What the clubs' desk staff searched in the panel's "?" help without finding an answer — the
+to-do list for the next round of help content. Last 90 days, most searched first, top 50.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "query": "como cierro la caja",
+    "count": 4,
+    "lastSearchedAt": "2026-10-14T19:05:00.000Z",
+    "clubId": "clx…",
+    "clubName": "Club Demo Pádel"
+  }
+]
+```
+
+`401 Unauthorized` — missing or invalid ops token.
+
+```json
+{ "statusCode": 401, "message": "Unauthorized" }
+```
+
+### GET /ops/improvements
+
+Every improvement we posted, drafts (`publishedAt: null`) first, then newest published.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx…",
+    "title": "Exportar a Excel",
+    "body": "…",
+    "status": "PLANNED",
+    "publishedAt": null,
+    "createdAt": "2026-10-15T12:00:00.000Z",
+    "updatedAt": "2026-10-15T12:00:00.000Z",
+    "suggestionCount": 3
+  }
+]
+```
+
+`401 Unauthorized` — missing or invalid ops token.
+
+### POST /ops/improvements
+
+Posts an improvement for every club. Without `published: true` it's saved as a draft.
+
+**Auth required:** Yes (ops token)
+
+**Request body**
+
+| Field       | Type    | Required | Constraints                                   |
+| ----------- | ------- | -------- | --------------------------------------------- |
+| `title`     | string  | Yes      | 3–120 characters                              |
+| `body`      | string  | Yes      | 1–5000 characters                             |
+| `status`    | string  | No       | `PLANNED` \| `IN_PROGRESS` \| `RELEASED` (default) |
+| `published` | boolean | No       | `true` publishes it now                       |
+
+```json
+{ "title": "Exportar a Excel", "body": "…", "status": "RELEASED", "published": true }
+```
+
+**Responses**
+
+`201 Created` — the improvement, same shape as in `GET /ops/improvements`.
+
+`400 Bad Request` — validation failed.
+
+### PATCH /ops/improvements/:id
+
+Edits an improvement. `published: true` publishes a draft (a published one keeps its first
+date); `published: false` takes it back to draft.
+
+**Auth required:** Yes (ops token)
+
+**Request body** — any of `title`, `body`, `status`, `published` (same constraints as POST).
+
+**Responses**
+
+`200 OK` — the improvement.
+
+`404 Not Found`
+
+```json
+{ "statusCode": 404, "message": "Mejora no encontrada", "error": "Not Found" }
+```
+
+### DELETE /ops/improvements/:id
+
+Deletes an improvement. Linked suggestions keep their status and reply; only the link goes.
+
+**Auth required:** Yes (ops token)
+
+**Responses**
+
+`204 No Content`
+
+`404 Not Found` — `"Mejora no encontrada"`.
+
+### GET /ops/improvement-suggestions
+
+The clubs' suggestions, across clubs: `NEW` first, then `UNDER_REVIEW`, `PLANNED`, `DONE`,
+`DECLINED`; newest first within each. Last 200.
+
+**Auth required:** Yes (ops token)
+
+**Query** — `status` (optional): one of the suggestion statuses.
+
+**Responses**
+
+`200 OK`
+
+```json
+[
+  {
+    "id": "clx…",
+    "title": "Exportar reservas a Excel",
+    "body": "…",
+    "status": "NEW",
+    "opsReply": null,
+    "repliedAt": null,
+    "createdAt": "2026-10-15T12:00:00.000Z",
+    "clubId": "clx…",
+    "clubName": "Club Demo Pádel",
+    "authorName": "Ana",
+    "authorEmail": "ana@club.com",
+    "improvement": null
+  }
+]
+```
+
+### PATCH /ops/improvement-suggestions/:id
+
+Answers a suggestion. Replying to a `NEW` one without a `status` moves it to `UNDER_REVIEW`.
+`null` clears `opsReply` / `improvementId`.
+
+**Auth required:** Yes (ops token)
+
+**Request body**
+
+| Field           | Type           | Required | Constraints                        |
+| --------------- | -------------- | -------- | ---------------------------------- |
+| `status`        | string         | No       | a suggestion status                |
+| `opsReply`      | string \| null | No       | 1–2000 characters; shown to the club |
+| `improvementId` | string \| null | No       | an existing improvement            |
+
+```json
+{ "status": "PLANNED", "opsReply": "¡Buena idea! Lo sumamos para noviembre.", "improvementId": "clx…" }
+```
+
+**Responses**
+
+`200 OK` — the suggestion, same shape as in the list.
+
+`404 Not Found` — `"Propuesta no encontrada"` or `"Mejora no encontrada"`.

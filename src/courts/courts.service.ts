@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule'
 import { Prisma } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { SlotPricingService } from '../pricing/slot-pricing.service'
+import { PlansService } from '../plans/plans.service'
 import { parseWeeklyHours, WeeklyHours } from '../availability/lib/schedule'
 import { todayKey } from '../availability/lib/datetime'
 import { schedulerEnabled } from '../common/scheduling'
@@ -33,6 +34,7 @@ export class CourtsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly slotPricing: SlotPricingService,
+    private readonly plans: PlansService,
   ) {}
 
   findAll(clubId: string) {
@@ -54,8 +56,9 @@ export class CourtsService {
     return court
   }
 
-  create(clubId: string, dto: CreateCourtDto) {
+  async create(clubId: string, dto: CreateCourtDto) {
     const weeklyHours = this.validateWeeklyHours(dto.weeklyHours)
+    await this.plans.assertCanAddCourt(clubId)
     return this.prisma.court.create({
       data: {
         name: dto.name,
@@ -120,6 +123,9 @@ export class CourtsService {
     // A future effective date SCHEDULES the change ("desde el 1/8 sube 10%") — in
     // Argentina los aumentos se anuncian antes de que rijan. Applied by applyDueAdjustments.
     if (!dto.dryRun && dto.effectiveDate && dto.effectiveDate > todayKey()) {
+      // Scheduling is the plan's module; raising prices today is open to every plan, and the
+      // adjustments already scheduled still apply on their day.
+      await this.plans.assertFeature(clubId, 'scheduledPriceAdjustments')
       const scheduled = await this.prisma.scheduledPriceAdjustment.create({
         data: { clubId, percent: dto.percent, effectiveDateKey: dto.effectiveDate },
         select: { id: true, percent: true, effectiveDateKey: true },

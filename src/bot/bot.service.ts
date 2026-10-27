@@ -1,6 +1,8 @@
 import { ForbiddenException, Injectable, Logger } from '@nestjs/common'
+import { DepositMode, PaymentVerificationMode } from 'generated/prisma/client'
+import { dniFromIdentification } from '../common/identity'
 import { PrismaService } from '../prisma/prisma.service'
-import { BookingsService } from '../bookings/bookings.service'
+import { BookingsService, NoShowReviewRequiredException, PendingBookingResult } from '../bookings/bookings.service'
 import { AvailabilityService } from '../availability/availability.service'
 import {
   dayLabelFromKey,
@@ -14,10 +16,18 @@ import {
   weekdayOfKey,
 } from '../availability/lib/datetime'
 import { LlmService } from '../llm/llm.service'
-import { ConversationSessionService, keepName } from './conversation-session.service'
+import { ConversationSessionService, SessionSnapshot, keepName } from './conversation-session.service'
 import { matchByTime, matchCourt, matchSlot } from './lib/match'
 import { parseDateExpression } from './lib/date-parse'
 import { stepPrompt } from './lib/step-prompt'
+import {
+  competitionClosed,
+  competitionsResult,
+  matchCompetition,
+  signupAlreadyRequested,
+  signupRequested,
+  toCompetitionOptions,
+} from './lib/competitions'
 import {
   assignCheapestForBand,
   availabilityResult,
@@ -30,7 +40,9 @@ import { PART_OF_DAY_NAMES, bandsInPart, parsePartOfDay } from './lib/part-of-da
 import { subscriptionSelect, subscriptionState } from '../clubs/lib/subscription'
 import { WaitlistService } from '../waitlist/waitlist.service'
 import { PlayersService } from '../players/players.service'
-import { NotificationsService } from '../notifications/notifications.service'
+import { NotificationsService, PushPayload } from '../notifications/notifications.service'
+import { CreditsService } from '../plans/credits.service'
+import { CompetitionSignupsService } from '../competitions/competition-signups.service'
 import { WhatsAppMediaService } from '../whatsapp/whatsapp-media.service'
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import {
@@ -44,10 +56,14 @@ import {
 } from './types'
 import {
   ASK_DATE,
-  ASK_DNI,
   ASK_NAME,
   BAD_DNI,
+  ATTACHMENT_NO_DEPOSIT,
   ATTACHMENT_NO_PENDING,
+  SKIP_DNI_INTENT,
+  DNI_NOTED,
+  receiptLinkedAck,
+  AUDIO_NOT_UNDERSTOOD,
   BOOKING_ABORTED,
   BOOKING_FAILED,
   NO_UPCOMING_BOOKINGS,
@@ -62,11 +78,13 @@ import {
   RECEIPT_CLAIM_ASK_PHOTO,
   TECHNICAL_ERROR,
   askRescheduleDate,
+  bookingConfirmedNoDeposit,
   composeBotReply,
   confirmBooking,
   dayAvailabilityList,
   myBookingsList,
   noAvailabilityWithSuggestions,
+  noShowReviewRequested,
   rescheduleConfirm,
   rescheduleDone,
   rescheduleRequested,
@@ -76,6 +94,7 @@ import {
   thanksReply,
   transferPending,
   welcome,
+  creditsPausedNotice,
 } from './messages'
 
 /** Inbound messages are truncated to this length before processing (cost / abuse guard). */
@@ -106,6 +125,12 @@ const MY_BOOKINGS_INTENT =
 const HUMAN_HANDOFF_INTENT =
   /\bhablar con (una |un )?(persona|humano|alguien|encargad[oa]|due[nñ]o|operador|asesor|agente)\b|\b(con |una )?persona (real|de verdad)\b|\batenci[oó]n humana\b|\bun humano\b|\bquiero (hablar|comunicarme) con (alguien|una persona|un humano)\b/i
 
+/**
+ * "¿Hay algún torneo?", "quiero anotarme a la peña" — answered from the club's open events, no
+ * LLM. Only "peña" with ñ: "pena" is mostly "qué pena".
+ */
+const COMPETITIONS_INTENT = /\btorneos?\b|\bpeñas?\b|\bamericanos?\b|\binscrib(o|ir(me|nos)?)\b/i
+
 @Injectable()
 export class BotService {
   private readonly logger = new Logger(BotService.name)
@@ -121,6 +146,8 @@ export class BotService {
     private readonly waitlist: WaitlistService,
     private readonly players: PlayersService,
     private readonly notifications: NotificationsService,
+    private readonly credits: CreditsService,
+    private readonly competitionSignups: CompetitionSignupsService,
   ) {}
 
   async handleMessage(waId: string, clubId: string, body: string): Promise<BotReply | null> {
@@ -140,9 +167,12 @@ export class BotService {
     const blockedReply = await this.subscriptionBlockedReply(clubId)
     if (blockedReply) return blockedReply
 
-    const session = await this.sessionService.getOrCreate(waId, clubId)
     // Cap length so a pathologically long message can't bloat the LLM prompt / cost.
     const msg = body.trim().slice(0, MAX_MESSAGE_LENGTH)
+    const paused = await this.creditsPausedReply(waId, clubId, msg)
+    if (paused) return paused.reply
+
+    const session = await this.sessionService.getOrCreate(waId, clubId)
 
     this.logger.log(`📥 IN  ${waId} [${session.state}]: ${logSnippet(msg)}`)
 
@@ -161,10 +191,7 @@ export class BotService {
     // speak to the player MUST sit below this guard: an admin who took over the chat is
     // mid-conversation with the player, and a bot message on top of theirs is a mess only
     // the club can clean up.
-    if (session.mode === 'HUMAN') {
-      this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
-      return null
-    }
+    if (await this.isHumanHandled(session, waId)) return null
 
     // Explicit "quiero hablar con una persona" → hand the chat to staff and go quiet, so the
     // player never gets stuck talking to a bot they've asked to get past.
@@ -188,13 +215,22 @@ export class BotService {
     const state = session.state as BotState
     const isMenuState = state === BotState.MENU || state === BotState.IDLE
 
+    // A bare DNI while a deposit is pending: it identifies who will transfer, so the poller
+    // can match the payment. Optional — the receipt photo does the same job.
+    if (isMenuState) {
+      const dniReply = await this.pendingDniReply(clubId, waId, msg)
+      if (dniReply) {
+        await this.sessionService.saveMessage(session.id, 'BOT', dniReply)
+        return { text: dniReply }
+      }
+    }
+
     // "Ya transferí" / "te mando el comprobante" after booking: acknowledge and let the
     // poller confirm the real money — never from a claim.
     const result =
       (await this.repeatFlowResult(msg, state, session.context, clubId, waId)) ??
-      (isPaymentClaim(msg) && isMenuState
-        ? await this.paymentClaimReply(clubId, waId, session.context)
-        : await this.dispatch(state, msg, session.context, clubId, waId))
+      (isPaymentClaim(msg) && isMenuState ? await this.paymentClaimReply(clubId, waId, session.context) : null) ??
+      (await this.dispatch(state, msg, session.context, clubId, waId))
 
     // What the bot actually said (answer + step prompt) — the history and the admin's chat
     // view must show that, not just the step prompt.
@@ -236,31 +272,131 @@ export class BotService {
     const blockedReply = await this.subscriptionBlockedReply(clubId)
     if (blockedReply) return blockedReply
 
+    // Without a booking waiting for its deposit, an image is not a receipt: read it instead.
+    const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
+    if (!pending) {
+      // A receipt for a pending booking still goes through (that money is moving); anything
+      // else waits for the staff while the bot is paused.
+      const paused = await this.creditsPausedReply(waId, clubId, '[Imagen]')
+      if (paused) return paused.reply
+      const answered = await this.replyToImage(waId, clubId, media)
+      if (answered) return answered
+    }
+
     const session = await this.sessionService.getOrCreate(waId, clubId)
     this.logger.log(`📥 IN  ${waId}: [imagen/comprobante ${media?.mimeType ?? 'desconocido'}]`)
     await this.sessionService.saveMessage(session.id, 'USER', '[Imagen / comprobante recibido]')
 
-    if (session.mode === 'HUMAN') {
-      this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
-      return null
-    }
+    if (await this.isHumanHandled(session, waId)) return null
 
-    const mode = await this.paymentVerificationMode(clubId)
+    const payment = await this.paymentSettings(clubId)
+    // No seña to wait for: an image we couldn't read is not a receipt of anything.
     const reply =
-      mode === 'RECEIPT'
-        ? await this.storeReceipt(waId, clubId, media)
-        : await this.acknowledgeReceiptClaim(clubId, waId)
+      !pending && payment.depositMode === DepositMode.NONE
+        ? ATTACHMENT_NO_DEPOSIT
+        : payment.verificationMode === 'RECEIPT'
+          ? await this.storeReceipt(waId, clubId, media)
+          : await this.acknowledgeReceipt(clubId, waId, media)
 
     await this.sessionService.saveMessage(session.id, 'BOT', reply)
     return { text: reply }
   }
 
-  /** AUTO mode: the poller confirms the money, so we only reassure the player. */
-  private async acknowledgeReceiptClaim(clubId: string, waId: string): Promise<string> {
+  /**
+   * A voice note: transcribed and then handled exactly like the same words typed — so every
+   * flow (booking, cancel, FAQ, LLM fallback) works by audio with no special cases.
+   */
+  async handleAudio(waId: string, clubId: string, media: InboundMedia | null): Promise<BotReply | null> {
+    try {
+      const downloaded = media ? await this.media.download(media.mediaId, media.phoneNumberId) : null
+      const transcript = downloaded
+        ? await this.llmService.transcribeAudio(
+            clubId,
+            waId,
+            downloaded.bytes,
+            downloaded.mimeType || media?.mimeType || 'audio/ogg',
+          )
+        : null
+      if (transcript) return await this.handleMessage(waId, clubId, transcript)
+
+      const paused = await this.creditsPausedReply(waId, clubId, '[Audio]')
+      if (paused) return paused.reply
+
+      const session = await this.sessionService.getOrCreate(waId, clubId)
+      await this.sessionService.saveMessage(session.id, 'USER', '[Audio]')
+      if (await this.isHumanHandled(session, waId)) return null
+      await this.sessionService.saveMessage(session.id, 'BOT', AUDIO_NOT_UNDERSTOOD)
+      return { text: AUDIO_NOT_UNDERSTOOD }
+    } catch (err) {
+      this.logger.error(`Failed to handle audio from ${waId}`, err)
+      return { text: TECHNICAL_ERROR }
+    }
+  }
+
+  /**
+   * An image that isn't a receipt for a pending booking (a flyer, a screenshot of the
+   * schedule…): we let the model describe it and answer that like a typed message. Returns null
+   * when it can't be read, so the caller falls back to the plain acknowledgement.
+   */
+  private async replyToImage(waId: string, clubId: string, media: InboundMedia | null): Promise<BotReply | null> {
+    if (!media || !media.mimeType?.startsWith('image/')) return null
+    const downloaded = await this.media.download(media.mediaId, media.phoneNumberId)
+    if (!downloaded) return null
+    const description = await this.llmService.describeImage(
+      clubId,
+      waId,
+      downloaded.bytes,
+      downloaded.mimeType || media.mimeType,
+      media.caption,
+    )
+    if (!description) return null
+    const text = media.caption
+      ? `${media.caption}\n(El jugador mandó una imagen: ${description})`
+      : `(El jugador mandó una imagen: ${description})`
+    return this.handleMessage(waId, clubId, text)
+  }
+
+  /** Stores a DNI typed while the player's deposit is pending; null when it doesn't apply. */
+  private async pendingDniReply(clubId: string, waId: string, msg: string): Promise<string | null> {
+    if (!/^\s*\d{1,2}\.?\d{3}\.?\d{3}\s*$/.test(msg)) return null
+    const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
+    if (!pending || pending.playerDni) return null
+    const dni = msg.replace(/\D/g, '')
+    await this.bookingsService.recordPendingPlayerDni(pending.id, dni)
+    return DNI_NOTED
+  }
+
+  /**
+   * AUTO mode: the poller confirms the money. If the photo is a readable receipt, we keep who
+   * paid (CUIT/DNI) and the operation number on the booking, so the poller can match the real
+   * MercadoPago transfer even when someone else paid. The photo never confirms on its own.
+   */
+  private async acknowledgeReceipt(clubId: string, waId: string, media: InboundMedia | null): Promise<string> {
     const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
     if (!pending) return ATTACHMENT_NO_PENDING
     const { startsAt, endsAt, court } = pending.slot
-    return paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+
+    const reading = await this.readReceipt(clubId, waId, media)
+    if (!reading) return paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
+
+    await this.bookingsService.recordReceiptReading(pending.id, {
+      payerDni: dniFromIdentification(reading.payerTaxId),
+      operationRef: reading.operationNumber?.replace(/\D/g, '') || null,
+    })
+    const readCents = reading.amount != null ? Math.round(reading.amount * 100) : null
+    const expected = pending.transferAmountCents
+    const mismatch =
+      readCents != null && expected != null && Math.abs(readCents - expected) >= 100
+        ? { expectedCents: expected, readCents }
+        : null
+    return receiptLinkedAck(court.name, startsAt, endsAt, mismatch)
+  }
+
+  private async readReceipt(clubId: string, waId: string, media: InboundMedia | null) {
+    if (!media?.mimeType?.startsWith('image/')) return null
+    const downloaded = await this.media.download(media.mediaId, media.phoneNumberId)
+    if (!downloaded) return null
+    return this.llmService.readTransferReceipt(clubId, waId, downloaded.bytes, downloaded.mimeType || media.mimeType)
   }
 
   /**
@@ -272,7 +408,7 @@ export class BotService {
     if (!pending) return RECEIPT_ATTACHMENT_NO_PENDING
     if (!media) return RECEIPT_ATTACHMENT_FAILED
 
-    const downloaded = await this.media.download(media.mediaId)
+    const downloaded = await this.media.download(media.mediaId, media.phoneNumberId)
     if (!downloaded) return RECEIPT_ATTACHMENT_FAILED
 
     const mimeType = downloaded.mimeType || media.mimeType || 'image/jpeg'
@@ -296,13 +432,18 @@ export class BotService {
     return receiptReceivedAck(court.name, startsAt, endsAt)
   }
 
-  /** The club's payment verification mode (AUTO reconciliation vs manual receipt review). */
-  private async paymentVerificationMode(clubId: string): Promise<'AUTO' | 'RECEIPT'> {
+  /** How the club charges (seña / full / nothing) and verifies it (AUTO reconciliation vs receipt). */
+  private async paymentSettings(
+    clubId: string,
+  ): Promise<{ depositMode: DepositMode; verificationMode: PaymentVerificationMode }> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
-      select: { paymentVerificationMode: true },
+      select: { depositMode: true, paymentVerificationMode: true },
     })
-    return club?.paymentVerificationMode ?? 'AUTO'
+    return {
+      depositMode: club?.depositMode ?? DepositMode.DEPOSIT,
+      verificationMode: club?.paymentVerificationMode ?? PaymentVerificationMode.AUTO,
+    }
   }
 
   /**
@@ -422,15 +563,55 @@ export class BotService {
     }
   }
 
-  /** Builds the "we're waiting for your transfer" reply, keeping the FSM state put. */
-  private async paymentClaimReply(clubId: string, waId: string, ctx: SessionContext): Promise<HandlerResult> {
+  /**
+   * The bot is paused because the club used up its month's credits: the player's message is
+   * kept for the staff (Conversaciones), and the player is told once per conversation that the
+   * club answers by hand — never a silent dead line, never a word about credits. The staff gets
+   * a push with it. Null when the bot isn't paused; `reply: null` = stay quiet.
+   */
+  private async creditsPausedReply(
+    waId: string,
+    clubId: string,
+    playerText: string,
+  ): Promise<{ reply: BotReply | null } | null> {
+    if (!(await this.credits.botPaused(clubId))) return null
+
+    const session = await this.sessionService.getOrCreate(waId, clubId)
+    await this.sessionService.saveMessage(session.id, 'USER', playerText)
+    this.logger.log(`⏸️  ${waId}: bot pausado sin créditos, lo atiende el club`)
+    if (session.mode === 'HUMAN' || session.context.creditsPausedNotified) return { reply: null }
+
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } })
+    const reply = creditsPausedNotice(club?.name ?? 'el club')
+    await this.sessionService.update(session.id, session.state as BotState, {
+      ...session.context,
+      creditsPausedNotified: true,
+    })
+    await this.sessionService.saveMessage(session.id, 'BOT', reply)
+    await this.notifications.notifyClub(clubId, {
+      title: '⏸️ Un jugador escribió y el bot está pausado',
+      body: `Respondele desde Conversaciones (${waId}). Se terminaron los créditos de IA del mes.`,
+      data: { conversationId: session.id },
+    })
+    return { reply: { text: reply } }
+  }
+
+  /**
+   * Builds the "we're waiting for your transfer" reply, keeping the FSM state put. Null when it
+   * doesn't apply: at a club with no seña and nothing pending, "¿hay que transferir?" is a
+   * question for the normal flow, not a payment claim.
+   */
+  private async paymentClaimReply(clubId: string, waId: string, ctx: SessionContext): Promise<HandlerResult | null> {
     const pending = await this.bookingsService.findActivePendingForPlayer(clubId, waId)
-    if (!pending) return { reply: PAYMENT_CLAIM_NO_PENDING, state: BotState.MENU, ctx: keepName(ctx) }
+    const payment = await this.paymentSettings(clubId)
+    if (!pending) {
+      if (payment.depositMode === DepositMode.NONE) return null
+      return { reply: PAYMENT_CLAIM_NO_PENDING, state: BotState.MENU, ctx: keepName(ctx) }
+    }
     const { startsAt, endsAt, court } = pending.slot
     // In RECEIPT mode a text "ya transferí" isn't enough — ask for the receipt photo.
-    const mode = await this.paymentVerificationMode(clubId)
     const reply =
-      mode === 'RECEIPT'
+      payment.verificationMode === 'RECEIPT'
         ? RECEIPT_CLAIM_ASK_PHOTO
         : paymentClaimAck(court.name, startsAt, endsAt, pending.transferAmountCents)
     return { reply, state: BotState.MENU, ctx: keepName(ctx) }
@@ -473,6 +654,8 @@ export class BotService {
         return this.onRescheduleSlot(msg, ctx, clubId, waId)
       case BotState.RESCHEDULE_CONFIRM:
         return this.onRescheduleConfirm(msg, ctx, clubId, waId)
+      case BotState.COMPETITION_PICK:
+        return this.onCompetitionPick(msg, ctx, clubId, waId)
       default:
         return Promise.resolve({ reply: welcome(ctx.playerName), state: BotState.MENU, ctx })
     }
@@ -536,8 +719,55 @@ export class BotService {
   private async onMenu(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     if (msg === '1') return { reply: ASK_DATE, state: BotState.BOOK_DATE, ctx }
     if (msg === '2' || MY_BOOKINGS_INTENT.test(msg)) return this.showMyBookings(clubId, waId, ctx)
+    if (msg === '3' || COMPETITIONS_INTENT.test(msg)) return this.showCompetitions(clubId, ctx)
     // Natural language → LLM interprets intent
     return this.fallback(BotState.MENU, msg, ctx, clubId, waId)
+  }
+
+  /** "Torneos y peñas": the events open for registration, tappable. */
+  private async showCompetitions(clubId: string, ctx: SessionContext): Promise<HandlerResult> {
+    const open = await this.competitionSignups.openForPlayers(clubId)
+    return competitionsResult(toCompetitionOptions(open), ctx)
+  }
+
+  /**
+   * The player picked an event. The bot doesn't register anyone: it records the request, tells
+   * the club and hands the chat to a person ("Pide asesor"), who sorts out the pair and the fee.
+   */
+  private async onCompetitionPick(
+    msg: string,
+    ctx: SessionContext,
+    clubId: string,
+    waId: string,
+  ): Promise<HandlerResult> {
+    const options = ctx.competitionOptions ?? []
+    const option = matchCompetition(msg, options)
+    if (!option) {
+      if (msg === '1' || msg === '2' || isGreeting(msg)) return this.onMenu(msg, ctx, clubId, waId)
+      return this.fallback(BotState.COMPETITION_PICK, msg, ctx, clubId, waId)
+    }
+
+    const request = await this.competitionSignups.request(clubId, {
+      competitionId: option.id,
+      waId,
+      playerName: ctx.playerName,
+    })
+    if (!request) {
+      const refreshed = await this.showCompetitions(clubId, ctx)
+      return { ...refreshed, prefix: competitionClosed(option.name) }
+    }
+
+    const session = await this.prisma.conversationSession.findUnique({
+      where: { waId_clubId: { waId, clubId } },
+      select: { id: true },
+    })
+    if (session) await this.sessionService.requestAdvisor(session.id)
+    this.logger.log(`🏆 ${waId}: pidió anotarse a "${option.name}" — derivado al club`)
+
+    const reply = request.alreadyPending
+      ? signupAlreadyRequested(request.competitionName)
+      : signupRequested(request.competitionName)
+    return { reply, state: BotState.MENU, ctx: { ...keepName(ctx), competitionOptions: undefined } }
   }
 
   /**
@@ -598,13 +828,14 @@ export class BotService {
     }
 
     return {
-      reply: askRescheduleDate(picked.label),
+      reply: askRescheduleDate(picked.label, policy.carriesDeposit),
       state: BotState.RESCHEDULE_DATE,
       ctx: {
         ...keepName(ctx),
         rescheduleBookingId: picked.id,
         rescheduleFromLabel: picked.label,
         rescheduleFromPriceCents: policy.priceCents,
+        rescheduleCarriesDeposit: policy.carriesDeposit,
       },
     }
   }
@@ -626,10 +857,11 @@ export class BotService {
     const bands = await this.availability.availableBandsForDate(clubId, date)
     if (bands.length === 0) {
       const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
+      const offerWaitlist = await this.waitlist.offeredIn(clubId)
       return {
-        reply: noAvailabilityWithSuggestions(date, suggestions),
+        reply: noAvailabilityWithSuggestions(date, suggestions, offerWaitlist),
         state: BotState.RESCHEDULE_DATE,
-        ctx: { ...ctx, waitlistOfferDate: date },
+        ctx: { ...ctx, waitlistOfferDate: offerWaitlist ? date : undefined },
       }
     }
 
@@ -681,7 +913,7 @@ export class BotService {
     const next = assigned.ctx
     const priceDiff = (next.selectedSlotPrice ?? 0) - (ctx.rescheduleFromPriceCents ?? 0)
     return {
-      reply: rescheduleConfirm(ctx.rescheduleFromLabel ?? 'tu turno', next, priceDiff),
+      reply: rescheduleConfirm(ctx.rescheduleFromLabel ?? 'tu turno', next, priceDiff, ctx.rescheduleCarriesDeposit),
       state: BotState.RESCHEDULE_CONFIRM,
       ctx: next,
     }
@@ -712,7 +944,52 @@ export class BotService {
     if (!moved) return { reply: RESCHEDULE_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
 
     this.logger.log(`🔄 ${waId}: movió la reserva ${ctx.rescheduleBookingId}`)
-    return { reply: rescheduleDone(ctx, moved.priceDiffCents), state: BotState.MENU, ctx: keepName(ctx) }
+    return {
+      reply: rescheduleDone(ctx, moved.priceDiffCents, ctx.rescheduleCarriesDeposit),
+      state: BotState.MENU,
+      ctx: keepName(ctx),
+    }
+  }
+
+  /**
+   * The club answered this chat by hand from its WhatsApp Business app (a coexistence echo).
+   * The owner is mid-conversation, so the bot steps aside for OWNER_REPLY_PAUSE_HOURS and then
+   * takes the chat back on its own — unless staff took it over indefinitely from the panel.
+   */
+  async recordOwnerReply(waId: string, clubId: string, text: string): Promise<void> {
+    const session = await this.sessionService.getOrCreate(waId, clubId)
+    await this.sessionService.saveMessage(session.id, 'ADMIN', text)
+    if (session.mode === 'HUMAN' && !session.humanUntil) return
+
+    const until = new Date(Date.now() + ownerReplyPauseHours() * 60 * 60 * 1000)
+    await this.sessionService.setMode(session.id, 'HUMAN', until)
+    this.logger.log(`📱 ${waId}: el club respondió desde el celular, bot en pausa hasta ${until.toISOString()}`)
+  }
+
+  /**
+   * Logs an exchange the bot's FSM didn't run — a tap on a template button, e.g. the fijo's
+   * "Sí, voy" and its answer — so the club's chat view shows it like any other message. Doesn't
+   * touch the session's state, mode or history.
+   */
+  async recordExchange(waId: string, clubId: string, playerText: string, botText: string): Promise<void> {
+    const session = await this.sessionService.getOrCreate(waId, clubId)
+    await this.sessionService.saveMessage(session.id, 'USER', playerText)
+    await this.sessionService.saveMessage(session.id, 'BOT', botText)
+  }
+
+  /**
+   * HUMAN guard shared by every inbound path. A temporary takeover (owner replied from the
+   * phone) that already ran out flips back to AI here, so the bot answers this message.
+   */
+  private async isHumanHandled(session: SessionSnapshot, waId: string): Promise<boolean> {
+    if (session.mode !== 'HUMAN') return false
+    if (session.humanUntil && session.humanUntil.getTime() <= Date.now()) {
+      await this.sessionService.setMode(session.id, 'AI')
+      this.logger.log(`🤖 ${waId}: terminó la pausa por respuesta del club, el bot retoma`)
+      return false
+    }
+    this.logger.log(`🙋 ${waId}: modo HUMANO, el bot no responde`)
+    return true
   }
 
   /**
@@ -725,6 +1002,7 @@ export class BotService {
     await this.notifications.notifyClub(clubId, {
       title: '🙋 Un jugador pide hablar con una persona',
       body: `Respondele desde Conversaciones (${waId}).`,
+      data: { conversationId: sessionId },
     })
     const reply = 'Dale 🙌 Aviso al equipo del club para que te atiendan por acá. En un ratito te responden. 🎾'
     await this.sessionService.saveMessage(sessionId, 'BOT', reply)
@@ -755,7 +1033,18 @@ export class BotService {
     await this.notifications.notifyClub(clubId, {
       title: '🔄 Un jugador pide cambiar un turno',
       body: `${label} — ${why}. Respondele desde Conversaciones (${waId}).`,
+      data: await this.chatPushData(waId, clubId),
     })
+  }
+
+  /**
+   * Deep link to the player's chat for a push that asks the staff to answer there. The handlers
+   * don't carry the session id, so it's looked up; no data (a push that just opens the app)
+   * in the impossible case that the player has no chat yet.
+   */
+  private async chatPushData(waId: string, clubId: string): Promise<PushPayload['data']> {
+    const conversationId = await this.sessionService.findId(waId, clubId)
+    return conversationId ? { conversationId } : undefined
   }
 
   private async onBookDate(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
@@ -771,10 +1060,11 @@ export class BotService {
       // Don't dead-end: offer the nearest days that do have availability and
       // stay in BOOK_DATE so the player can just reply with one of them.
       const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
+      const offerWaitlist = await this.waitlist.offeredIn(clubId)
       return {
-        reply: noAvailabilityWithSuggestions(date, suggestions),
+        reply: noAvailabilityWithSuggestions(date, suggestions, offerWaitlist),
         state: BotState.BOOK_DATE,
-        ctx: { ...ctx, waitlistOfferDate: date },
+        ctx: { ...ctx, waitlistOfferDate: offerWaitlist ? date : undefined },
       }
     }
 
@@ -827,10 +1117,11 @@ export class BotService {
       const suggestions = await this.availability.nextAvailableDates(clubId, nextCtx.selectedDate!, {
         excludeDateKey: nextCtx.selectedDate,
       })
+      const offerWaitlist = await this.waitlist.offeredIn(clubId)
       return {
-        reply: noAvailabilityWithSuggestions(nextCtx.selectedDate!, suggestions),
+        reply: noAvailabilityWithSuggestions(nextCtx.selectedDate!, suggestions, offerWaitlist),
         state: BotState.BOOK_DATE,
-        ctx: { ...nextCtx, waitlistOfferDate: nextCtx.selectedDate },
+        ctx: { ...nextCtx, waitlistOfferDate: offerWaitlist ? nextCtx.selectedDate : undefined },
       }
     }
     return availabilityResult(nextCtx, bands, nextCtx.selectedDate!)
@@ -863,10 +1154,11 @@ export class BotService {
       const suggestions = await this.availability.nextAvailableDates(clubId, ctx.selectedDate!, {
         excludeDateKey: ctx.selectedDate,
       })
+      const offerWaitlist = await this.waitlist.offeredIn(clubId)
       return {
-        reply: noAvailabilityWithSuggestions(ctx.selectedDate!, suggestions),
+        reply: noAvailabilityWithSuggestions(ctx.selectedDate!, suggestions, offerWaitlist),
         state: BotState.BOOK_DATE,
-        ctx: { ...ctx, waitlistOfferDate: ctx.selectedDate },
+        ctx: { ...ctx, waitlistOfferDate: offerWaitlist ? ctx.selectedDate : undefined },
       }
     }
     return availabilityResult(ctx, bands, ctx.selectedDate!)
@@ -930,48 +1222,52 @@ export class BotService {
       return { reply: BOOKING_ABORTED, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
-    // The club must have a transfer alias configured before we lock a slot the
-    // player can't actually pay for.
-    const club = await this.prisma.club.findUnique({
-      where: { id: clubId },
-      select: {
-        transferAlias: true,
-        transferHolder: true,
-        depositMode: true,
-        requireDniMatch: true,
-        paymentVerificationMode: true,
-      },
-    })
-    if (!club?.transferAlias) {
+    // A club that charges a seña must have a transfer alias configured before we lock a slot
+    // the player can't actually pay for. A club on NONE charges nothing through the bot.
+    const club = await this.bookingClubSettings(clubId)
+    if (!club) {
       return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
     }
 
-    // Strict (AUTO) mode: we need the player's DNI to validate the transfer's titular. The DNI
-    // is irrelevant in RECEIPT mode (an admin verifies the photo by hand), so we skip it there.
-    // Reuse a DNI this phone already gave us so a returning player is never asked twice.
-    if (club.requireDniMatch && club.paymentVerificationMode !== 'RECEIPT' && !ctx.playerDni) {
+    // Strict (AUTO) mode identifies the payer by DNI — but it never blocks the booking: we reuse
+    // a DNI this phone already gave us, and otherwise the player can send their DNI or the
+    // receipt photo later, while the deposit is pending (or neither: the club reviews it).
+    // Without a seña there is no payer to identify.
+    if (
+      club.depositMode !== DepositMode.NONE &&
+      club.requireDniMatch &&
+      club.paymentVerificationMode !== 'RECEIPT' &&
+      !ctx.playerDni
+    ) {
       const knownDni = await this.bookingsService.findKnownDniForPhone(clubId, waId)
-      if (!knownDni) {
-        return { reply: ASK_DNI, state: BotState.BOOK_DNI, ctx }
-      }
-      ctx = { ...ctx, playerDni: knownDni }
+      if (knownDni) ctx = { ...ctx, playerDni: knownDni }
     }
 
-    return this.createPendingBooking(clubId, waId, ctx, {
-      transferAlias: club.transferAlias,
-      transferHolder: club.transferHolder,
-      depositMode: club.depositMode,
-      requireDniMatch: club.requireDniMatch,
-      paymentVerificationMode: club.paymentVerificationMode,
-    })
+    return this.createPendingBooking(clubId, waId, ctx, club)
   }
 
   private async onBookDni(msg: string, ctx: SessionContext, clubId: string, waId: string): Promise<HandlerResult> {
     const dni = msg.replace(/\D/g, '')
-    if (dni.length < 7 || dni.length > 8) {
+    // The DNI is optional: someone else may pay, and the receipt photo identifies them.
+    const skipped = dni.length === 0 && SKIP_DNI_INTENT.test(msg.trim())
+    if (!skipped && (dni.length < 7 || dni.length > 8)) {
       return { reply: BAD_DNI, state: BotState.BOOK_DNI, ctx }
     }
 
+    const club = await this.bookingClubSettings(clubId)
+    if (!club) {
+      return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    return this.createPendingBooking(clubId, waId, skipped ? ctx : { ...ctx, playerDni: dni }, club)
+  }
+
+  /**
+   * How the club charges, for the booking step — or null when it can't take a booking it would
+   * have to charge for: a club that asks a seña (DEPOSIT/FULL) needs an alias to send the player
+   * to. A club on NONE charges nothing through the bot, so it never needs one.
+   */
+  private async bookingClubSettings(clubId: string): Promise<BookingClubSettings | null> {
     const club = await this.prisma.club.findUnique({
       where: { id: clubId },
       select: {
@@ -982,43 +1278,22 @@ export class BotService {
         paymentVerificationMode: true,
       },
     })
-    if (!club?.transferAlias) {
-      return { reply: PAYMENT_UNAVAILABLE, state: BotState.MENU, ctx: keepName(ctx) }
-    }
-
-    return this.createPendingBooking(
-      clubId,
-      waId,
-      { ...ctx, playerDni: dni },
-      {
-        transferAlias: club.transferAlias,
-        transferHolder: club.transferHolder,
-        depositMode: club.depositMode,
-        requireDniMatch: club.requireDniMatch,
-        paymentVerificationMode: club.paymentVerificationMode,
-      },
-    )
+    if (!club || (club.depositMode !== DepositMode.NONE && !club.transferAlias)) return null
+    return club
   }
 
-  /** Locks the slot with a pending booking and tells the player exactly how much to transfer. */
+  /**
+   * Locks the slot for the player. With a seña, the booking is held PENDING and the player is told
+   * exactly how much to transfer; with nothing to charge (club on NONE, or a $0 seña) it is
+   * confirmed on the spot.
+   */
   private async createPendingBooking(
     clubId: string,
     waId: string,
     ctx: SessionContext,
-    club: {
-      transferAlias: string
-      transferHolder: string | null
-      depositMode: 'DEPOSIT' | 'FULL'
-      requireDniMatch: boolean
-      paymentVerificationMode: 'AUTO' | 'RECEIPT'
-    },
+    club: BookingClubSettings,
   ): Promise<HandlerResult> {
-    let pendingBooking: {
-      id: string
-      transferAmountCents: number
-      creditAppliedCents: number
-      confirmedByCredit: boolean
-    }
+    let pendingBooking: PendingBookingResult
     try {
       if (ctx.selectedSlotId) {
         pendingBooking = await this.bookingsService.bookPending(clubId, {
@@ -1038,6 +1313,18 @@ export class BotService {
         })
       }
     } catch (err) {
+      // Too many no-shows and no seña to ask up front: a person of the club decides.
+      if (err instanceof NoShowReviewRequiredException) {
+        await this.notifications.notifyClub(clubId, {
+          title: '🙋 Reserva para revisar',
+          body:
+            `${ctx.playerName} (${err.noShowCount} ausencias) pidió ${dayMonthFromKey(ctx.selectedDate!)} · ` +
+            `${ctx.selectedSlotLabel} · ${ctx.selectedCourtName}. Respondele desde Conversaciones (${waId}).`,
+          // No booking was created — the request lives only in the chat.
+          data: await this.chatPushData(waId, clubId),
+        })
+        return { reply: noShowReviewRequested(ctx), state: BotState.MENU, ctx: keepName(ctx) }
+      }
       // A blocked player gets the club's message, not the generic "slot taken".
       if (err instanceof ForbiddenException) {
         return {
@@ -1047,6 +1334,11 @@ export class BotService {
         }
       }
       return { reply: BOOKING_FAILED, state: BotState.MENU, ctx: keepName(ctx) }
+    }
+
+    // Nothing to charge → confirmed on the spot: the bot just took the booking down.
+    if (pendingBooking.confirmedWithoutDeposit) {
+      return { reply: bookingConfirmedNoDeposit(ctx), state: BotState.MENU, ctx: keepName(ctx) }
     }
 
     // Credit covered the whole deposit → the booking is already CONFIRMED, no transfer needed.
@@ -1064,7 +1356,8 @@ export class BotService {
     return {
       reply: transferPending(
         ctx,
-        { alias: club.transferAlias, holder: club.transferHolder },
+        // Non-null: a seña is only asked of a club with an alias (bookingClubSettings).
+        { alias: club.transferAlias!, holder: club.transferHolder },
         pendingBooking.transferAmountCents,
         club.depositMode,
         club.requireDniMatch,
@@ -1074,6 +1367,15 @@ export class BotService {
       ctx: keepName(ctx),
     }
   }
+}
+
+/** What the booking step reads about how the club charges. */
+interface BookingClubSettings {
+  transferAlias: string | null
+  transferHolder: string | null
+  depositMode: DepositMode
+  requireDniMatch: boolean
+  paymentVerificationMode: PaymentVerificationMode
 }
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
@@ -1273,4 +1575,10 @@ function normalizeYesNo(msg: string): 's' | 'n' | null {
   if (hasNoWord && !hasYesWord) return 'n'
   if (hasYesWord && !hasNoWord) return 's'
   return null
+}
+
+/** Hours the bot stays quiet on a chat after the club answers it from the phone (default 6). */
+function ownerReplyPauseHours(): number {
+  const hours = Number(process.env.WHATSAPP_OWNER_REPLY_PAUSE_HOURS)
+  return Number.isFinite(hours) && hours > 0 ? hours : 6
 }

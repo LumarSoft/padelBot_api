@@ -24,8 +24,21 @@ model Club {
 
   /// GTP subscription state. New clubs start on TRIAL (see trialEndsAt).
   subscriptionStatus SubscriptionStatus @default(TRIAL)
-  /// Commercial plan ("base" / "pro"); informational for now.
-  plan               String             @default("base")
+  /// Commercial plan: "saque" | "bandeja" | "smash" (the landing's plans). Its limits and
+  /// modules live in `src/plans/lib/plans.ts`; an unknown key restricts nothing.
+  plan               String             @default("saque")
+  /// The club existed before the plans were enforced: it keeps every module (fijo confirmation,
+  /// kiosk stock, waitlist, split payment, scheduled price rises) whatever its plan, so nobody
+  /// loses a feature silently. Ops clears it from the console once a plan is agreed with the club.
+  grandfatheredFeatures Boolean @default(false)
+  /// Last AI-credit alert sent (AiCreditAlertsService): the month ("2026-10") and the threshold
+  /// crossed (80 / 90 / 95 / 100), so each threshold warns once per club and month. At 100% the
+  /// bot is paused until the club moves to a bigger plan or the month turns.
+  aiCreditsAlertMonth   String?
+  aiCreditsAlertPercent Int?
+  /// Our own notes on the club (the ops console's "ficha"): what we agreed, who to talk to,
+  /// what happened. Never shown to the club.
+  opsNotes              String? @db.Text
   /// When the free trial ends (null = no fixed end, e.g. clubs created before billing).
   trialEndsAt        DateTime?
   /// End of the last paid period for ACTIVE/PAST_DUE clubs. The bot keeps working for
@@ -48,10 +61,11 @@ model Club {
 
   /// How much the bot asks the player to transfer to confirm a booking:
   /// DEPOSIT = a partial deposit (seña) of `depositPercent` of the court price,
-  /// FULL = the whole court price. The owner sets this per club.
+  /// FULL = the whole court price, NONE = nothing: the bot takes the booking down and
+  /// confirms it on the spot (no alias, no transfer). The owner sets this per club.
   depositMode    DepositMode @default(DEPOSIT)
   /// Percentage of the court price charged as the seña when depositMode = DEPOSIT.
-  /// Default 25 (one of four padel players). Ignored when depositMode = FULL.
+  /// Default 25 (one of four padel players). Ignored when depositMode = FULL or NONE.
   depositPercent Int         @default(25)
 
   /// Club voice (acotado, no todo el copy): an extra line the bot appends to its
@@ -66,6 +80,10 @@ model Club {
   /// panel. Each entry is injected into the LLM system prompt as a Q→A pair. Null/empty = the
   /// bot only knows its courts/schedule and says it doesn't have that info for anything else.
   botFaq          Json?
+  /// "Reglas de la casa": the club's own desk Q&As for its staff (an ordered array of
+  /// { question, answer }, same shape as botFaq), shown next to the built-in answers in the
+  /// panel's "?" help. Edited by the OWNER as a whole; never reaches the bot or the players.
+  houseRules      Json?
 
   /// Hours before the slot start within which a cancellation forfeits the deposit.
   /// Cancelling EARLIER than this window turns the paid deposit into player credit.
@@ -88,6 +106,15 @@ model Club {
   /// How many times ONE booking may be rescheduled by the player. Without a cap a booking can
   /// be pushed forward forever, which is also how a player would dodge the deposit window.
   maxPlayerReschedules Int @default(1)
+
+  /// Automatic attendance check for the fijos (FixedConfirmationsService): the bot WhatsApps
+  /// each fixed booking "¿venís?" with two buttons, so the front desk stops calling them one by
+  /// one. "No puedo" frees only that date for the waitlist; no answer never cancels anything.
+  /// Off by default: it needs the Meta template approved on the club's number to deliver.
+  fixedConfirmationEnabled   Boolean @default(false)
+  /// How many hours before the turno the question goes out. 24 = the day before, at the same
+  /// time as the turno (always inside the club's opening hours, never at 3 AM).
+  fixedConfirmationLeadHours Int     @default(24)
 
   /// When true, the bot asks the player's DNI at booking, the transfer amount is a clean
   /// round number (no centavos tag), and a transfer auto-confirms only if the payer's DNI
@@ -128,11 +155,25 @@ model Club {
   deviceTokens         DeviceToken[]
   products             Product[]
   bookingProducts      BookingProduct[]
+  stockMovements       StockMovement[]
+  counterSales         CounterSale[]
   waitlistEntries      WaitlistEntry[]
   scheduledPriceAdjustments ScheduledPriceAdjustment[]
   bookingPlayerPayments BookingPlayerPayment[]
   llmUsageDaily        LlmUsageDaily[]
   auditLogs            AuditLog[]
+  whatsAppMessageDaily WhatsAppMessageDaily[]
+  helpSearchMisses     HelpSearchMiss[]
+  improvementSuggestions ImprovementSuggestion[]
+  competitions         Competition[]
+  competitionSessions  CompetitionSession[]
+  competitionCourts    CompetitionCourt[]
+  competitionCategories CompetitionCategory[]
+  competitionGroups    CompetitionGroup[]
+  competitionPairs     CompetitionPair[]
+  competitionPlayers   CompetitionPlayer[]
+  competitionMatches   CompetitionMatch[]
+  competitionSignupRequests CompetitionSignupRequest[]
 }
 
 enum Role {
@@ -140,10 +181,13 @@ enum Role {
   STAFF
 }
 
-/// Whether the bot charges a partial deposit (seña) or the full court price.
+/// What the bot charges up front to confirm a booking: a partial deposit (seña), the full
+/// court price, or nothing at all (NONE — the bot works as a booking book: name, day, time,
+/// confirmed; the club charges at the desk).
 enum DepositMode {
   DEPOSIT
   FULL
+  NONE
 }
 
 /// How a club verifies the deposit transfer: automatically via MercadoPago, or by a
@@ -185,6 +229,8 @@ model Court {
   slots     Slot[]
   recurringBookings RecurringBooking[]
   priceRules CourtPriceRule[]
+  competitionCourts CompetitionCourt[]
+  competitionMatches CompetitionMatch[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -235,6 +281,11 @@ model Slot {
   endsAt     DateTime
   priceCents Int
   status     SlotStatus @default(AVAILABLE)
+  /// The torneo or peña this BLOCKED slot is held for. Null = a plain block (rain, maintenance…)
+  /// or no block at all. Bulk unblock never frees an event's slots; deleting or cancelling the
+  /// event frees them.
+  competitionId String?
+  competition   Competition? @relation(fields: [competitionId], references: [id], onDelete: SetNull)
   bookings   Booking[]
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
@@ -244,6 +295,7 @@ model Slot {
   @@unique([courtId, startsAt])
   @@index([clubId])
   @@index([clubId, startsAt])
+  @@index([competitionId])
 }
 
 model User {
@@ -261,16 +313,142 @@ model User {
   /// the panel in weeks is churning before it cancels, and this is the only place that
   /// shows it.
   lastLoginAt      DateTime?
+  /// When the user closed the "Tu primer día" card on the panel's Resumen. Null = still shown,
+  /// until every task is done (which hides it on its own).
+  firstDayDismissedAt DateTime?
+  /// Newest entry of the panel's "Novedades" (front `features/help/content/news.ts`) this user
+  /// has seen. Stored here, not in the browser: the owner opens the panel from several devices.
+  /// Null = never opened them.
+  newsSeenId       String?            @db.VarChar(64)
+  /// The "te quedan pocos créditos" notice this user closed: "2026-10:80" (month and level, 80 or
+  /// 100). Closed, it stays closed for that month; it comes back once when the credits run out.
+  creditsNoticeDismissed String?        @db.VarChar(16)
+  firstActions     UserFirstAction[]
   clubId           String
   club             Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
   bookings         Booking[]
   recurringBookings RecurringBooking[]
   deviceTokens     DeviceToken[]
   auditLogs        AuditLog[]
+  stockMovements   StockMovement[]
+  counterSales     CounterSale[]
+  competitions     Competition[]
+  improvementSuggestions ImprovementSuggestion[]
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
   @@index([clubId])
+}
+
+/// Desk actions that leave no per-user trace of their own in the data (a booking already
+/// records who made it in bookedByUserId; these don't).
+enum DeskAction {
+  /// Moved a turno to another time (reprogramar).
+  RESCHEDULE
+  /// Loaded kiosk consumos onto a turno's bill.
+  CONSUMPTION
+  /// Registered a payment at the desk (a player's share or a front-desk collection).
+  DESK_PAYMENT
+  /// Confirmed a pending seña by hand.
+  DEPOSIT_CONFIRMATION
+}
+
+/// The first time a panel user did each desk action. It is the minimum that lets the
+/// "Tu primer día" checklist (HelpService.getFirstDay) tick a task from what that user really
+/// did — never from a "ya lo leí". Written once per user and action, by DeskActionInterceptor
+/// after the real endpoint succeeds.
+model UserFirstAction {
+  userId    Int
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    DeskAction
+  createdAt DateTime   @default(now())
+
+  @@id([userId, action])
+}
+
+/// A search in the panel's "?" help that found nothing, per club and normalized query: the
+/// desk questions the built-in answers are missing. Read across clubs by the ops console.
+model HelpSearchMiss {
+  id        String   @id @default(cuid())
+  clubId    String
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Lowercased, accent-free, whitespace-collapsed text the user typed.
+  query     String   @db.VarChar(80)
+  /// How many times this club searched it without a result.
+  count     Int      @default(1)
+  createdAt DateTime @default(now())
+  /// Last time it was searched.
+  updatedAt DateTime @updatedAt
+
+  @@unique([clubId, query])
+  @@index([updatedAt])
+}
+
+/// Where an improvement we post stands. Clubs see all three: a roadmap, not only a changelog.
+enum ImprovementStatus {
+  PLANNED
+  IN_PROGRESS
+  RELEASED
+}
+
+/// An improvement Lumarsoft posts for every club ("Mejoras" in the panel and the staff app).
+/// Deliberately global — no clubId, like PlatformAdmin: it's our product's changelog, the same
+/// for every tenant. Written only by the ops console (`/ops/improvements`) or
+/// `npm run improvement:post`; clubs only read the published ones. Separate from the panel's
+/// "Novedades" (`front/src/features/help/content/news.ts`), which are tied to on-screen guides.
+model Improvement {
+  id          String            @id @default(cuid())
+  title       String            @db.VarChar(120)
+  body        String            @db.Text
+  status      ImprovementStatus @default(RELEASED)
+  /// Null = draft, invisible to clubs. Set when published; it's the date clubs see.
+  publishedAt DateTime?
+  /// Club suggestions this improvement answers (linked from the ops console).
+  suggestions ImprovementSuggestion[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([publishedAt])
+}
+
+/// What we did with a club's suggestion. The club sees it next to their suggestion.
+enum ImprovementSuggestionStatus {
+  /// Just arrived, nobody at Lumarsoft has read it.
+  NEW
+  /// Read; we're thinking about it.
+  UNDER_REVIEW
+  /// We'll build it (often linked to a PLANNED Improvement).
+  PLANNED
+  /// Built (often linked to the RELEASED Improvement).
+  DONE
+  /// We won't build it; `opsReply` says why.
+  DECLINED
+}
+
+/// An improvement a club's owner or staff proposed to Lumarsoft. Tenant-scoped like every club
+/// row: a club only ever sees its own. Read and answered across clubs by the ops console.
+model ImprovementSuggestion {
+  id            String                      @id @default(cuid())
+  clubId        String
+  club          Club                        @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// Who proposed it. Null once that user is gone; the suggestion stays with the club.
+  userId        Int?
+  user          User?                       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  title         String                      @db.VarChar(120)
+  body          String                      @db.Text
+  status        ImprovementSuggestionStatus @default(NEW)
+  /// Our answer, shown to the club. Null = not answered yet.
+  opsReply      String?                     @db.Text
+  repliedAt     DateTime?
+  /// The posted improvement that answers it, if any.
+  improvementId String?
+  improvement   Improvement?                @relation(fields: [improvementId], references: [id], onDelete: SetNull)
+  createdAt     DateTime                    @default(now())
+  updatedAt     DateTime                    @updatedAt
+
+  @@index([clubId, createdAt])
+  @@index([status, createdAt])
+  @@index([improvementId])
 }
 
 /// A staff-app device registered for push notifications ("Nueva reserva pendiente de seña",
@@ -318,6 +496,7 @@ model Player {
   isBlocked   Boolean  @default(false)
   notes       String?  @db.Text
   bookings    Booking[]
+  competitionEntries CompetitionPlayer[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -367,6 +546,14 @@ model Booking {
   /// DNI the bot captured at booking (digits only), used to validate the payer's identity
   /// when the club has requireDniMatch on. Null otherwise.
   playerDni          String?
+  /// Payer identity read from the transfer receipt photo the player sent (DNI digits, derived
+  /// from the CUIT/CUIL/DNI printed on it). Lets a transfer from someone else's account — or
+  /// from a player who never gave a DNI — be matched against MercadoPago's real payer.
+  /// Never confirms on its own: the money must still arrive in MercadoPago.
+  receiptPayerDni     String?
+  /// Operation number printed on the receipt. When it equals MercadoPago's payment id it is
+  /// the strongest possible link between the transfer and this booking.
+  receiptOperationRef String?
   status             BookingStatus     @default(PENDING_PAYMENT)
   notes              String?
   /// Identity of who actually transferred, captured from MercadoPago at confirmation
@@ -395,6 +582,7 @@ model Booking {
   receiptUploadedAt  DateTime?
   receipts           PaymentReceipt[]
   bookingProducts    BookingProduct[]
+  stockMovements     StockMovement[]
   /// When the turno's bill was fully settled (todos pagaron) — set/cleared
   /// automatically as player payments cover the total. Null = cuenta abierta.
   settledAt          DateTime?
@@ -402,6 +590,15 @@ model Booking {
   /// When the pre-match WhatsApp reminder was sent (BookingRemindersService, ~1h before
   /// the slot). Null until sent; guards the reminder cron from re-sending on every sweep.
   reminderSentAt     DateTime?
+  /// Fixed-booking attendance check (FixedConfirmationsService). When the "¿venís?" template
+  /// was sent. Null = not asked; a booking that was asked doesn't also get the 1h reminder.
+  attendanceAskedAt     DateTime?
+  /// The answer: true = "Sí, voy", false = "No puedo" (the booking was released), null = none yet.
+  attendanceConfirmed   Boolean?
+  /// When the answer arrived (from the player on WhatsApp, or the front desk in the panel).
+  attendanceAnsweredAt  DateTime?
+  /// When the staff was pushed that this fijo never answered. Guards the alert from repeating.
+  attendanceAlertSentAt DateTime?
   /// Times the PLAYER moved this booking from WhatsApp (capped by Club.maxPlayerReschedules).
   /// Admin reschedules from the panel don't count — the club can always override.
   rescheduleCount    Int               @default(0)
@@ -419,6 +616,7 @@ model Booking {
   @@index([status, paymentExpiresAt])
   @@index([status, transferAmountCents])
   @@index([status, reminderSentAt])
+  @@index([status, attendanceAskedAt])
 }
 
 /// A transfer-receipt image a player sent for a booking in RECEIPT verification mode.
@@ -454,11 +652,85 @@ model Product {
   priceCents   Int
   category     ProductCategory @default(OTRO)
   isActive     Boolean         @default(true)
-  bookingItems BookingProduct[]
+  /// What the counter's barcode scanner reads (the EAN on the bottle, or a code of the club's
+  /// own). Unique per club so a scan resolves to one product; null = no code, picked by hand.
+  barcode      String?         @db.VarChar(64)
+  /// Units on hand. Null = the club doesn't track stock for this product (never forced on
+  /// anyone). May go negative: a sale is never blocked, the next count corrects it.
+  stockQuantity      Int?
+  /// "Para comprar" once stock drops to this or below. Null = only when it runs out (0).
+  lowStockThreshold  Int?
+  /// When the owner was pushed that this product is low. Cleared once stock is back above the
+  /// threshold, so the alert fires once per crossing instead of on every sale.
+  lowStockNotifiedAt DateTime?
+  bookingItems   BookingProduct[]
+  stockMovements StockMovement[]
+  counterSales   CounterSale[]
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
+  @@unique([clubId, barcode])
   @@index([clubId])
+}
+
+enum StockMovementType {
+  /// Goods that came in ("entró mercadería").
+  PURCHASE
+  /// Consumo on a turno or a counter sale (negative), or one undone (positive).
+  SALE
+  /// Physical count difference, initial stock or a manual correction.
+  ADJUSTMENT
+}
+
+/// One line of the kiosk's "entra / sale / queda" ledger. Only written for products whose
+/// stock is tracked (Product.stockQuantity not null).
+model StockMovement {
+  id            String            @id @default(cuid())
+  clubId        String
+  club          Club              @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  type          StockMovementType
+  /// Signed: +N came in, -N went out.
+  quantity      Int
+  /// Stock right after this movement (the "queda" column).
+  stockAfter    Int
+  note          String?           @db.VarChar(200)
+  /// Who registered it. Null for system-made movements.
+  userId        Int?
+  user          User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  /// The turno whose consumos moved the stock, for SALE movements from a bill.
+  bookingId     String?
+  booking       Booking?          @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  /// The counter sale that moved the stock, for SALE movements without a turno.
+  counterSaleId String?
+  counterSale   CounterSale?      @relation(fields: [counterSaleId], references: [id], onDelete: SetNull)
+  createdAt     DateTime          @default(now())
+
+  @@index([clubId, productId, createdAt])
+  @@index([bookingId])
+  @@index([counterSaleId])
+}
+
+/// A kiosk sale outside any turno ("venta suelta": someone buys a drink without playing).
+/// Counts in the day's cash and kiosk revenue like a consumo, and moves stock when tracked.
+model CounterSale {
+  id             String              @id @default(cuid())
+  clubId         String
+  club           Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product             @relation(fields: [productId], references: [id])
+  quantity       Int
+  /// Snapshot of the product price at the time of sale (cents).
+  unitPriceCents Int
+  method         PlayerPaymentMethod
+  userId         Int?
+  user           User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  stockMovements StockMovement[]
+  createdAt      DateTime            @default(now())
+
+  @@index([clubId, createdAt])
+  @@index([productId])
 }
 
 enum ProductCategory {
@@ -589,6 +861,9 @@ model ClubSignupRequest {
   contactWindow     String?
   /// Free text when contactWindow = CUSTOM ("martes y jueves después de las 16").
   contactWindowNote String?
+  /// The landing's pricing card they came from (`/register?plan=…`): "saque" | "bandeja" |
+  /// "smash". Null when they reached the signup any other way. Provisioning defaults to it.
+  plan              String?
 
   /// NEW → CONTACTED → CONVERTED → LOST. Moved from the ops console (`/ops/leads`).
   status    String   @default("NEW")
@@ -601,10 +876,64 @@ model ClubSignupRequest {
   /// The club we provisioned for this lead (set when status → CONVERTED). Not a
   /// relation: a lead is pre-sales data and must survive the club being deleted.
   convertedClubId String?
+  /// When to call them back ("volver a llamar"). The leads screen lists the ones due today;
+  /// cleared once the lead is a client or lost.
+  followUpAt    DateTime?
+  /// Why we lost it, set with status LOST: "PRICE" | "COMPETITOR" | "NOT_NOW" | "NO_ANSWER" |
+  /// "NOT_A_FIT" | "OTHER" (`ops/lib/lead-status.ts`).
+  lostReason    String?
+  /// The campaign that brought them: the UTM parameters of the link they arrived by.
+  utmSource     String?
+  utmMedium     String?
+  utmCampaign   String?
   createdAt DateTime @default(now())
 
   @@index([status])
   @@index([createdAt])
+  @@index([followUpAt])
+}
+
+/// Visits to each screen of the `/register` signup, per club-local day: where prospects drop
+/// out. Anonymous on purpose — no cookie, no id, just one count per screen per page load.
+model SignupFunnelDaily {
+  id        String   @id @default(cuid())
+  /// Club-local day ("YYYY-MM-DD").
+  dateKey   String
+  /// The screen: a question id of the panel's `features/signup/lib/questions.ts`, "summary"
+  /// (the review) or "sent".
+  step      String
+  /// Its position in the flow, to order the funnel.
+  stepIndex Int
+  visits    Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dateKey, step])
+  @@index([dateKey])
+}
+
+/// Each club's subscription as it stood in a month (the last state seen that month), for the
+/// business view: monthly recurring revenue, clubs that started paying and churn. Billing is
+/// manual and the club row only knows today, so `OpsMonthStatesService` records it every day
+/// and on every change from the console. Not a relation: a churned club must keep counting
+/// after it's deleted.
+model ClubMonthState {
+  id                 String             @id @default(cuid())
+  clubId             String
+  /// Club-local month ("YYYY-MM").
+  month              String
+  clubName           String
+  plan               String
+  subscriptionStatus SubscriptionStatus
+  /// What it pays a month in that state: the plan's price while ACTIVE, else 0.
+  mrrCents           Int
+  /// The sales demo: recorded, never counted.
+  isDemo             Boolean            @default(false)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@unique([clubId, month])
+  @@index([month])
 }
 
 /// A Lumarsoft operator (us). Deliberately NOT a `User`: `User` is tenant-scoped and
@@ -632,12 +961,56 @@ model PlatformAdmin {
 /// it, "is this club profitable at $X/month?" is unanswerable. It's a daily aggregate and
 /// not a row per call on purpose — the per-call detail is already in the logs, and one row
 /// per club per day stays small forever.
+/// WhatsApp messages the Graph API accepted, per number and club-local day. Two things read it:
+/// the club's credits (one per message the BOT sends: `botService` + `utility`) and our Meta cost
+/// (service messages past the number's monthly free tier, plus every utility template).
+model WhatsAppMessageDaily {
+  id            String   @id @default(cuid())
+  clubId        String
+  club          Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// The number that sent them (Meta's free tier is per number).
+  phoneNumberId String
+  /// Club-local day ("YYYY-MM-DD").
+  dateKey       String
+  /// Free-form messages the bot sent (replies, buttons, lists, payment notices).
+  botService    Int      @default(0)
+  /// Replies the staff typed from the panel: our Meta cost, never the club's credits.
+  staffService  Int      @default(0)
+  /// Utility templates (reminder, fijo confirmation): credits for the club, always billed by Meta.
+  utility       Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([phoneNumberId, dateKey])
+  @@index([clubId, dateKey])
+  @@index([dateKey])
+}
+
+/// The dollar the ops console turns Meta's and OpenAI's USD costs into pesos with. Fetched every
+/// day from dolarapi.com (ExchangeRateService) so nobody has to remember to update it; one row
+/// per quote and club-local day, so a past month keeps the rate it had.
+model ExchangeRate {
+  id        String   @id @default(cuid())
+  /// "tarjeta" (what a USD charge on an Argentine card costs) or "oficial".
+  quote     String
+  /// Club-local day ("YYYY-MM-DD") of the quote.
+  dateKey   String
+  /// Pesos per dollar (selling rate), in cents.
+  arsCents  Int
+  source    String
+  fetchedAt DateTime @default(now())
+
+  @@unique([quote, dateKey])
+}
+
 model LlmUsageDaily {
   id           String   @id @default(cuid())
   clubId       String
   club         Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   /// Club-local day ("YYYY-MM-DD"), same convention as everywhere else.
   dateKey      String
+  /// AI steps (a message understood, an audio transcribed, an image or receipt read). Only our
+  /// cost: the club's credits are counted in WhatsApp messages (WhatsAppMessageDaily).
   calls        Int      @default(0)
   inputTokens  Int      @default(0)
   outputTokens Int      @default(0)
@@ -684,6 +1057,14 @@ model WhatsAppLine {
   clubId        String
   club          Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   isActive      Boolean  @default(true)
+  /// WhatsApp Business Account that owns the number (set when connected via Embedded Signup).
+  wabaId        String?
+  /// True when the number also stays on the club's WhatsApp Business app ("coexistence"):
+  /// the owner keeps answering from the phone, and those replies arrive as message echoes.
+  coexistence   Boolean  @default(false)
+  /// Business-integration token Meta issued for this number's WABA in Embedded Signup,
+  /// encrypted at rest (CryptoService). Null → messages go out with the global WHATSAPP_TOKEN.
+  accessToken   String?  @db.Text
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -706,6 +1087,10 @@ model ConversationSession {
   expiresAt DateTime
   /// "AI" = bot handles the conversation; "HUMAN" = admin has taken over.
   mode      String   @default("AI")
+  /// When set, HUMAN mode is temporary: once this passes the bot takes the chat back. Used
+  /// when the owner answers from the WhatsApp Business app (coexistence echo). Null with
+  /// mode=HUMAN means an indefinite takeover from the panel.
+  humanUntil DateTime?
   /// True when the player asked to talk to a human advisor and no staff has replied yet.
   /// Surfaced/notified in the panel; cleared when an admin sends a message or switches mode.
   needsAdvisor Boolean @default(false)
@@ -848,4 +1233,281 @@ model AuditLog {
   @@index([entity, entityId])
   @@index([userId])
   @@index([action, createdAt])
+}
+
+enum CompetitionKind {
+  TOURNAMENT
+  PENA
+}
+
+enum CompetitionStatus {
+  /// Taking registrations; no fixture yet.
+  OPEN
+  /// At least one category has its fixture generated.
+  IN_PROGRESS
+  FINISHED
+  CANCELLED
+}
+
+/// How a match is played: americano / peña = one set, completo = best of three.
+enum MatchFormat {
+  ONE_SET
+  BEST_OF_THREE
+}
+
+enum CategoryFormat {
+  /// Everyone plays everyone (a peña, or a small category).
+  ROUND_ROBIN
+  /// Zonas first, then the best of each zona go to a knockout bracket.
+  GROUPS_KNOCKOUT
+  /// Straight knockout bracket.
+  KNOCKOUT
+}
+
+enum MatchStage {
+  GROUP
+  KNOCKOUT
+}
+
+/// A torneo or a peña. Both hold courts during one or more time windows (sessions), take pair
+/// registrations and play matches; a peña is a single round-robin category with no bracket.
+model Competition {
+  id              String            @id @default(cuid())
+  clubId          String
+  club            Club              @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  kind            CompetitionKind
+  name            String            @db.VarChar(120)
+  description     String?           @db.Text
+  status          CompetitionStatus @default(OPEN)
+  matchFormat     MatchFormat       @default(ONE_SET)
+  /// Registration fee per PLAYER, in cents. 0 = free.
+  entryFeeCents   Int               @default(0)
+  createdByUserId Int
+  createdByUser   User              @relation(fields: [createdByUserId], references: [id])
+  sessions        CompetitionSession[]
+  courts          CompetitionCourt[]
+  categories      CompetitionCategory[]
+  groups          CompetitionGroup[]
+  pairs           CompetitionPair[]
+  players         CompetitionPlayer[]
+  matches         CompetitionMatch[]
+  signupRequests  CompetitionSignupRequest[]
+  slots           Slot[]
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([clubId])
+  @@index([clubId, kind, status])
+}
+
+/// One time window when the event holds its courts, in club-local wall-clock time. An `endTime`
+/// equal to or earlier than `startTime` ends past midnight, like `Court.closeTime`.
+model CompetitionSession {
+  id            String      @id @default(cuid())
+  clubId        String
+  club          Club        @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  /// "YYYY-MM-DD", club-local.
+  dateKey       String      @db.VarChar(10)
+  /// "HH:MM"
+  startTime     String      @db.VarChar(5)
+  /// "HH:MM"
+  endTime       String      @db.VarChar(5)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([clubId])
+  @@index([competitionId])
+}
+
+/// A court the event uses during every one of its sessions.
+model CompetitionCourt {
+  clubId        String
+  club          Club        @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  courtId       String
+  court         Court       @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+
+  @@id([competitionId, courtId])
+  @@index([clubId])
+  @@index([courtId])
+}
+
+/// A category of a torneo ("4ta", "Mixto"…). A peña has exactly one, "General".
+model CompetitionCategory {
+  id              String         @id @default(cuid())
+  clubId          String
+  club            Club           @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId   String
+  competition     Competition    @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  name            String         @db.VarChar(60)
+  format          CategoryFormat
+  /// Target pairs per zona (GROUPS_KNOCKOUT). Zonas get this size or a bit more.
+  groupSize       Int            @default(3)
+  /// Pairs of each zona that go on to the bracket (GROUPS_KNOCKOUT).
+  advancePerGroup Int            @default(2)
+  /// Registration cap; null = no cap.
+  maxPairs        Int?
+  /// When the fixture (zonas, round robin or bracket) was generated. Null = still registering.
+  fixtureGeneratedAt DateTime?
+  /// When the knockout bracket was generated (GROUPS_KNOCKOUT only, after the zonas).
+  bracketGeneratedAt DateTime?
+  groups          CompetitionGroup[]
+  pairs           CompetitionPair[]
+  matches         CompetitionMatch[]
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([clubId])
+  @@index([competitionId])
+}
+
+/// A zona of a category ("Zona A").
+model CompetitionGroup {
+  id            String              @id @default(cuid())
+  clubId        String
+  club          Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition         @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  categoryId    String
+  category      CompetitionCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  name          String              @db.VarChar(30)
+  position      Int
+  pairs         CompetitionPair[]
+  matches       CompetitionMatch[]
+  createdAt     DateTime            @default(now())
+
+  @@index([clubId])
+  @@index([categoryId])
+}
+
+/// A registered pair. Its two players are `CompetitionPlayer` rows (position 1 and 2).
+model CompetitionPair {
+  id            String              @id @default(cuid())
+  clubId        String
+  club          Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition         @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  categoryId    String
+  category      CompetitionCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  groupId       String?
+  group         CompetitionGroup?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  /// 1 = best. Null = unseeded (ordered by registration).
+  seed          Int?
+  players       CompetitionPlayer[]
+  matchesAsA    CompetitionMatch[]  @relation("MatchPairA")
+  matchesAsB    CompetitionMatch[]  @relation("MatchPairB")
+  matchesWon    CompetitionMatch[]  @relation("MatchWinner")
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([clubId])
+  @@index([competitionId])
+  @@index([categoryId])
+}
+
+/// One player of a pair, with their share of the registration fee.
+model CompetitionPlayer {
+  id            String               @id @default(cuid())
+  clubId        String
+  club          Club                 @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition          @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  pairId        String
+  pair          CompetitionPair      @relation(fields: [pairId], references: [id], onDelete: Cascade)
+  /// 1 or 2.
+  position      Int
+  name          String               @db.VarChar(100)
+  /// Digits-only, optional: the desk often registers just a name.
+  phone         String?              @db.VarChar(20)
+  /// The club's Player with that phone, when one was given.
+  playerId      String?
+  player        Player?              @relation(fields: [playerId], references: [id], onDelete: SetNull)
+  /// When the player paid the registration fee. Null = pending.
+  paidAt        DateTime?
+  paymentMethod PlayerPaymentMethod?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  @@unique([pairId, position])
+  @@index([clubId])
+  @@index([competitionId])
+  @@index([playerId])
+}
+
+/// A match of the fixture. Group/round-robin matches know both pairs up front; a knockout match
+/// can wait for the winners of earlier ones (`placeholderA/B` says who, e.g. "1° Zona A").
+model CompetitionMatch {
+  id            String              @id @default(cuid())
+  clubId        String
+  club          Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition         @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  categoryId    String
+  category      CompetitionCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  stage         MatchStage
+  groupId       String?
+  group         CompetitionGroup?   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  /// Round-robin: the round ("fecha"). Knockout: 1 = first round … last = final.
+  round         Int
+  /// Order inside the round.
+  position      Int
+  pairAId       String?
+  pairA         CompetitionPair?    @relation("MatchPairA", fields: [pairAId], references: [id], onDelete: SetNull)
+  pairBId       String?
+  pairB         CompetitionPair?    @relation("MatchPairB", fields: [pairBId], references: [id], onDelete: SetNull)
+  placeholderA  String?             @db.VarChar(40)
+  placeholderB  String?             @db.VarChar(40)
+  courtId       String?
+  court         Court?              @relation(fields: [courtId], references: [id], onDelete: SetNull)
+  startsAt      DateTime?
+  /// Games per set, from pair A's side: [[6,4],[3,6],[10,8]]. Null = not played yet.
+  sets          Json?
+  winnerPairId  String?
+  winnerPair    CompetitionPair?    @relation("MatchWinner", fields: [winnerPairId], references: [id], onDelete: SetNull)
+  /// Knockout: the match the winner moves on to, and on which side.
+  nextMatchId   String?
+  nextMatch     CompetitionMatch?   @relation("MatchNext", fields: [nextMatchId], references: [id], onDelete: SetNull)
+  previousMatches CompetitionMatch[] @relation("MatchNext")
+  /// "A" or "B".
+  nextSlot      String?             @db.VarChar(1)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([clubId])
+  @@index([competitionId])
+  @@index([categoryId])
+}
+
+enum SignupRequestStatus {
+  /// Waiting for someone at the club to answer the player.
+  PENDING
+  /// The club talked to the player (registered them or not).
+  HANDLED
+  /// Not worth following up (a test, a duplicate, a mistake).
+  DISMISSED
+}
+
+/// A player asked through the WhatsApp bot to sign up for a torneo or peña. The bot only takes the
+/// request and hands the chat to the club; the staff registers the pair from the panel.
+model CompetitionSignupRequest {
+  id            String              @id @default(cuid())
+  clubId        String
+  club          Club                @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  competitionId String
+  competition   Competition         @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  /// The player's WhatsApp number (wa_id) — opens their chat in Conversaciones.
+  waId          String              @db.VarChar(32)
+  /// The name the bot knows them by, if any.
+  playerName    String?             @db.VarChar(100)
+  status        SignupRequestStatus @default(PENDING)
+  handledAt     DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([clubId, status])
+  @@index([competitionId])
 }

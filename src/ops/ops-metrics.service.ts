@@ -1,8 +1,14 @@
 import { Injectable } from '@nestjs/common'
 import { SubscriptionStatus } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
+import { paymentSetupSelect, paymentsConfigured } from '../clubs/lib/payment-policy'
 import { shiftDateKey, todayKey, toDateKey } from '../availability/lib/datetime'
 import { planPriceCents } from './lib/pricing'
+import { MonthBusiness, OpsMonthStatesService } from './ops-month-states.service'
+import { SALES_DEMO_SLUG } from '../demo/sales-demo.seed'
+
+/** The sales demo's subscription and simulated bookings are never business. */
+const NOT_DEMO = { slug: { not: SALES_DEMO_SLUG } }
 
 const DAY_MS = 24 * 60 * 60 * 1000
 /** Window every "last N days" number on the business screen covers. */
@@ -43,6 +49,8 @@ export interface BusinessMetrics {
   }
   /** Daily series (last WINDOW_DAYS) of bookings created, split by origin. */
   series: { date: string; bot: number; panel: number }[]
+  /** The last 12 months: recurring revenue, new clubs, clubs that started paying and churn. */
+  months: MonthBusiness[]
 }
 
 export interface BotMetrics {
@@ -72,33 +80,37 @@ export interface BotMetrics {
 
 @Injectable()
 export class OpsMetricsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly monthStates: OpsMonthStatesService,
+  ) {}
 
   async getBusiness(): Promise<BusinessMetrics> {
     const since = new Date(Date.now() - WINDOW_DAYS * DAY_MS)
 
-    const [clubs, bookings, firstBotBookings] = await Promise.all([
+    const [clubs, bookings, firstBotBookings, months] = await Promise.all([
       this.prisma.club.findMany({
+        where: NOT_DEMO,
         select: {
           id: true,
           plan: true,
           subscriptionStatus: true,
           createdAt: true,
-          transferAlias: true,
-          mpConnectedAt: true,
+          ...paymentSetupSelect,
           _count: { select: { courts: true, whatsappLines: true } },
         },
       }),
       this.prisma.booking.findMany({
-        where: { createdAt: { gte: since } },
+        where: { createdAt: { gte: since }, club: NOT_DEMO },
         select: { status: true, bookedByUserId: true, depositCents: true, createdAt: true },
       }),
       // First CONFIRMED booking the bot ever took, per club — the activation moment.
       this.prisma.booking.groupBy({
         by: ['clubId'],
-        where: { status: 'CONFIRMED', bookedByUserId: null },
+        where: { status: 'CONFIRMED', bookedByUserId: null, club: NOT_DEMO },
         _min: { createdAt: true },
       }),
+      this.monthStates.monthly(),
     ])
 
     let mrrCents = 0
@@ -125,8 +137,8 @@ export class OpsMetricsService {
           break
       }
 
-      const paymentsConfigured = Boolean(club.transferAlias) || Boolean(club.mpConnectedAt)
-      if (club._count.courts > 0 && paymentsConfigured && club._count.whatsappLines > 0) counts.ready++
+      const paymentsReady = paymentsConfigured(club)
+      if (club._count.courts > 0 && paymentsReady && club._count.whatsappLines > 0) counts.ready++
     }
 
     // ── Activation ────────────────────────────────────────────────────────────
@@ -178,6 +190,7 @@ export class OpsMetricsService {
       gmvCents,
       bookings: volume,
       series: [...seriesMap.entries()].map(([date, v]) => ({ date, ...v })),
+      months,
     }
   }
 

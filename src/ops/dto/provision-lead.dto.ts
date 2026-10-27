@@ -1,4 +1,5 @@
-import { IsEmail, IsOptional, IsString, MaxLength, MinLength } from 'class-validator'
+import { IsEmail, IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator'
+import { PLAN_KEYS, PlanKey } from '../../plans/lib/plans'
 
 /**
  * Provisioning a club straight from a lead. Everything except the password defaults to
@@ -27,4 +28,9 @@ export class ProvisionLeadDto {
   @MinLength(1)
   @MaxLength(100)
   ownerName?: string
+
+  /** Override the plan the lead picked on the landing (Saque when they picked none). */
+  @IsOptional()
+  @IsIn(PLAN_KEYS)
+  plan?: PlanKey
 }

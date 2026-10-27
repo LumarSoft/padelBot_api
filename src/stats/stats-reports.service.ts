@@ -30,6 +30,10 @@ export interface OccupancyReport {
 export interface RevenueDay {
   dateKey: string
   depositCents: number
+  /**
+   * Kiosk sold (turno consumos + counter sales). A breakdown, not a channel: once paid it is
+   * already inside cashCents/qrCents — money collected = deposit + cash + QR.
+   */
   productsCents: number
   /** Front-desk cash collected (modo mostrador). */
   cashCents: number
@@ -105,13 +109,14 @@ export class StatsReportsService {
 
   /**
    * Money per day in a date range: deposits actually collected (confirmed transfer
-   * flow) and kiosk consumption. The panel renders it and exports it as CSV.
+   * flow) and kiosk consumption (turno bills + counter sales). The panel renders it and
+   * exports it as CSV.
    */
   async getRevenue(clubId: string, fromKey: string, toKey: string): Promise<RevenueReport> {
     const from = dayRangeUtc(fromKey).gte
     const to = dayRangeUtc(shiftDateKey(toKey, 1)).gte
 
-    const [bookings, products, playerPayments] = await Promise.all([
+    const [bookings, products, playerPayments, counterSales] = await Promise.all([
       this.prisma.booking.findMany({
         where: {
           clubId,
@@ -133,6 +138,10 @@ export class StatsReportsService {
       this.prisma.bookingPlayerPayment.findMany({
         where: { clubId, booking: { slot: { startsAt: { gte: from, lt: to } } } },
         select: { amountCents: true, method: true, booking: { select: { slot: { select: { startsAt: true } } } } },
+      }),
+      this.prisma.counterSale.findMany({
+        where: { clubId, createdAt: { gte: from, lt: to } },
+        select: { quantity: true, unitPriceCents: true, method: true, createdAt: true },
       }),
     ])
 
@@ -170,6 +179,15 @@ export class StatsReportsService {
       if (payment.method === 'CASH') entry.cashCents += payment.amountCents
       else entry.qrCents += payment.amountCents
     }
+    // Counter sales (venta suelta, no turno): kiosk revenue of the day they happened, and the
+    // money they brought to the desk — the same two sides a consumo paid at the bill counts in.
+    for (const sale of counterSales) {
+      const entry = dayOf(sale.createdAt)
+      const cents = sale.quantity * sale.unitPriceCents
+      entry.productsCents += cents
+      if (sale.method === 'CASH') entry.cashCents += cents
+      else entry.qrCents += cents
+    }
 
     const days = [...byDay.values()].sort((a, b) => a.dateKey.localeCompare(b.dateKey))
     return {
@@ -201,12 +219,17 @@ export class StatsReportsService {
         try {
           const summary = await this.weeklySummary(club.id, fromKey, toKey)
           if (summary.bookings === 0) continue // nothing to brag about — don't spam dead clubs
+          // A club that takes no seña (or collected none) gets no "$0 en señas" line.
+          const deposits =
+            summary.depositCents > 0
+              ? `, $${Math.round(summary.depositCents / 100).toLocaleString('es-AR')} en señas`
+              : ''
           await this.notifications.notifyClub(club.id, {
             title: `📈 Tu semana en GTP`,
             body:
-              `${summary.bookings} turnos (${summary.occupancyPct}% de ocupación), ` +
-              `$${Math.round(summary.depositCents / 100).toLocaleString('es-AR')} en señas. ` +
+              `${summary.bookings} turnos (${summary.occupancyPct}% de ocupación)${deposits}. ` +
               `El bot te vendió ${summary.botBookings} turnos.`,
+            data: { screen: 'resumen' },
           })
         } catch (err) {
           this.logger.error(`Weekly summary failed for club ${club.id}`, err)

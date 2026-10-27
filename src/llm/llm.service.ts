@@ -1,7 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common'
-import OpenAI from 'openai'
+import OpenAI, { APIError, toFile } from 'openai'
 import { PrismaService } from '../prisma/prisma.service'
 import { AvailabilityService } from '../availability/availability.service'
+import { PlansService } from '../plans/plans.service'
+import { CompetitionSignupsService } from '../competitions/competition-signups.service'
+import { competitionsResult, toCompetitionOptions } from '../bot/lib/competitions'
 import { todayKey } from '../availability/lib/datetime'
 import { courtScheduleSelect } from '../availability/lib/schedule'
 import { BotState, HandlerResult, SessionContext } from '../bot/types'
@@ -22,11 +25,29 @@ import {
 } from '../bot/messages'
 import { buildSystemPrompt, formatCurrentDate } from './system.prompt'
 import { parseFaq } from '../clubs/clubs.service'
+import { notifyOps } from '../common/ops-alert'
 import { TOOLS } from './tools'
 
 /** Per-user LLM call budget — protects against spam driving up OpenAI cost. */
 const LLM_WINDOW_MS = 60_000
 const LLM_MAX_CALLS_PER_WINDOW = Number(process.env.LLM_MAX_CALLS_PER_MIN) || 12
+
+/**
+ * OpenAI failures that belong to our account, not to one request: the prepaid credit ran out
+ * (429 insufficient_quota) or the key is invalid/revoked (401). Every AI step then fails the same
+ * way and the bot only degrades quietly, so ops must hear right away.
+ */
+type OpenAiAccountFailure = 'quota' | 'auth'
+const OPENAI_ACCOUNT_ALERTS: Record<OpenAiAccountFailure, string> = {
+  quota:
+    '🚨 OpenAI rechazó la IA del bot por falta de saldo: cargá crédito en platform.openai.com (Billing) ' +
+    'o activá la recarga automática.',
+  auth:
+    '🚨 OpenAI rechazó la clave de la IA del bot (inválida o revocada): generá una nueva en ' +
+    'platform.openai.com (API keys), ponela en OPENAI_API_KEY del server y reiniciá la API.',
+}
+/** One ops alert per kind per hour: every AI step fails the same way until it's fixed. */
+const OPENAI_ACCOUNT_ALERT_EVERY_MS = 60 * 60 * 1000
 
 @Injectable()
 export class LlmService {
@@ -34,6 +55,8 @@ export class LlmService {
   private readonly openai: OpenAI
   /** waId → recent LLM-call timestamps (sliding window), for per-user rate limiting. */
   private readonly llmCalls = new Map<string, number[]>()
+  /** Kind of OpenAI account failure → last ops alert. */
+  private readonly accountAlerts = new Map<OpenAiAccountFailure, number>()
   /** Running OpenAI consumption since the process started (logged after every call). */
   private totalCalls = 0
   private totalTokens = 0
@@ -42,6 +65,8 @@ export class LlmService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly availability: AvailabilityService,
+    private readonly plans: PlansService,
+    private readonly competitionSignups: CompetitionSignupsService,
   ) {
     this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   }
@@ -66,7 +91,124 @@ export class LlmService {
       return await this.callOpenAI(state, message, ctx, clubId, waId)
     } catch (err) {
       this.logger.error('LLM fallback error', err)
+      void this.alertAccountFailure(err)
       return this.inPlace(NOT_UNDERSTOOD, state, ctx)
+    }
+  }
+
+  /**
+   * Transcribes a player's voice note so it can go through the normal text flow. Returns null
+   * when the audio can't be understood (or the per-player LLM budget is spent) — the caller
+   * then asks the player to write instead.
+   */
+  async transcribeAudio(clubId: string, waId: string, bytes: Buffer, mimeType: string): Promise<string | null> {
+    if (this.isRateLimited(waId)) return null
+    const model = process.env.OPENAI_TRANSCRIBE_MODEL ?? 'gpt-4o-mini-transcribe'
+    try {
+      const file = await toFile(bytes, `audio${audioExtension(mimeType)}`, { type: mimeType.split(';')[0] })
+      const result = await this.openai.audio.transcriptions.create({ file, model, language: 'es' })
+      void this.recordUsage(clubId, transcriptionUsage(result.usage))
+      const text = result.text?.trim()
+      this.logger.log(`🎤 Audio de ${waId} transcripto (${model}): ${logSnippet(text ?? '')}`)
+      return text || null
+    } catch (err) {
+      this.logger.error(`Audio transcription failed for ${waId}`, err)
+      void this.alertAccountFailure(err)
+      return null
+    }
+  }
+
+  /**
+   * One-line description of an image a player sent outside a payment (a flyer, a screenshot of
+   * a schedule, a photo of the court…), so the bot can answer it like a text message.
+   */
+  async describeImage(
+    clubId: string,
+    waId: string,
+    bytes: Buffer,
+    mimeType: string,
+    caption?: string,
+  ): Promise<string | null> {
+    if (this.isRateLimited(waId)) return null
+    const model = process.env.OPENAI_VISION_MODEL ?? chatModel()
+    try {
+      const completion = await this.openai.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Sos el asistente de WhatsApp de un club de pádel. Describí en UNA oración, en español, qué muestra ' +
+              'la imagen y qué parece querer el jugador (por ejemplo: reservar un día/hora, una consulta, un ' +
+              'comprobante de transferencia con su monto). Sin saludos ni opiniones.',
+          },
+          {
+            role: 'user',
+            content: [
+              ...(caption ? [{ type: 'text' as const, text: `Texto que acompaña la imagen: ${caption}` }] : []),
+              { type: 'image_url' as const, image_url: { url: `data:${mimeType};base64,${bytes.toString('base64')}` } },
+            ],
+          },
+        ],
+        ...generationParams(model, 200),
+      })
+      void this.recordUsage(clubId, completionUsage(model, completion.usage))
+      const text = completion.choices[0]?.message?.content?.trim()
+      this.logger.log(`🖼️  Imagen de ${waId} interpretada (${model}): ${logSnippet(text ?? '')}`)
+      return text || null
+    } catch (err) {
+      this.logger.error(`Image description failed for ${waId}`, err)
+      void this.alertAccountFailure(err)
+      return null
+    }
+  }
+
+  /**
+   * Reads a bank/MercadoPago transfer receipt photo into structured fields. Used ONLY to
+   * attribute a transfer to a booking (who paid, which operation): it never confirms anything
+   * by itself — the money still has to show up in the club's MercadoPago. Returns null when
+   * the image can't be read or isn't a receipt.
+   */
+  async readTransferReceipt(
+    clubId: string,
+    waId: string,
+    bytes: Buffer,
+    mimeType: string,
+  ): Promise<ReceiptReading | null> {
+    if (this.isRateLimited(waId)) return null
+    const model = process.env.OPENAI_VISION_MODEL ?? chatModel()
+    try {
+      const completion = await this.openai.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Extraé los datos de un comprobante de transferencia bancaria o de MercadoPago (Argentina). ' +
+              'Si la imagen no es un comprobante de transferencia, isTransferReceipt=false. No inventes datos: ' +
+              'usá null en lo que no se lea con claridad. payerTaxId es el CUIT/CUIL/DNI de QUIEN ENVÍA el dinero ' +
+              '(no el del destinatario), solo dígitos. amount es el importe transferido en pesos (número).',
+          },
+          {
+            role: 'user',
+            content: [{ type: 'image_url', image_url: { url: `data:${mimeType};base64,${bytes.toString('base64')}` } }],
+          },
+        ],
+        response_format: { type: 'json_schema', json_schema: RECEIPT_SCHEMA },
+        ...generationParams(model, 300),
+      })
+      void this.recordUsage(clubId, completionUsage(model, completion.usage))
+      const raw = completion.choices[0]?.message?.content
+      const parsed = raw ? (JSON.parse(raw) as ReceiptReading) : null
+      if (!parsed?.isTransferReceipt) return null
+      this.logger.log(
+        `🧾 Comprobante de ${waId}: monto=${parsed.amount ?? '?'} emisor=${parsed.payerTaxId ? '***' + parsed.payerTaxId.slice(-3) : '?'} op=${parsed.operationNumber ?? '?'}`,
+      )
+      return parsed
+    } catch (err) {
+      this.logger.error(`Receipt reading failed for ${waId}`, err)
+      void this.alertAccountFailure(err)
+      return null
     }
   }
 
@@ -104,6 +246,28 @@ export class LlmService {
     return false
   }
 
+  /**
+   * OpenAI refused because of our account (no credit, bad key): the player only sees "no
+   * entendí" and audios/receipts stop being read until someone fixes it. Ops hears at once
+   * (then hourly per kind while it lasts); never throws.
+   */
+  private async alertAccountFailure(err: unknown): Promise<void> {
+    const failure = openAiAccountFailure(err)
+    if (!failure) return
+    const last = this.accountAlerts.get(failure) ?? 0
+    if (Date.now() - last < OPENAI_ACCOUNT_ALERT_EVERY_MS) return
+    this.accountAlerts.set(failure, Date.now())
+    try {
+      const { status, code } = err as APIError
+      await notifyOps(
+        `${OPENAI_ACCOUNT_ALERTS[failure]} Mientras tanto el bot no entiende mensajes fuera del menú, ` +
+          `audios ni imágenes, comprobantes incluidos (OpenAI ${status}${code ? ` ${code}` : ''}).`,
+      )
+    } catch (alertErr) {
+      this.logger.error('Could not alert ops about an OpenAI account failure', alertErr)
+    }
+  }
+
   // ── Core LLM call ──────────────────────────────────────────────────────────
 
   private async callOpenAI(
@@ -116,7 +280,10 @@ export class LlmService {
     const [club, courts, products] = await Promise.all([
       // botFaq is the club's own Q&A so "¿alquilan paletas?", "¿hay estacionamiento?",
       // "¿puedo pagar en efectivo?" are answered from real config instead of "no lo tengo".
-      this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true, botFaq: true } }),
+      this.prisma.club.findUnique({
+        where: { id: clubId },
+        select: { name: true, botFaq: true, depositMode: true, depositPercent: true },
+      }),
       this.prisma.court.findMany({
         where: { clubId },
         // The real schedule, not just the names: the prompt describes THIS club's bands.
@@ -140,6 +307,7 @@ export class LlmService {
       ctx,
       faq: parseFaq(club?.botFaq),
       products,
+      payment: club ? { mode: club.depositMode, percent: club.depositPercent } : undefined,
     })
 
     const historyMessages: OpenAI.ChatCompletionMessageParam[] = (ctx.history ?? []).map(m => ({
@@ -147,14 +315,13 @@ export class LlmService {
       content: m.content,
     }))
 
-    const model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini'
+    const model = chatModel()
     const completion = await this.openai.chat.completions.create({
       model,
       messages: [{ role: 'system', content: systemPrompt }, ...historyMessages, { role: 'user', content: message }],
       tools: TOOLS,
       tool_choice: 'auto',
-      temperature: 0.3,
-      max_tokens: 400,
+      ...generationParams(model, 400, { withTools: true }),
     })
 
     const { usage } = completion
@@ -170,7 +337,11 @@ export class LlmService {
       )
       // The counters above die with the process. This is the copy that survives, and the
       // only way to know what a club actually costs us.
-      void this.recordUsage(clubId, usage.prompt_tokens, usage.completion_tokens, cost)
+      void this.recordUsage(clubId, {
+        inputTokens: usage.prompt_tokens,
+        outputTokens: usage.completion_tokens,
+        costUsd: cost,
+      })
     }
 
     const choice = completion.choices[0]
@@ -218,6 +389,8 @@ export class LlmService {
     switch (name) {
       case 'navigate_booking':
         return this.handleNavigateBooking(args, state, ctx, clubId)
+      case 'show_competitions':
+        return this.handleShowCompetitions(ctx, clubId)
       default:
         this.logger.error(`LLM called an unknown tool: ${name}`)
         return Promise.resolve(this.inPlace(NOT_UNDERSTOOD, state, ctx))
@@ -225,6 +398,12 @@ export class LlmService {
   }
 
   // ── Tool handlers ──────────────────────────────────────────────────────────
+
+  /** The open torneos and peñas — the same picker the menu's "3" opens. */
+  private async handleShowCompetitions(ctx: SessionContext, clubId: string): Promise<HandlerResult> {
+    const open = await this.competitionSignups.openForPlayers(clubId)
+    return competitionsResult(toCompetitionOptions(open), ctx)
+  }
 
   private async handleNavigateBooking(
     args: BookingToolArgs,
@@ -250,10 +429,11 @@ export class LlmService {
     if (bands.length === 0) {
       // Proactively offer the nearest days with availability instead of dead-ending.
       const suggestions = await this.availability.nextAvailableDates(clubId, date, { excludeDateKey: date })
+      const offerWaitlist = await this.plans.hasFeature(clubId, 'waitlist')
       return {
-        reply: noAvailabilityWithSuggestions(date, suggestions),
+        reply: noAvailabilityWithSuggestions(date, suggestions, offerWaitlist),
         state: BotState.BOOK_DATE,
-        ctx: { ...ctx, waitlistOfferDate: date },
+        ctx: { ...ctx, waitlistOfferDate: offerWaitlist ? date : undefined },
       }
     }
 
@@ -345,13 +525,15 @@ export class LlmService {
   // ── Cost accounting ─────────────────────────────────────────────────────────
 
   /**
-   * Rolls this call into the club's daily OpenAI total (read by the ops console).
+   * Rolls one AI step (understanding a message, transcribing an audio, reading an image) into
+   * the club's daily total: one call plus its tokens and estimated cost, read by the ops console
+   * (OpenAI cost, profitability). Not the club's credits — those count WhatsApp messages.
    *
    * Fire-and-forget and never throws: the player is waiting on a WhatsApp reply, and our
    * accounting is not worth failing their booking over. A dropped row costs us a fraction
    * of a cent of visibility; a thrown error costs a customer.
    */
-  private async recordUsage(clubId: string, inputTokens: number, outputTokens: number, costUsd: number): Promise<void> {
+  private async recordUsage(clubId: string, { inputTokens, outputTokens, costUsd }: StepUsage): Promise<void> {
     const dateKey = todayKey()
     const costMicroUsd = Math.round(costUsd * 1_000_000)
 
@@ -374,8 +556,9 @@ export class LlmService {
 
 // ── Types & pure helpers ─────────────────────────────────────────────────────
 
-/** Prices in USD per 1 M tokens (input / output). Updated June 2025. */
+/** Prices in USD per 1 M tokens (input / output). Updated June 2025; gpt-6-luna October 2026. */
 const MODEL_PRICES: Record<string, { input: number; output: number }> = {
+  'gpt-6-luna': { input: 0.1, output: 0.5 },
   'gpt-4o-mini': { input: 0.15, output: 0.6 },
   'gpt-4o': { input: 2.5, output: 10.0 },
   'gpt-4-turbo': { input: 10.0, output: 30.0 },
@@ -383,9 +566,85 @@ const MODEL_PRICES: Record<string, { input: number; output: number }> = {
   'gpt-3.5-turbo': { input: 0.5, output: 1.5 },
 }
 
+/** The chat model the bot talks with (OPENAI_MODEL, e.g. "gpt-6-luna"). */
+function chatModel(): string {
+  return process.env.OPENAI_MODEL ?? 'gpt-4o-mini'
+}
+
+/**
+ * Sampling/length params differ by model generation: the gpt-4o/3.5 family takes
+ * `temperature` + `max_tokens`, while the newer reasoning models (gpt-5.x, gpt-6-luna…) reject
+ * both — they need `max_completion_tokens` (which also budgets their hidden reasoning, hence
+ * the headroom) and accept `reasoning_effort` (OPENAI_REASONING_EFFORT, default "low", used for
+ * calls without tools such as reading an image).
+ */
+function generationParams(model: string, maxOutputTokens: number, opts: { withTools?: boolean } = {}) {
+  if (/^gpt-(4|3\.5)/.test(model)) return { temperature: 0.3, max_tokens: maxOutputTokens }
+  // Chat Completions rejects function tools combined with any reasoning effort but "none" on
+  // these models (only the Responses API allows both), so a tool call always runs at "none".
+  const effort = (opts.withTools ? 'none' : (process.env.OPENAI_REASONING_EFFORT ?? 'low')) as OpenAI.ReasoningEffort
+  return { max_completion_tokens: maxOutputTokens * 4, reasoning_effort: effort }
+}
+
+function audioExtension(mimeType: string): string {
+  if (mimeType.includes('mpeg') || mimeType.includes('mp3')) return '.mp3'
+  if (mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')) return '.m4a'
+  if (mimeType.includes('wav')) return '.wav'
+  return '.ogg' // WhatsApp voice notes: audio/ogg; codecs=opus
+}
+
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
-  const prices = MODEL_PRICES[model] ?? MODEL_PRICES['gpt-4o-mini']
+  const override = modelPriceOverride()
+  const prices = override ?? MODEL_PRICES[model] ?? MODEL_PRICES['gpt-4o-mini']
   return (inputTokens * prices.input + outputTokens * prices.output) / 1_000_000
+}
+
+/** Tokens and estimated cost of one AI step. */
+interface StepUsage {
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+}
+
+/** A chat completion (text or image) as a step; no usage reported → counted, priced at $0. */
+function completionUsage(model: string, usage: OpenAI.CompletionUsage | undefined): StepUsage {
+  if (!usage) return { inputTokens: 0, outputTokens: 0, costUsd: 0 }
+  return {
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    costUsd: estimateCost(model, usage.prompt_tokens, usage.completion_tokens),
+  }
+}
+
+/**
+ * Transcription list prices (gpt-4o-mini-transcribe): USD per 1M audio-input / text-output
+ * tokens, or per minute when the API reports a duration. Only the ops cost column reads them —
+ * the credit counts the step, whatever it costs.
+ */
+const TRANSCRIBE_PRICES = { input: 3, output: 5, perMinute: 0.003 }
+
+function transcriptionUsage(usage: OpenAI.Audio.Transcription['usage']): StepUsage {
+  if (usage?.type === 'tokens') {
+    return {
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      costUsd:
+        (usage.input_tokens * TRANSCRIBE_PRICES.input + usage.output_tokens * TRANSCRIBE_PRICES.output) / 1_000_000,
+    }
+  }
+  const seconds = usage?.type === 'duration' ? usage.seconds : 0
+  return { inputTokens: 0, outputTokens: 0, costUsd: (seconds / 60) * TRANSCRIBE_PRICES.perMinute }
+}
+
+/**
+ * Which account-level failure an OpenAI error is, if any. A plain 429 (rate_limit_exceeded) or a
+ * 5xx passes on its own and isn't ours to fix, so it stays a log line.
+ */
+function openAiAccountFailure(err: unknown): OpenAiAccountFailure | null {
+  if (!(err instanceof APIError)) return null
+  if (err.status === 429 && err.code === 'insufficient_quota') return 'quota'
+  if (err.status === 401) return 'auth'
+  return null
 }
 
 /** One-line, length-capped version of a message for clean console logs. */
@@ -441,4 +700,57 @@ export function validBookingDate(raw: string, today: string = todayKey()): strin
   const [ty, tm, td] = today.split('-').map(Number)
   const daysAhead = (probe.getTime() - Date.UTC(ty, tm - 1, td)) / 86_400_000
   return daysAhead <= MAX_BOOKING_HORIZON_DAYS ? key : null
+}
+
+/**
+ * USD per 1M tokens for a model missing from MODEL_PRICES (e.g. a model newer than this table):
+ * OPENAI_PRICE_INPUT_PER_MTOK / OPENAI_PRICE_OUTPUT_PER_MTOK. Without it the cost log falls back
+ * to gpt-4o-mini prices, which would under-report a pricier model.
+ */
+function modelPriceOverride(): { input: number; output: number } | null {
+  const input = Number(process.env.OPENAI_PRICE_INPUT_PER_MTOK)
+  const output = Number(process.env.OPENAI_PRICE_OUTPUT_PER_MTOK)
+  return Number.isFinite(input) && Number.isFinite(output) && input > 0 ? { input, output } : null
+}
+
+/** The chat model and what it costs per million tokens (USD), as the cost log prices it. */
+export function chatModelPricing(): {
+  model: string
+  inputPerMTok: number
+  outputPerMTok: number
+  /** True when the model has no known price and gpt-4o-mini's stands in for it. */
+  estimated: boolean
+} {
+  const model = chatModel()
+  const known = modelPriceOverride() ?? MODEL_PRICES[model]
+  const prices = known ?? MODEL_PRICES['gpt-4o-mini']
+  return { model, inputPerMTok: prices.input, outputPerMTok: prices.output, estimated: !known }
+}
+
+/** What a transfer receipt photo says. Every field may be null when it isn't legible. */
+export interface ReceiptReading {
+  isTransferReceipt: boolean
+  amount: number | null
+  payerName: string | null
+  payerTaxId: string | null
+  operationNumber: string | null
+  destination: string | null
+}
+
+const RECEIPT_SCHEMA = {
+  name: 'transfer_receipt',
+  strict: true,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['isTransferReceipt', 'amount', 'payerName', 'payerTaxId', 'operationNumber', 'destination'],
+    properties: {
+      isTransferReceipt: { type: 'boolean' },
+      amount: { type: ['number', 'null'] },
+      payerName: { type: ['string', 'null'] },
+      payerTaxId: { type: ['string', 'null'] },
+      operationNumber: { type: ['string', 'null'] },
+      destination: { type: ['string', 'null'] },
+    },
+  },
 }

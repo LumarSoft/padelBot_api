@@ -243,7 +243,8 @@ export class MercadoPagoService {
   /**
    * Verifies the HMAC-SHA256 signature MercadoPago sends in the x-signature header.
    * Format: "ts=<unix_ts>,v1=<hmac_hex>"
-   * Signed template: "id:<data.id>;request-id:<x-request-id>;ts:<ts>"
+   * Signed manifest (MercadoPago's docs): "id:<data.id>;request-id:<x-request-id>;ts:<ts>;" —
+   * with the trailing ";", `data.id` lowercased, and any part MercadoPago didn't send left out.
    * Skips verification when WEBHOOK_SECRET is not configured — but only outside production,
    * so a missing/misconfigured secret disables the local-dev convenience instead of silently
    * accepting unsigned payment webhooks in prod.
@@ -254,12 +255,12 @@ export class MercadoPagoService {
 
     if (!xSignature) return false
 
-    const parts = xSignature.split(',')
+    const parts = xSignature.split(',').map(p => p.trim())
     const ts = parts.find(p => p.startsWith('ts='))?.slice(3)
     const v1 = parts.find(p => p.startsWith('v1='))?.slice(3)
     if (!ts || !v1) return false
 
-    const message = `id:${dataId};request-id:${xRequestId};ts:${ts}`
+    const message = webhookManifest(dataId, xRequestId, ts)
     const expected = createHmac('sha256', secret).update(message).digest('hex')
 
     try {
@@ -268,4 +269,10 @@ export class MercadoPagoService {
       return false
     }
   }
+}
+
+/** The string MercadoPago signs for a webhook: present parts only, each ended by ";". */
+export function webhookManifest(dataId: string, xRequestId: string, ts: string): string {
+  const parts = [dataId && `id:${dataId.toLowerCase()}`, xRequestId && `request-id:${xRequestId}`, `ts:${ts}`]
+  return parts.filter(Boolean).join(';') + ';'
 }

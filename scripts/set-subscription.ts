@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import { PrismaMariaDb } from '@prisma/adapter-mariadb'
 import { PrismaClient, SubscriptionStatus } from '../generated/prisma/client'
+import { PLAN_KEYS, isPlanKey } from '../src/plans/lib/plans'
 
 /**
  * Ops tool for MANUAL billing: flips a club's GTP subscription after a
@@ -11,16 +12,16 @@ import { PrismaClient, SubscriptionStatus } from '../generated/prisma/client'
  *   npm run subscription -- --club club-demo                        # show current state
  *   npm run subscription -- --club club-demo --status ACTIVE --months 1
  *   npm run subscription -- --club club-demo --status PAST_DUE
- *   npm run subscription -- --club club-demo --status TRIAL --days 14
+ *   npm run subscription -- --club club-demo --status TRIAL --days 15
  *   npm run subscription -- --club club-demo --status CANCELLED
- *   npm run subscription -- --club club-demo --plan pro
+ *   npm run subscription -- --club club-demo --plan bandeja
  *
  * Flags:
  *   --club <slug>      club slug (required)
  *   --status <status>  TRIAL | ACTIVE | PAST_DUE | CANCELLED
  *   --months <n>       with ACTIVE: paid months from now → currentPeriodEnd (default 1)
- *   --days <n>         with TRIAL: trial days from now → trialEndsAt (default 14)
- *   --plan <name>      base | pro
+ *   --days <n>         with TRIAL: trial days from now → trialEndsAt (default 15)
+ *   --plan <key>       saque | bandeja | smash
  */
 
 function flag(name: string): string | undefined {
@@ -59,6 +60,11 @@ async function main(): Promise<void> {
   const plan = flag('plan')
   if (!status && !plan) return
 
+  if (plan && !isPlanKey(plan)) {
+    console.error(`Invalid --plan. Use one of: ${PLAN_KEYS.join(', ')}`)
+    process.exit(1)
+  }
+
   if (status && !Object.values(SubscriptionStatus).includes(status)) {
     console.error(`Invalid --status. Use one of: ${Object.values(SubscriptionStatus).join(', ')}`)
     process.exit(1)
@@ -74,7 +80,7 @@ async function main(): Promise<void> {
       data.currentPeriodEnd = new Date(Date.now() + months * 30 * DAY_MS)
     }
     if (status === 'TRIAL') {
-      const days = Number(flag('days') ?? 14)
+      const days = Number(flag('days') ?? 15)
       data.trialEndsAt = new Date(Date.now() + days * DAY_MS)
     }
   }

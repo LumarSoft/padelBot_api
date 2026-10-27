@@ -15,10 +15,12 @@ import {
   Delete,
 } from '@nestjs/common'
 import { Response } from 'express'
+import { DeskAction } from 'generated/prisma/client'
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { AuthenticatedUser } from '../auth/types/jwt-payload'
 import { BookingsService } from './bookings.service'
+import { RecordsDeskAction } from '../help/lib/desk-action.decorator'
 import { ReceiptStorageService } from '../storage/receipt-storage.service'
 import { CreateBookingDto } from './dto/create-booking.dto'
 import { RescheduleBookingDto } from './dto/reschedule-booking.dto'
@@ -26,6 +28,7 @@ import { QueryBookingsDto } from './dto/query-bookings.dto'
 import { LocalPaymentDto } from './dto/local-payment.dto'
 import { AddPlayerPaymentDto } from './dto/add-player-payment.dto'
 import { SetBookingProductsDto } from './dto/set-booking-products.dto'
+import { SetAttendanceDto } from './dto/set-attendance.dto'
 
 @Controller('bookings')
 @UseGuards(JwtAuthGuard)
@@ -74,6 +77,13 @@ export class BookingsController {
     return this.bookingsService.cancel(user.clubId, id)
   }
 
+  /** The front desk records a fijo's answer by hand ("confirmó" / "no viene" after calling them). */
+  @Patch(':id/attendance')
+  @HttpCode(HttpStatus.OK)
+  setAttendance(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: SetAttendanceDto) {
+    return this.bookingsService.setAttendance(user.clubId, id, dto.confirmed)
+  }
+
   /** Soft-deletes a CANCELLED reservation so it drops out of the club's lists (staff or owner). */
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
@@ -90,6 +100,7 @@ export class BookingsController {
   /** Registers one player's payment toward the bill; settles the turno when it's covered. */
   @Post(':id/payments')
   @HttpCode(HttpStatus.OK)
+  @RecordsDeskAction(DeskAction.DESK_PAYMENT)
   addPlayerPayment(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: AddPlayerPaymentDto) {
     return this.bookingsService.addPlayerPayment(user.clubId, id, dto)
   }
@@ -108,6 +119,7 @@ export class BookingsController {
   /** Records a front-desk collection (cash / club QR) so the daily cash closure adds up. */
   @Patch(':id/local-payment')
   @HttpCode(HttpStatus.OK)
+  @RecordsDeskAction(DeskAction.DESK_PAYMENT, (body: LocalPaymentDto) => body?.amountCents > 0)
   setLocalPayment(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: LocalPaymentDto) {
     return this.bookingsService.setLocalPayment(user.clubId, id, dto)
   }
@@ -126,12 +138,14 @@ export class BookingsController {
   }
 
   @Patch(':id/reschedule')
+  @RecordsDeskAction(DeskAction.RESCHEDULE)
   reschedule(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: RescheduleBookingDto) {
     return this.bookingsService.reschedule(user.clubId, id, dto)
   }
 
   @Put(':id/products')
+  @RecordsDeskAction(DeskAction.CONSUMPTION, (body: SetBookingProductsDto) => body?.items?.length > 0)
   setProducts(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: SetBookingProductsDto) {
-    return this.bookingsService.setBookingProducts(user.clubId, id, dto)
+    return this.bookingsService.setBookingProducts(user.clubId, id, dto, parseInt(user.id, 10))
   }
 }

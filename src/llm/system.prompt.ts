@@ -1,3 +1,4 @@
+import type { DepositMode } from 'generated/prisma/client'
 import { CLUB_TIMEZONE } from '../availability/lib/datetime'
 import { CourtSchedule, generateBands } from '../availability/lib/schedule'
 import { BotState, SessionContext } from '../bot/types'
@@ -25,6 +26,8 @@ export interface SystemPromptParams {
   faq?: FaqEntry[]
   /** Active club products the bot may quote when asked (paddles, balls, drinks…). */
   products?: PromptProduct[]
+  /** What the club charges up front to confirm a booking. Omitted = not stated in the prompt. */
+  payment?: { mode: DepositMode; percent: number }
 }
 
 /**
@@ -65,6 +68,8 @@ fecha u horario en contexto de reserva. Extraé del mensaje y del historial todo
 El jugador NO necesita elegir cancha: el sistema le muestra los horarios libres y le asigna una
 cancha sola (solo pregunta cuál si el mismo horario está libre en varias). Pasá courtName solo si
 el jugador pide una cancha puntual; si menciona una hora, pasá siempre timePreference.
+show_competitions → el jugador pregunta por torneos, peñas o americanos, o quiere anotarse a uno.
+Nunca inventes torneos, fechas ni precios: los que hay solo los sabés llamando a esta función.
 Texto (sin función) → saludos, agradecimientos y preguntas generales sin fecha específica.
 
 ⚠️ Ver o CANCELAR turnos ya reservados lo maneja el sistema, no vos. Si el jugador quiere ver
@@ -79,7 +84,7 @@ solo elige cuál. Nunca le digas que le escriba al club para eso, ni prometas ca
 • Lenguaje inapropiado o datos de terceros → redirigí con calma; no compartas datos ajenos.`
 
 export function buildSystemPrompt(params: SystemPromptParams): string {
-  const { clubName, courts, currentDate, state, playerName, ctx, faq, products } = params
+  const { clubName, courts, currentDate, state, playerName, ctx, faq, products, payment } = params
 
   const playerLine = playerName ? `Jugador actual: *${playerName}*` : 'Nombre del jugador: desconocido'
   const stateCtx = buildStateContext(state, ctx)
@@ -89,7 +94,7 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
 
 ━━━ DATOS DEL CLUB ━━━
 Club: *${clubName}*
-Fecha y hora actual: ${currentDate}
+Fecha y hora actual: ${currentDate}${describePayment(payment)}
 Canchas y franjas (esquema, NO disponibilidad):
 ${describeSchedule(courts)}${describeKnowledge(faq, products)}
 
@@ -123,6 +128,32 @@ function describeSchedule(courts: PromptCourt[]): string {
       return `  • ${court.name} (turnos de ${court.slotDurationMinutes} min): ${starts.join(' · ')}`
     })
     .join('\n')
+}
+
+/**
+ * What the club charges up front, so "¿hay que pagar seña?" is answered from the club's real
+ * policy instead of a guess — and a club that charges nothing never hears the bot ask for a
+ * transfer. The amount and the alias are never stated here: the booking step gives them.
+ */
+function describePayment(payment?: SystemPromptParams['payment']): string {
+  if (!payment) return ''
+  switch (payment.mode) {
+    case 'NONE':
+      return (
+        `\nCobro: este club NO pide seña ni pago por adelantado. Al confirmar, la reserva queda ` +
+        `confirmada al instante y el turno se abona en el club. Nunca pidas transferencias, alias ni comprobantes.`
+      )
+    case 'FULL':
+      return (
+        `\nCobro: para confirmar, el jugador transfiere el precio total del turno. El importe y el ` +
+        `alias se los da el sistema al confirmar; no los inventes.`
+      )
+    default:
+      return (
+        `\nCobro: para confirmar, el jugador transfiere una seña del ${payment.percent}% del precio del ` +
+        `turno y el resto lo abona en el club. El importe y el alias se los da el sistema al confirmar; no los inventes.`
+      )
+  }
 }
 
 /**

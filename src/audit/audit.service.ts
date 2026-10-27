@@ -1,16 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common'
-import type { AuditAction, AuditActorType, AuditSource } from 'generated/prisma/client'
+import type { AuditAction, AuditActorType, AuditSource, Prisma } from 'generated/prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { getAuditContext } from './lib/audit-context'
 
 /** Never let a secret reach the audit log, not even as a "previous value". */
-const SENSITIVE_FIELDS = new Set([
-  'password',
-  'tokenHash',
-  'mpAccessToken',
-  'mpRefreshToken',
-  'token',
-])
+const SENSITIVE_FIELDS = new Set(['password', 'tokenHash', 'mpAccessToken', 'mpRefreshToken', 'token'])
 const REDACTED = '[REDACTADO]'
 
 export interface AuditChange {
@@ -75,9 +69,10 @@ export class AuditService {
           entity: input.entity,
           entityId: input.entityId,
           summary: input.summary,
-          before: before ?? undefined,
-          after: after ?? undefined,
-          changes: changes && changes.length > 0 ? changes : undefined,
+          // Plain snapshots and diffs are JSON-safe by construction (see sanitize()).
+          before: (before ?? undefined) as Prisma.InputJsonValue | undefined,
+          after: (after ?? undefined) as Prisma.InputJsonValue | undefined,
+          changes: changes && changes.length > 0 ? (changes as unknown as Prisma.InputJsonValue) : undefined,
           ip: context?.ip ?? null,
           userAgent: context?.userAgent ?? null,
         },
