@@ -154,7 +154,8 @@ export class RecurringBookingsService {
    *
    * Logic per occurrence:
    * - Slot missing  → create it as BOOKED, then create a Booking
-   * - Slot AVAILABLE → flip to BOOKED, then create a Booking
+   * - Slot AVAILABLE → take it with a conditional flip to BOOKED; only if the flip wins,
+   *   create a Booking (a band taken concurrently by someone else is skipped)
    * - Slot BOOKED / BLOCKED → skip (occupied by someone else or already done)
    */
   private async applyForWeeksAhead(
@@ -218,55 +219,67 @@ export class RecurringBookingsService {
       // BOOKED / BLOCKED → skip silently
     }
 
-    // Create missing slots one-by-one (MySQL's createMany doesn't return IDs)
-    let createdIds: string[] = []
-    if (toCreate.length > 0) {
-      try {
-        const created = await this.prisma.$transaction(
-          toCreate.map(data => this.prisma.slot.create({ data, select: { id: true } })),
-        )
-        createdIds = created.map(s => s.id)
-      } catch (error) {
-        // A slot for one of these occurrences was created concurrently (admin or
-        // bot) after our findMany. The unique index on (courtId, startsAt) rolls
-        // the batch back — surface a retryable conflict instead of a raw 500.
-        if (isUniqueConstraintError(error)) {
-          throw new ConflictException('Conflicto de turnos simultáneo, volvé a intentar')
-        }
-        throw error
+    if (toCreate.length === 0 && toBook.length === 0) return 0
+
+    // Everything below runs in ONE transaction, and every write is its own guard. Having read
+    // a slot as AVAILABLE a moment ago is NOT a guard: a player can take that band on WhatsApp
+    // (or the front desk can) between our findMany and these writes. So:
+    //  - a missing band is materialized with an INSERT — the unique index (courtId, startsAt)
+    //    rejects it if someone created the slot concurrently;
+    //  - an AVAILABLE band is taken with a conditional `UPDATE … WHERE status = AVAILABLE`;
+    //    when we lose that race (count = 0) the occurrence is skipped, exactly like a band
+    //    that was already BOOKED when we read it.
+    // Only the slots we actually took get a Booking, so a fijo can never stack a second
+    // CONFIRMED booking on a band another player already holds (RN: one active booking per band).
+    try {
+      return await this.prisma.$transaction(
+        async tx => {
+          const taken: string[] = []
+
+          // MySQL's createMany doesn't return IDs — create one by one.
+          for (const data of toCreate) {
+            const created = await tx.slot.create({ data, select: { id: true } })
+            taken.push(created.id)
+          }
+
+          for (const slotId of toBook) {
+            const { count } = await tx.slot.updateMany({
+              where: { id: slotId, clubId, status: SlotStatus.AVAILABLE },
+              data: { status: SlotStatus.BOOKED },
+            })
+            if (count === 1) taken.push(slotId)
+          }
+
+          // Fixed (recurring) turns are CONFIRMED on creation — they are blocked by the club,
+          // NOT a pending-payment flow, so they never show up as a "pago por confirmar" and
+          // never expire.
+          for (const slotId of taken) {
+            await tx.booking.create({
+              data: {
+                slotId,
+                clubId,
+                playerName: dto.playerName,
+                playerPhone: dto.playerPhone,
+                recurringBookingId,
+                status: 'CONFIRMED',
+              },
+            })
+          }
+
+          return taken.length
+        },
+        // Up to MAX_WEEKS_AHEAD occurrences, two writes each.
+        { timeout: 30_000 },
+      )
+    } catch (error) {
+      // A slot for one of these occurrences was created concurrently (admin or bot) after our
+      // findMany. The unique index on (courtId, startsAt) rolls the whole batch back — surface
+      // a retryable conflict instead of a raw 500.
+      if (isUniqueConstraintError(error)) {
+        throw new ConflictException('Conflicto de turnos simultáneo, volvé a intentar')
       }
+      throw error
     }
-
-    // Flip AVAILABLE → BOOKED
-    if (toBook.length > 0) {
-      await this.prisma.slot.updateMany({
-        where: { id: { in: toBook } },
-        data: { status: SlotStatus.BOOKED },
-      })
-    }
-
-    const allSlotIds = [...createdIds, ...toBook]
-    if (allSlotIds.length === 0) return 0
-
-    // Create a Booking record for each newly-booked slot. Fixed (recurring) turns are
-    // CONFIRMED on creation — they are blocked by the club, NOT a pending-payment flow, so
-    // they never show up as a "pago por confirmar" and never expire.
-    await this.prisma.$transaction(
-      allSlotIds.map(slotId =>
-        this.prisma.booking.create({
-          data: {
-            slotId,
-            clubId,
-            playerName: dto.playerName,
-            playerPhone: dto.playerPhone,
-            recurringBookingId,
-            status: 'CONFIRMED',
-          },
-        }),
-      ),
-    )
-
-    return allSlotIds.length
   }
 
   /**
